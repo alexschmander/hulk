@@ -43,6 +43,26 @@ impl LiveVisualOdometryLocalization {
         self.try_reset_pending(visual_odometer_cache, camera_matrix_cache);
     }
 
+    pub(crate) fn reset_with_exact_samples(
+        &mut self,
+        result: &OptimizationResult,
+        visual_odometer: &VisualOdometer,
+        camera_matrix: &CameraMatrix,
+    ) -> bool {
+        let time = Time::from_wallclock(result.time);
+        if visual_odometer.time != time {
+            return false;
+        }
+
+        self.anchor = Some(live_visual_odometry_anchor_from_exact_samples(
+            result,
+            visual_odometer,
+            camera_matrix,
+        ));
+        self.pending_result = None;
+        true
+    }
+
     pub(crate) fn try_reset_pending(
         &mut self,
         visual_odometer_cache: &VisualOdometerCache,
@@ -78,19 +98,29 @@ impl LiveVisualOdometryLocalization {
             self.anchor = None;
             return None;
         }
+        let current_camera_matrix =
+            fresh_camera_matrix(camera_matrix_cache, current_odometer.time)?;
+        self.update_with_exact_sample(current_odometer, &current_camera_matrix.inner)
+    }
+
+    pub(crate) fn update_with_exact_sample(
+        &mut self,
+        current_odometer: &VisualOdometer,
+        current_camera_matrix: &CameraMatrix,
+    ) -> Option<Isometry3<Field, Robot>> {
+        if current_odometer.epoch != self.anchor.as_ref()?.odometer_epoch {
+            self.anchor = None;
+            return None;
+        }
         let anchor = self.anchor.as_ref()?;
         if current_odometer.time <= anchor.time {
-            let current_camera_matrix =
-                fresh_camera_matrix(camera_matrix_cache, current_odometer.time)?;
             return Some(localization_transform_constrained_to_ground(
                 &anchor.robot_to_field,
-                &current_camera_matrix.inner.ground_to_robot,
+                &current_camera_matrix.ground_to_robot,
             ));
         }
 
-        let current_camera_matrix =
-            fresh_camera_matrix(camera_matrix_cache, current_odometer.time)?;
-        let current_robot_to_camera = robot_to_camera(&current_camera_matrix.inner).inner;
+        let current_robot_to_camera = robot_to_camera(current_camera_matrix).inner;
         let current_camera_to_anchor_camera = anchor.left_camera_to_visual_odometer.inverse()
             * current_odometer.current_left_camera_to_visual_odometer;
         let current_robot_to_anchor_robot = anchor.robot_to_camera.inverse()
@@ -100,7 +130,7 @@ impl LiveVisualOdometryLocalization {
 
         Some(localization_transform_constrained_to_ground(
             &current_robot_to_field,
-            &current_camera_matrix.inner.ground_to_robot,
+            &current_camera_matrix.ground_to_robot,
         ))
     }
 }
@@ -113,14 +143,25 @@ fn live_visual_odometry_anchor(
 ) -> Option<LiveVisualOdometryAnchor> {
     let left_camera_to_visual_odometer = odometer_at(visual_odometer_cache, time)?;
     let camera_matrix = fresh_camera_matrix(camera_matrix_cache, time)?;
-    Some(LiveVisualOdometryAnchor {
-        time,
-        odometer_epoch: left_camera_to_visual_odometer.epoch,
+    Some(live_visual_odometry_anchor_from_exact_samples(
+        result,
+        &left_camera_to_visual_odometer,
+        &camera_matrix.inner,
+    ))
+}
+
+fn live_visual_odometry_anchor_from_exact_samples(
+    result: &OptimizationResult,
+    visual_odometer: &VisualOdometer,
+    camera_matrix: &CameraMatrix,
+) -> LiveVisualOdometryAnchor {
+    LiveVisualOdometryAnchor {
+        time: Time::from_wallclock(result.time),
+        odometer_epoch: visual_odometer.epoch,
         robot_to_field: result.transform,
-        left_camera_to_visual_odometer: left_camera_to_visual_odometer
-            .current_left_camera_to_visual_odometer,
-        robot_to_camera: robot_to_camera(&camera_matrix.inner).inner,
-    })
+        left_camera_to_visual_odometer: visual_odometer.current_left_camera_to_visual_odometer,
+        robot_to_camera: robot_to_camera(camera_matrix).inner,
+    }
 }
 
 fn odometer_at(visual_odometer_cache: &VisualOdometerCache, time: Time) -> Option<VisualOdometer> {

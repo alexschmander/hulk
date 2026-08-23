@@ -200,7 +200,9 @@ fn candidate_landmarks(field: &FieldDimensions) -> Vec<Landmark> {
         .collect()
 }
 
-fn candidate_points(field: &FieldDimensions) -> Vec<(VisualFeatureClass, Point2<Field>)> {
+pub(crate) fn candidate_points(
+    field: &FieldDimensions,
+) -> Vec<(VisualFeatureClass, Point2<Field>)> {
     let mut points = Vec::new();
     points.extend(
         goalpost_candidates(field)

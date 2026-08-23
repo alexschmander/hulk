@@ -11,6 +11,7 @@ pub(crate) use associator::{
 };
 pub(crate) use config::GLOBAL_LOCALIZER_MAX_DETECTIONS;
 pub use config::{GlobalAssociationConfig, PoseHintAssociationConfig};
+pub(crate) use map::candidate_points;
 pub(crate) use types::{FEATURE_CLASSES, FeatureAssociation, FeatureAssociations};
 pub use types::{
     GlobalLocalizationDebugAssociation, GlobalLocalizationDebugDetection,

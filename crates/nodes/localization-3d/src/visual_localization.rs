@@ -17,9 +17,12 @@ use types::{
 use crate::live_odometry::LiveVisualOdometryLocalization;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GlobalVisualLock {
+pub enum GlobalVisualLock {
+    /// No globally certified field pose has been accepted.
     Unlocked,
+    /// A global reset was ingested and awaits a corresponding backend result.
     WaitingForBackend,
+    /// A post-reset backend result established global localization.
     Locked,
 }
 

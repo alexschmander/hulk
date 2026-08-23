@@ -1,5 +1,5 @@
-use coordinate_systems::{Camera, Robot};
-use linear_algebra::Isometry3;
+use coordinate_systems::{Camera, Field, Robot};
+use linear_algebra::{Isometry3, Point2};
 use projection::camera_matrix::CameraMatrix;
 
 mod api;
@@ -35,6 +35,45 @@ pub use types::visual_localization::{
     VisualLocalizationFrame as FieldMarkAssociations,
 };
 
+/// A semantic point landmark used by the production global-localization map.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldFeatureLandmark {
+    /// Semantic class used by production global association.
+    pub class: VisualFeatureClass,
+    /// Landmark position on the field plane.
+    pub position: Point2<Field>,
+}
+
+/// Returns the exact semantic point landmarks used by production field-mark association.
+pub fn field_feature_landmarks(
+    field_dimensions: &types::field_dimensions::FieldDimensions,
+) -> Vec<FieldFeatureLandmark> {
+    global_association::candidate_points(field_dimensions)
+        .into_iter()
+        .map(|(class, position)| FieldFeatureLandmark { class, position })
+        .collect()
+}
+
 pub(crate) fn robot_to_camera(camera_matrix: &CameraMatrix) -> Isometry3<Robot, Camera> {
     camera_matrix.head_to_camera * camera_matrix.robot_to_head
+}
+
+#[cfg(test)]
+mod public_map_tests {
+    use super::*;
+
+    #[test]
+    fn public_landmarks_match_the_production_map() {
+        let landmarks =
+            field_feature_landmarks(&types::field_dimensions::FieldDimensions::SPL_2025);
+
+        assert_eq!(landmarks.len(), 31);
+        assert_eq!(
+            landmarks
+                .iter()
+                .filter(|landmark| landmark.class == VisualFeatureClass::GoalPost)
+                .count(),
+            4
+        );
+    }
 }
