@@ -10,6 +10,8 @@ use types::field_dimensions::FieldDimensions;
 #[derive(Clone, Debug, Deserialize, Serialize, Message)]
 #[serde(deny_unknown_fields)]
 pub struct Localization3dParameters {
+    /// Translational white-noise-on-acceleration spectral density.
+    pub accelerometer_process_noise_variance: f64,
     /// Pixel residual variance for accepted visual feature associations.
     pub visual_feature_noise_variance: f64,
     /// Pixel residual variance for lower-trust pose-hint visual feature associations.
@@ -22,6 +24,11 @@ pub struct Localization3dParameters {
 
 impl Localization3dParameters {
     pub(crate) fn validate(&self) -> std::result::Result<(), String> {
+        if !self.accelerometer_process_noise_variance.is_finite()
+            || self.accelerometer_process_noise_variance <= 0.0
+        {
+            return Err("accelerometer_process_noise_variance must be finite and > 0".to_string());
+        }
         if !self.visual_feature_noise_variance.is_finite()
             || self.visual_feature_noise_variance <= 0.0
         {
@@ -51,6 +58,7 @@ pub(crate) fn backend_configuration_from_parameters_and_field_dimensions(
     field_dimensions: &FieldDimensions,
 ) -> BackendConfiguration {
     backend_configuration_with_pose_hint(
+        parameters.accelerometer_process_noise_variance,
         parameters.visual_feature_noise_variance,
         parameters.pose_hint_visual_feature_noise_variance,
         parameters.pose_hint_visual_huber_threshold,
@@ -60,6 +68,7 @@ pub(crate) fn backend_configuration_from_parameters_and_field_dimensions(
 }
 
 fn backend_configuration_with_pose_hint(
+    accelerometer_process_noise_variance: f64,
     visual_feature_noise_variance: f64,
     pose_hint_visual_feature_noise_variance: f64,
     pose_hint_visual_huber_threshold: f64,
@@ -81,7 +90,7 @@ fn backend_configuration_with_pose_hint(
         use_accelerometer_measurements: false,
         gyroscope_process_noise: process_noise,
         roll_pitch_yaw_noise: Matrix3::from_diagonal(&Vector3::new(0.01, 0.01, 0.00001)),
-        accelerometer_process_noise: process_noise,
+        accelerometer_process_noise: Matrix3::identity() * accelerometer_process_noise_variance,
         visual_feature_noise: Matrix2::identity() * visual_feature_noise_variance,
         pose_hint_visual_feature_noise: Matrix2::identity()
             * pose_hint_visual_feature_noise_variance,

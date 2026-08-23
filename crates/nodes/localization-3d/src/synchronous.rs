@@ -218,6 +218,7 @@ mod tests {
 
     fn parameters() -> Localization3dParameters {
         Localization3dParameters {
+            accelerometer_process_noise_variance: 10.0,
             visual_feature_noise_variance: 1.0,
             pose_hint_visual_feature_noise_variance: 4.0,
             pose_hint_visual_huber_threshold: 2.0,

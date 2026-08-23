@@ -140,10 +140,20 @@ fn init_interval_states(
     let start = State(interval_start_index);
     let end = State(interval_start_index + 1);
 
-    if values.init_if_missing(&initial_state.pose, start, false) {
+    if values.init_if_missing(
+        &initial_state.pose,
+        start,
+        false,
+        config.knot_spacing.as_secs_f64(),
+    ) {
         add_field_containment_factor(graph, start, config);
     }
-    if values.init_if_missing(&initial_state.pose, end, is_empty_bridge_interval) {
+    if values.init_if_missing(
+        &initial_state.pose,
+        end,
+        is_empty_bridge_interval,
+        config.knot_spacing.as_secs_f64(),
+    ) {
         add_field_containment_factor(graph, end, config);
         let gp_residual = if is_empty_bridge_interval {
             GaussianProcessPriorFactor::new_zero_start_velocity_bridge(
@@ -166,11 +176,23 @@ fn init_interval_states(
 }
 
 trait InitStateExt {
-    fn init_if_missing(&mut self, initial: &SE23, index: State, reset_velocity: bool) -> bool;
+    fn init_if_missing(
+        &mut self,
+        initial: &SE23,
+        index: State,
+        reset_velocity: bool,
+        duration: f64,
+    ) -> bool;
 }
 
 impl InitStateExt for Values {
-    fn init_if_missing(&mut self, initial: &SE23, index: State, reset_velocity: bool) -> bool {
+    fn init_if_missing(
+        &mut self,
+        initial: &SE23,
+        index: State,
+        reset_velocity: bool,
+        duration: f64,
+    ) -> bool {
         if self.get(index).is_some() {
             return false;
         }
@@ -186,7 +208,11 @@ impl InitStateExt for Values {
             if reset_velocity {
                 zero_velocity_pose(previous)
             } else {
-                previous.clone()
+                SE23::from_rot_vel_trans(
+                    previous.rot().clone(),
+                    previous.uvw().into_owned(),
+                    previous.xyz() + previous.uvw() * duration,
+                )
             },
         );
         true

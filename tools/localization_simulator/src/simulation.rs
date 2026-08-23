@@ -607,4 +607,51 @@ mod tests {
         assert!((estimate.translation.vector - truth.translation.vector).norm() < 0.01);
         assert!(estimate.rotation.angle_to(&truth.rotation) < 0.5_f32.to_radians());
     }
+
+    #[test]
+    fn exact_figure_eight_does_not_lag_behind_truth() {
+        let mut simulation = LocalizationSimulation::new(
+            Scenario::field_figure_eight_twice(),
+            SimulationConfig {
+                landmark_pixel_sigma: 0.0,
+                vo_translation_sigma_m: 0.0,
+                vo_rotation_sigma_rad: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("simulation initializes");
+        simulation.run_to_end().expect("simulation runs");
+
+        let mut squared_errors = 0.0;
+        let mut along_track_errors = 0.0;
+        let mut sample_count = 0;
+        for samples in simulation.history.windows(3) {
+            let [previous, current, next] = samples else {
+                unreachable!("windows have length three")
+            };
+            let estimate = current
+                .live_robot_to_field
+                .expect("known reset establishes live localization")
+                .inner;
+            let truth = current.truth_robot_to_field.inner;
+            let error = estimate.translation.vector - truth.translation.vector;
+            let direction = (next.truth_robot_to_field.inner.translation.vector
+                - previous.truth_robot_to_field.inner.translation.vector)
+                .normalize();
+            squared_errors += error.norm_squared();
+            along_track_errors += error.dot(&direction);
+            sample_count += 1;
+        }
+        let translation_rms = (squared_errors / sample_count as f32).sqrt();
+        let mean_along_track_error = along_track_errors / sample_count as f32;
+
+        assert!(
+            translation_rms < 0.1,
+            "translation RMS was {translation_rms}"
+        );
+        assert!(
+            mean_along_track_error.abs() < 0.02,
+            "mean along-track error was {mean_along_track_error}"
+        );
+    }
 }

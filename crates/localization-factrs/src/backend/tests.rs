@@ -62,6 +62,31 @@ fn backend_configuration() -> BackendConfiguration {
     }
 }
 
+#[test]
+fn new_interval_state_is_initialized_with_constant_velocity() {
+    let (_measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
+    let mut backend = VinsBackend::new(
+        backend_configuration(),
+        InitialState::default(),
+        measurement_receiver,
+        result_sender,
+    );
+    backend.init_intervals_through(0);
+    let state = backend.values.get_mut(State(1)).unwrap();
+    *state = SE23::from_rot_vel_trans(
+        SO3::identity(),
+        Vector3::new(2.0, -1.0, 0.5),
+        Vector3::new(1.0, 2.0, 3.0),
+    );
+
+    backend.init_intervals_through(1);
+
+    let initialized = backend.values.get(State(2)).unwrap();
+    assert!((initialized.uvw() - Vector3::new(2.0, -1.0, 0.5)).norm() < 1.0e-12);
+    assert!((initialized.xyz() - Vector3::new(1.4, 1.8, 3.1)).norm() < 1.0e-12);
+}
+
 fn stationary_imu(time: SystemTime) -> SensorMeasurement {
     SensorMeasurement::Imu(ImuMeasurement {
         time,
