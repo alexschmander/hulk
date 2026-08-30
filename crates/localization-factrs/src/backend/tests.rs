@@ -14,7 +14,7 @@ use crate::{
         },
         visual_reprojection::VisualReprojectionFactor,
     },
-    measurements::{GlobalPoseMeasurement, VisualReprojectionMeasurement},
+    measurements::VisualReprojectionMeasurement,
     symbols::{CameraIntrinsics, State},
 };
 use booster::ImuState;
@@ -53,8 +53,6 @@ fn backend_configuration() -> BackendConfiguration {
         accelerometer_process_noise: Matrix3::identity() * 0.01,
         roll_pitch_yaw_noise: Matrix3::identity() * 0.01,
         visual_feature_noise: Matrix2::identity() * 5.0,
-        pose_hint_visual_feature_noise: Matrix2::identity() * 100.0,
-        pose_hint_visual_huber_threshold: 2.0,
         visual_odometry_noise: SMatrix::<f64, 6, 6>::identity() * 0.05,
         foot_ground_sigma: 0.01,
         field_containment: FieldContainmentConfiguration::default(),
@@ -110,17 +108,6 @@ fn visual_odometry(
     })
 }
 
-fn global_pose(time: SystemTime, x: f64, y: f64, z: f64) -> SensorMeasurement {
-    SensorMeasurement::GlobalPose(GlobalPoseMeasurement {
-        time,
-        robot_to_field: SE23::from_rot_vel_trans(
-            SO3::identity(),
-            Vector3::zeros(),
-            Vector3::new(x, y, z),
-        ),
-    })
-}
-
 fn reset(time: SystemTime, initial_state: InitialState) -> SensorMeasurement {
     SensorMeasurement::Reset(crate::measurements::ResetMeasurement {
         time,
@@ -142,10 +129,6 @@ fn visual_reprojection_measurement(
 
 fn visual_reprojection(time: SystemTime) -> SensorMeasurement {
     SensorMeasurement::Visual(vec![visual_reprojection_measurement(time, 0.0)])
-}
-
-fn pose_hint_visual_reprojection(time: SystemTime) -> SensorMeasurement {
-    SensorMeasurement::PoseHintVisual(vec![visual_reprojection_measurement(time, 0.0)])
 }
 
 fn visual_reprojection_factor_count(backend: &mut VinsBackend, state: State) -> usize {
@@ -366,27 +349,6 @@ fn visual_reprojection_measurements_create_interval_factor() {
 }
 
 #[test]
-fn pose_hint_visual_reprojection_measurements_create_separate_factor() {
-    let (measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
-    let mut backend = VinsBackend::new(
-        backend_configuration(),
-        InitialState::default(),
-        measurement_receiver,
-        result_sender,
-    );
-    let start = SystemTime::UNIX_EPOCH;
-
-    measurement_sender
-        .send(pose_hint_visual_reprojection(start))
-        .expect("pose-hint visual reprojection should send");
-
-    let _ = backend.solve_once().expect("solve should succeed");
-
-    assert_eq!(visual_reprojection_factor_count(&mut backend, State(0)), 1);
-}
-
-#[test]
 fn first_visual_batch_measurement_is_ingested() {
     let (_measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
@@ -591,42 +553,6 @@ fn invalid_visual_odometry_measurement_does_not_create_empty_factor() {
     let _ = backend.solve_once().expect("solve should succeed");
 
     assert_eq!(visual_odometry_factor_count(&mut backend, State(0)), 1);
-}
-
-#[test]
-fn global_pose_measurement_resets_backend_state() {
-    let (measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
-    let mut backend = VinsBackend::new(
-        backend_configuration(),
-        InitialState::default(),
-        measurement_receiver,
-        result_sender,
-    );
-    let start = SystemTime::UNIX_EPOCH;
-    measurement_sender
-        .send(visual_odometry(
-            start,
-            start + Duration::from_millis(100),
-            3.0,
-        ))
-        .expect("visual odometry should send");
-    let _ = backend.solve_once().expect("initial solve should succeed");
-
-    let reset_time = start + Duration::from_secs(1);
-    measurement_sender
-        .send(global_pose(reset_time, 1.0, 2.0, 0.45))
-        .expect("global pose should send");
-
-    let result = backend
-        .solve_once()
-        .expect("reset solve should succeed")
-        .expect("reset should produce a result");
-
-    assert_eq!(result.time, reset_time);
-    assert!((result.latest_pose.xyz() - Vector3::new(1.0, 2.0, 0.45)).norm() < 1.0e-9);
-    assert!(result.latest_pose.uvw().norm() < 1.0e-9);
-    assert_eq!(visual_odometry_factor_count(&mut backend, State(0)), 0);
 }
 
 #[test]

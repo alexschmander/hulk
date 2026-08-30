@@ -15,9 +15,7 @@ use crate::initial_state::InitialState;
 pub enum SensorMeasurement {
     Reset(ResetMeasurement),
     Imu(ImuMeasurement),
-    GlobalPose(GlobalPoseMeasurement),
     Visual(Vec<VisualReprojectionMeasurement>),
-    PoseHintVisual(Vec<VisualReprojectionMeasurement>),
     VisualOdometry(VisualOdometryMeasurement),
     FootHeights(FootHeightMeasurement),
 }
@@ -27,8 +25,7 @@ impl SensorMeasurement {
         match self {
             SensorMeasurement::Reset(reset) => reset.time,
             SensorMeasurement::Imu(imu) => imu.time,
-            SensorMeasurement::GlobalPose(global_pose) => global_pose.time,
-            SensorMeasurement::Visual(visual) | SensorMeasurement::PoseHintVisual(visual) => {
+            SensorMeasurement::Visual(visual) => {
                 visual
                     .first()
                     .expect("visual frames must contain at least one measurement")
@@ -52,12 +49,6 @@ pub struct ImuMeasurement {
     pub state: ImuState,
 }
 
-#[derive(Debug, Clone)]
-pub struct GlobalPoseMeasurement {
-    pub time: SystemTime,
-    pub robot_to_field: factrs::variables::SE23<f64>,
-}
-
 /// A fixed visual feature association in domain frames.
 #[derive(Debug, Clone, Copy)]
 pub struct VisualReprojectionAssociation {
@@ -65,16 +56,6 @@ pub struct VisualReprojectionAssociation {
     pub detection: FramedPoint2<Pixel>,
     /// Associated field feature in field coordinates.
     pub field_point: FramedPoint3<Field>,
-    /// Association source, used to select backend weighting and robustification.
-    pub kind: VisualReprojectionAssociationKind,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum VisualReprojectionAssociationKind {
-    /// Globally certified, unique association.
-    GlobalUnique,
-    /// Association selected from a trusted current pose hint.
-    PoseHint,
 }
 
 #[derive(Debug, Clone)]

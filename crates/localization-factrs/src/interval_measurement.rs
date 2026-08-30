@@ -5,17 +5,14 @@ use crate::{
         foot_above_ground::FootHeightMeasurement, visual_odometry::VisualOdometryMeasurement,
     },
     measurements::{
-        GlobalPoseMeasurement, ImuMeasurement, ResetMeasurement, SensorMeasurement,
-        VisualReprojectionMeasurement,
+        ImuMeasurement, ResetMeasurement, SensorMeasurement, VisualReprojectionMeasurement,
     },
 };
 
 pub struct IntervalMeasurements {
     pub resets: Vec<ResetMeasurement>,
     pub imu: Vec<ImuMeasurement>,
-    pub global_poses: Vec<GlobalPoseMeasurement>,
     pub visual: Vec<Vec<VisualReprojectionMeasurement>>,
-    pub pose_hint_visual: Vec<Vec<VisualReprojectionMeasurement>>,
     pub visual_odometry: Vec<VisualOdometryMeasurement>,
     pub foot_heights: Vec<FootHeightMeasurement>,
 }
@@ -25,9 +22,7 @@ impl IntervalMeasurements {
         Self {
             resets: Vec::new(),
             imu: Vec::new(),
-            global_poses: Vec::new(),
             visual: Vec::new(),
-            pose_hint_visual: Vec::new(),
             visual_odometry: Vec::new(),
             foot_heights: Vec::new(),
         }
@@ -41,9 +36,7 @@ impl IntervalMeasurements {
         match measurement {
             SensorMeasurement::Reset(reset) => self.push_reset(reset),
             SensorMeasurement::Imu(imu) => self.push_imu(imu),
-            SensorMeasurement::GlobalPose(global_pose) => self.push_global_pose(global_pose),
             SensorMeasurement::Visual(visual) => self.push_visual(visual),
-            SensorMeasurement::PoseHintVisual(visual) => self.push_pose_hint_visual(visual),
             SensorMeasurement::VisualOdometry(visual_odometry) => {
                 self.push_visual_odometry(visual_odometry)
             }
@@ -59,16 +52,6 @@ impl IntervalMeasurements {
         insert_sorted(&mut self.resets, reset, |measurement| measurement.time);
     }
 
-    pub fn push_global_pose(&mut self, global_pose: GlobalPoseMeasurement) {
-        insert_sorted(&mut self.global_poses, global_pose, |measurement| {
-            measurement.time
-        });
-    }
-
-    pub fn push_pose_hint_visual(&mut self, visual: Vec<VisualReprojectionMeasurement>) {
-        insert_visual_frame(&mut self.pose_hint_visual, visual);
-    }
-
     pub fn push_visual_odometry(&mut self, visual_odometry: VisualOdometryMeasurement) {
         insert_sorted(&mut self.visual_odometry, visual_odometry, |measurement| {
             measurement.current_time
@@ -81,22 +64,14 @@ impl IntervalMeasurements {
         });
     }
 
-    pub fn latest_global_pose(&self) -> Option<&GlobalPoseMeasurement> {
-        self.global_poses.last()
-    }
-
     pub fn latest_reset(&self) -> Option<&ResetMeasurement> {
         self.resets.last()
     }
 
     pub fn retain_at_or_after(&mut self, time: SystemTime) {
         self.resets.retain(|measurement| measurement.time >= time);
-        self.global_poses
-            .retain(|measurement| measurement.time >= time);
         self.imu.retain(|measurement| measurement.time >= time);
         self.visual
-            .retain(|frame| visual_frame_time(frame).is_some_and(|frame_time| frame_time >= time));
-        self.pose_hint_visual
             .retain(|frame| visual_frame_time(frame).is_some_and(|frame_time| frame_time >= time));
         self.visual_odometry.retain(|measurement| {
             measurement.previous_time >= time && measurement.current_time >= time

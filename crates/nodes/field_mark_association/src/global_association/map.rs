@@ -1,6 +1,3 @@
-use std::collections::{BTreeMap, HashMap};
-
-use itertools::Itertools;
 use linear_algebra::Point2;
 use types::field_dimensions::{FieldDimensions, Half, Side};
 
@@ -9,53 +6,49 @@ use coordinate_systems::Field;
 use super::{FEATURE_CLASSES, VisualFeatureClass};
 
 const SYMMETRY_EPSILON: f32 = 1.0e-4;
-pub(crate) const TRIPLET_BIN_SIZE: f32 = 0.12;
-const MIN_MAP_TRIPLET_ABS_BETA: f32 = 0.03;
+const FIELD_HALVES: usize = 2;
+const FIELD_SIDES: usize = 2;
+const L_SPOTS_PER_QUADRANT: usize = 3;
+const T_SPOTS_PER_PENALTY_BOX: usize = 2;
+const GOALPOST_COUNT: usize = FIELD_HALVES * FIELD_SIDES;
+const T_SPOT_COUNT: usize = FIELD_SIDES + FIELD_HALVES * FIELD_SIDES * T_SPOTS_PER_PENALTY_BOX;
+const X_SPOT_COUNT: usize = 1 + FIELD_SIDES;
+const PENALTY_SPOT_COUNT: usize = FIELD_HALVES;
+pub(crate) const MAX_LANDMARKS_PER_CLASS: usize = FIELD_HALVES * FIELD_SIDES * L_SPOTS_PER_QUADRANT;
+pub(crate) const FIELD_LANDMARK_COUNT: usize =
+    GOALPOST_COUNT + MAX_LANDMARKS_PER_CLASS + T_SPOT_COUNT + X_SPOT_COUNT + PENALTY_SPOT_COUNT;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LandmarkMap {
     pub landmarks: Vec<Landmark>,
-    landmarks_by_class: BTreeMap<VisualFeatureClass, Vec<usize>>,
-    pub map_triplets_by_bin: HashMap<MapTripletBin, Vec<MapTriplet>>,
-    class_rarity_weight: BTreeMap<VisualFeatureClass, f32>,
+    landmarks_by_class: [Vec<usize>; FEATURE_CLASSES.len()],
+    class_rarity_weight: [f32; FEATURE_CLASSES.len()],
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Landmark {
-    pub id: usize,
     pub symmetric_id: usize,
     pub class: VisualFeatureClass,
     pub xy: Point2<Field>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct MapTriplet {
-    pub xy_a: Point2<Field>,
-    pub pair_dist: f32,
-    pub pair_angle: f32,
-    pub alpha: f32,
-    pub beta: f32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct MapTripletBin {
-    pub classes: [VisualFeatureClass; 3],
-    pub alpha_bin: i16,
-    pub beta_bin: i16,
-}
-
 impl LandmarkMap {
-    pub fn new(field: &FieldDimensions, min_map_baseline: f32) -> Self {
+    pub fn new(field: &FieldDimensions) -> Self {
         let mut landmarks = candidate_landmarks(field);
         fill_symmetric_ids(&mut landmarks);
         let landmarks_by_class = landmarks_by_class(&landmarks);
-        let map_triplets_by_bin = map_triplets_by_bin(&landmarks, min_map_baseline);
+        assert!(
+            landmarks_by_class
+                .iter()
+                .all(|landmarks| landmarks.len() <= MAX_LANDMARKS_PER_CLASS),
+            "generated landmark class exceeds assignment capacity"
+        );
+        assert_eq!(landmarks.len(), FIELD_LANDMARK_COUNT);
         let class_rarity_weight = class_rarity_weights(&landmarks_by_class);
 
         Self {
             landmarks,
             landmarks_by_class,
-            map_triplets_by_bin,
             class_rarity_weight,
         }
     }
@@ -72,119 +65,33 @@ impl LandmarkMap {
 
     pub fn landmarks_for_class(&self, class: VisualFeatureClass) -> &[usize] {
         self.landmarks_by_class
-            .get(&class)
+            .get(class.index())
             .map_or(&[], Vec::as_slice)
     }
 
     pub fn rarity_weight(&self, class: VisualFeatureClass) -> f32 {
-        self.class_rarity_weight.get(&class).copied().unwrap_or(0.0)
+        self.class_rarity_weight
+            .get(class.index())
+            .copied()
+            .unwrap_or(0.0)
     }
 }
 
-fn landmarks_by_class(landmarks: &[Landmark]) -> BTreeMap<VisualFeatureClass, Vec<usize>> {
-    let mut landmarks_by_class = FEATURE_CLASSES
-        .into_iter()
-        .map(|class| (class, Vec::new()))
-        .collect::<BTreeMap<_, _>>();
-    for landmark in landmarks {
-        landmarks_by_class
-            .entry(landmark.class)
-            .or_default()
-            .push(landmark.id);
+fn landmarks_by_class(landmarks: &[Landmark]) -> [Vec<usize>; FEATURE_CLASSES.len()] {
+    let mut landmarks_by_class = std::array::from_fn(|_| Vec::new());
+    for (id, landmark) in landmarks.iter().enumerate() {
+        landmarks_by_class[landmark.class.index()].push(id);
     }
     landmarks_by_class
 }
 
-fn map_triplets_by_bin(
-    landmarks: &[Landmark],
-    min_map_baseline: f32,
-) -> HashMap<MapTripletBin, Vec<MapTriplet>> {
-    let mut map_triplets_by_bin = HashMap::new();
-    for a in landmarks {
-        for b in landmarks {
-            if a.id == b.id {
-                continue;
-            }
-            let v = (b.xy - a.xy).inner;
-            let pair_dist = v.norm();
-            if pair_dist < min_map_baseline {
-                continue;
-            }
-            record_triplets_from_pair(&mut map_triplets_by_bin, landmarks, a, b, v, pair_dist);
-        }
-    }
-    map_triplets_by_bin
-}
-
-fn record_triplets_from_pair(
-    map_triplets_by_bin: &mut HashMap<MapTripletBin, Vec<MapTriplet>>,
-    landmarks: &[Landmark],
-    a: &Landmark,
-    b: &Landmark,
-    v: nalgebra::Vector2<f32>,
-    pair_dist: f32,
-) {
-    let base_norm_squared = v.norm_squared();
-    for c in landmarks {
-        if c.id == a.id || c.id == b.id {
-            continue;
-        }
-        let w = (c.xy - a.xy).inner;
-        let alpha = w.dot(&v) / base_norm_squared;
-        let beta = cross(v, w) / base_norm_squared;
-        if beta.abs() < MIN_MAP_TRIPLET_ABS_BETA {
-            continue;
-        }
-        map_triplets_by_bin
-            .entry(MapTripletBin::new(a.class, b.class, c.class, alpha, beta))
-            .or_default()
-            .push(MapTriplet {
-                xy_a: a.xy,
-                pair_dist,
-                pair_angle: v.y.atan2(v.x),
-                alpha,
-                beta,
-            });
-    }
-}
-
 fn class_rarity_weights(
-    landmarks_by_class: &BTreeMap<VisualFeatureClass, Vec<usize>>,
-) -> BTreeMap<VisualFeatureClass, f32> {
-    FEATURE_CLASSES
-        .into_iter()
-        .map(|class| {
-            let count = landmarks_by_class.get(&class).map_or(0, Vec::len);
-            let weight = if count == 0 { 0.0 } else { 1.0 / count as f32 };
-            (class, weight)
-        })
-        .collect()
-}
-
-impl MapTripletBin {
-    pub fn new(
-        class_a: VisualFeatureClass,
-        class_b: VisualFeatureClass,
-        class_c: VisualFeatureClass,
-        alpha: f32,
-        beta: f32,
-    ) -> Self {
-        Self {
-            classes: [class_a, class_b, class_c],
-            alpha_bin: triplet_bin(alpha),
-            beta_bin: triplet_bin(beta),
-        }
-    }
-}
-
-pub(crate) fn triplet_bin(value: f32) -> i16 {
-    (value / TRIPLET_BIN_SIZE)
-        .round()
-        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
-}
-
-fn cross(left: nalgebra::Vector2<f32>, right: nalgebra::Vector2<f32>) -> f32 {
-    left.x * right.y - left.y * right.x
+    landmarks_by_class: &[Vec<usize>; FEATURE_CLASSES.len()],
+) -> [f32; FEATURE_CLASSES.len()] {
+    std::array::from_fn(|index| {
+        let count = landmarks_by_class[index].len();
+        if count == 0 { 0.0 } else { 1.0 / count as f32 }
+    })
 }
 
 fn candidate_landmarks(field: &FieldDimensions) -> Vec<Landmark> {
@@ -192,7 +99,6 @@ fn candidate_landmarks(field: &FieldDimensions) -> Vec<Landmark> {
         .into_iter()
         .enumerate()
         .map(|(id, (class, xy))| Landmark {
-            id,
             symmetric_id: id,
             class,
             xy,
@@ -203,102 +109,58 @@ fn candidate_landmarks(field: &FieldDimensions) -> Vec<Landmark> {
 pub(crate) fn candidate_points(
     field: &FieldDimensions,
 ) -> Vec<(VisualFeatureClass, Point2<Field>)> {
-    let mut points = Vec::new();
-    points.extend(
-        goalpost_candidates(field)
-            .into_iter()
-            .map(|point| (VisualFeatureClass::GoalPost, point)),
-    );
-    points.extend(
-        l_spot_candidates(field)
-            .into_iter()
-            .map(|point| (VisualFeatureClass::LSpot, point)),
-    );
-    points.extend(
-        t_spot_candidates(field)
-            .into_iter()
-            .map(|point| (VisualFeatureClass::TSpot, point)),
-    );
-    points.extend(
-        x_spot_candidates(field)
-            .into_iter()
-            .map(|point| (VisualFeatureClass::XSpot, point)),
-    );
-    points.extend(
-        penalty_spot_candidates(field)
-            .into_iter()
-            .map(|point| (VisualFeatureClass::PenaltySpot, point)),
-    );
+    let mut points = Vec::with_capacity(FIELD_LANDMARK_COUNT);
+    for half in [Half::Opponent, Half::Own] {
+        for side in [Side::Left, Side::Right] {
+            points.push((VisualFeatureClass::GoalPost, field.goal_post(half, side)));
+        }
+    }
+    for half in [Half::Opponent, Half::Own] {
+        for side in [Side::Left, Side::Right] {
+            points.push((VisualFeatureClass::LSpot, field.corner(half, side)));
+            points.push((VisualFeatureClass::LSpot, field.goal_box_corner(half, side)));
+            points.push((
+                VisualFeatureClass::LSpot,
+                field.penalty_box_corner(half, side),
+            ));
+        }
+    }
+    for side in [Side::Left, Side::Right] {
+        points.push((VisualFeatureClass::TSpot, field.t_crossing(side)));
+    }
+    for half in [Half::Opponent, Half::Own] {
+        for side in [Side::Left, Side::Right] {
+            points.push((
+                VisualFeatureClass::TSpot,
+                field.goal_box_goal_line_intersection(half, side),
+            ));
+            points.push((
+                VisualFeatureClass::TSpot,
+                field.penalty_box_goal_line_intersection(half, side),
+            ));
+        }
+    }
+    points.push((VisualFeatureClass::XSpot, field.center()));
+    for side in [Side::Left, Side::Right] {
+        points.push((VisualFeatureClass::XSpot, field.x_crossing(side)));
+    }
+    for half in [Half::Opponent, Half::Own] {
+        points.push((VisualFeatureClass::PenaltySpot, field.penalty_spot(half)));
+    }
     points
 }
 
 fn fill_symmetric_ids(landmarks: &mut [Landmark]) {
     for index in 0..landmarks.len() {
         let landmark = landmarks[index];
-        if let Some(partner) = landmarks.iter().find(|candidate| {
+        if let Some((partner_id, _)) = landmarks.iter().enumerate().find(|(_, candidate)| {
             candidate.class == landmark.class
                 && (candidate.xy.x() + landmark.xy.x()).abs() <= SYMMETRY_EPSILON
                 && (candidate.xy.y() + landmark.xy.y()).abs() <= SYMMETRY_EPSILON
         }) {
-            landmarks[index].symmetric_id = partner.id;
+            landmarks[index].symmetric_id = partner_id;
         }
     }
-}
-
-fn goalpost_candidates(field: &FieldDimensions) -> Vec<Point2<Field>> {
-    [Half::Opponent, Half::Own]
-        .into_iter()
-        .cartesian_product([Side::Left, Side::Right])
-        .map(|(half, side)| field.goal_post(half, side))
-        .collect()
-}
-
-fn l_spot_candidates(field: &FieldDimensions) -> Vec<Point2<Field>> {
-    [Half::Opponent, Half::Own]
-        .into_iter()
-        .cartesian_product([Side::Left, Side::Right])
-        .flat_map(|(half, side)| {
-            [
-                field.corner(half, side),
-                field.goal_box_corner(half, side),
-                field.penalty_box_corner(half, side),
-            ]
-        })
-        .collect()
-}
-
-fn t_spot_candidates(field: &FieldDimensions) -> Vec<Point2<Field>> {
-    [Side::Left, Side::Right]
-        .into_iter()
-        .map(|side| field.t_crossing(side))
-        .chain(
-            [Half::Opponent, Half::Own]
-                .into_iter()
-                .cartesian_product([Side::Left, Side::Right])
-                .flat_map(|(half, side)| {
-                    [
-                        field.goal_box_goal_line_intersection(half, side),
-                        field.penalty_box_goal_line_intersection(half, side),
-                    ]
-                }),
-        )
-        .collect()
-}
-
-fn x_spot_candidates(field: &FieldDimensions) -> Vec<Point2<Field>> {
-    [
-        field.center(),
-        field.x_crossing(Side::Left),
-        field.x_crossing(Side::Right),
-    ]
-    .into()
-}
-
-fn penalty_spot_candidates(field: &FieldDimensions) -> Vec<Point2<Field>> {
-    [Half::Opponent, Half::Own]
-        .into_iter()
-        .map(|half| field.penalty_spot(half))
-        .collect()
 }
 
 #[cfg(test)]
@@ -307,7 +169,7 @@ mod tests {
 
     #[test]
     fn candidate_sets_match_field_feature_classes() {
-        let map = LandmarkMap::new(&FieldDimensions::SPL_2025, 0.25);
+        let map = LandmarkMap::new(&FieldDimensions::SPL_2025);
 
         assert_eq!(
             map.landmarks_for_class(VisualFeatureClass::GoalPost).len(),
@@ -321,12 +183,5 @@ mod tests {
                 .len(),
             2
         );
-    }
-
-    #[test]
-    fn triplet_lookup_contains_non_collinear_landmark_shapes() {
-        let map = LandmarkMap::new(&FieldDimensions::SPL_2025, 0.25);
-
-        assert!(!map.map_triplets_by_bin.is_empty());
     }
 }

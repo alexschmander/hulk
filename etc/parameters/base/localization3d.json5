@@ -1,7 +1,5 @@
 {
   accelerometer_process_noise_variance: 10.0,
   visual_feature_noise_variance: 10000.0,
-  pose_hint_visual_feature_noise_variance: 100000.0,
-  pose_hint_visual_huber_threshold: 2.0,
   field_containment_sigma: 1.0,
 }

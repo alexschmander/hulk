@@ -7,8 +7,8 @@ use std::{
 
 use coordinate_systems::{Camera, Field, Pixel, Robot};
 use field_mark_association::{
-    DetectedVisualFeature, GlobalLocalizationDebugStatus, GlobalLocalizerParameters,
-    find_detected_visual_features, localize_global_visual_features,
+    DetectedVisualFeature, GlobalLocalizerParameters, find_detected_visual_features,
+    localize_global_visual_features,
 };
 use linear_algebra::{Isometry3, Point2};
 use mcap::MessageStream;
@@ -30,6 +30,15 @@ const DEBUG_MAX_AGE: Duration = Duration::from_millis(100);
 const EXPECTED_PIXEL_GATE: f32 = 80.0;
 const MAX_ACCEPTED_FIXTURES: usize = 6;
 
+fn recording_parameters() -> GlobalLocalizerParameters {
+    GlobalLocalizerParameters {
+        detection_pixel_sigma: 10.0,
+        imu_tilt_sigma: 0.1,
+        mahalanobis_gate: 100.0,
+        ..Default::default()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct AssociationFixture {
     name: String,
@@ -48,10 +57,15 @@ struct ExpectedAssociation {
 #[derive(Clone, Debug, Deserialize)]
 struct RecordedGlobalLocalizationDebug {
     robot_to_field: Isometry3<Robot, Field>,
-    status: GlobalLocalizationDebugStatus,
+    status: RecordedGlobalLocalizationDebugStatus,
     inliers: usize,
     reprojection_rmse: f32,
     total_cost: f32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+enum RecordedGlobalLocalizationDebugStatus {
+    UniqueModuloSymmetry,
 }
 
 #[test]
@@ -68,7 +82,7 @@ fn real_recording_association_fixtures_match_expected_landmarks() -> Result<(), 
             &fixture.camera_matrix,
             &FieldDimensions::SPL_2025,
             None,
-            &GlobalLocalizerParameters::default(),
+            &recording_parameters(),
         );
         let actual = localization
             .associations
@@ -191,7 +205,7 @@ fn extract_fixtures(path: &Path) -> Result<Vec<AssociationFixture>, Box<dyn Erro
         };
         if !matches!(
             debug_value.status,
-            GlobalLocalizationDebugStatus::UniqueModuloSymmetry
+            RecordedGlobalLocalizationDebugStatus::UniqueModuloSymmetry
         ) {
             stats.non_unique_debug += 1;
         }
@@ -302,7 +316,7 @@ fn new_solver_matches(
         camera_matrix,
         &FieldDimensions::SPL_2025,
         None,
-        &GlobalLocalizerParameters::default(),
+        &recording_parameters(),
     );
     if localization.associations.is_empty() {
         return false;

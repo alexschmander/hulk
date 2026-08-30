@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 
 use booster::ImuState;
-use coordinate_systems::{Camera, Field, Robot};
+use coordinate_systems::{Camera, Robot};
 use factrs::{
     core::{SE3, SO3},
     traits::Variable,
@@ -14,13 +14,11 @@ use tokio::sync::{mpsc::UnboundedSender, watch};
 use crate::InitialState;
 use crate::backend::OptimizationResult as BackendOptimizationResult;
 use crate::camera_intrinsics::CameraIntrinsics;
-use crate::conversions::robot_to_field_to_se23;
 use crate::factors::{
     foot_above_ground::FootHeightMeasurement, visual_odometry::VisualOdometryMeasurement,
 };
 use crate::measurements::{
-    GlobalPoseMeasurement, ImuMeasurement, ResetMeasurement, SensorMeasurement,
-    VisualReprojectionAssociation, VisualReprojectionAssociationKind,
+    ImuMeasurement, ResetMeasurement, SensorMeasurement, VisualReprojectionAssociation,
     VisualReprojectionMeasurement,
 };
 
@@ -35,6 +33,9 @@ pub struct OptimizationResult {
     pub transform: nalgebra::Isometry3<f64>,
     pub velocity: nalgebra::Vector3<f64>,
     pub camera_intrinsics: CameraIntrinsics<f64>,
+    pub latest_visual_measurement_time: Option<SystemTime>,
+    pub latest_visual_transform: Option<nalgebra::Isometry3<f64>>,
+    pub optimizer_status: crate::backend::BackendOptimizerStatus,
 }
 
 impl VinsFrontend {
@@ -83,22 +84,6 @@ impl VinsFrontend {
             .map_err(|_| VinsFrontendError::BackendDisconnected)
     }
 
-    /// Reinitializes the backend around an accepted global visual pose.
-    pub fn ingest_global_pose(
-        &mut self,
-        time: SystemTime,
-        robot_to_field: Isometry3<Robot, Field>,
-    ) -> Result<(), VinsFrontendError> {
-        let measurement = GlobalPoseMeasurement {
-            time,
-            robot_to_field: robot_to_field_to_se23(robot_to_field),
-        };
-
-        self.measurement_sender
-            .send(SensorMeasurement::GlobalPose(measurement))
-            .map_err(|_| VinsFrontendError::BackendDisconnected)
-    }
-
     /// Reinitializes the backend to a known startup state.
     pub fn reset(
         &mut self,
@@ -123,28 +108,17 @@ impl VinsFrontend {
         robot_to_camera: Isometry3<Robot, Camera>,
     ) -> Result<(), VinsFrontendError> {
         let robot_to_camera = isometry3_to_se3(robot_to_camera.inner);
-        let mut global_measurements = Vec::new();
-        let mut pose_hint_measurements = Vec::new();
-
-        for association in associations {
-            let measurement = VisualReprojectionMeasurement {
+        let measurements = associations
+            .into_iter()
+            .map(|association| VisualReprojectionMeasurement {
                 time,
                 detection: association.detection.inner.cast(),
                 field_point: association.field_point.inner.cast(),
                 robot_to_camera: robot_to_camera.clone(),
-            };
-            match association.kind {
-                VisualReprojectionAssociationKind::GlobalUnique => {
-                    global_measurements.push(measurement)
-                }
-                VisualReprojectionAssociationKind::PoseHint => {
-                    pose_hint_measurements.push(measurement)
-                }
-            }
-        }
+            })
+            .collect();
 
-        self.send_visual_measurements(SensorMeasurement::Visual, global_measurements)?;
-        self.send_visual_measurements(SensorMeasurement::PoseHintVisual, pose_hint_measurements)
+        self.send_visual_measurements(measurements)
     }
 
     /// Adds a frame-to-frame visual odometry delta to the optimization pipeline.
@@ -190,7 +164,6 @@ impl VinsFrontend {
 
     fn send_visual_measurements(
         &mut self,
-        make_measurement: impl FnOnce(Vec<VisualReprojectionMeasurement>) -> SensorMeasurement,
         measurements: Vec<VisualReprojectionMeasurement>,
     ) -> Result<(), VinsFrontendError> {
         if measurements.is_empty() {
@@ -198,7 +171,7 @@ impl VinsFrontend {
         }
 
         self.measurement_sender
-            .send(make_measurement(measurements))
+            .send(SensorMeasurement::Visual(measurements))
             .map_err(|_| VinsFrontendError::BackendDisconnected)
     }
 }
@@ -232,6 +205,12 @@ fn optimization_result_from_backend_result(
         transform,
         velocity,
         camera_intrinsics: backend_result.camera_intrinsics.clone(),
+        latest_visual_measurement_time: backend_result.latest_visual_measurement_time,
+        latest_visual_transform: backend_result
+            .latest_visual_pose
+            .as_ref()
+            .map(|pose| se23_to_isometry3_and_velocity(pose).0),
+        optimizer_status: backend_result.optimizer_status,
     }
 }
 

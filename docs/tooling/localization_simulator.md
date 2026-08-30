@@ -14,7 +14,7 @@ implementations, and displays estimated poses against ground truth.
 ### Correctness
 
 - Use the current `FieldDimensions::SPL_2025` geometry, production semantic landmark map,
-  field-mark association state machine,
+  stateless field-mark associator,
   localization configuration, factor-graph frontend/backend, global lock, and live visual-odometry
   propagation where applicable.
 - Keep transform directions explicit and use typed coordinate-system transforms at boundaries.
@@ -111,7 +111,7 @@ those individual settings. Without `--output`, the report is written to standard
 `vo-fault` preset installs its standard one-shot VO outlier unless a configuration file is supplied.
 Run `localization_simulator headless --help` for all built-in scenario names and options.
 
-The versioned report includes the effective scenario, sensor configuration, SPL field dimensions,
+Report schema version 2 includes the effective scenario, sensor configuration, SPL field dimensions,
 and bundled production localization and association parameters. Every 20 ms sample contains:
 
 - Timestamp in nanoseconds.
@@ -119,12 +119,16 @@ and bundled production localization and association parameters. Every 20 ms samp
 - Synthetic IMU values and every timestamped noisy VO transition passed to the frontend.
 - Translation in meters and quaternion rotation in `[x, y, z, w]` order.
 - Backend and live translation and rotation error against truth.
-- Emitted semantic landmark pixels, accepted pixel-to-field correspondences, and backend reset poses.
+- Emitted semantic landmark pixels and accepted pixel-to-field correspondences.
 - Global visual-lock state, visible/emitted/associated landmark counts, and solve diagnostics.
 
 The summary includes lock acquisition time, RMS/max/final pose error, and maximum consecutive pose
 step for detecting jumps. Reports contain the complete timeline rather than only the summary, so
 analysis scripts can derive additional metrics without rerunning the simulation.
+
+Version 2 removes `landmark_frame.backend_reset_robot_to_field` and
+`landmark_frame.associations[].source`. Consumers of version 1 reports must branch on the top-level
+schema version before decoding landmark frames.
 
 ## Scenario format
 

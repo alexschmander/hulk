@@ -10,6 +10,12 @@ pub struct OptimizationResult {
     pub latest_pose: SE23<f64>,
     /// The current optimized camera intrinsics estimate.
     pub camera_intrinsics: crate::camera_intrinsics::CameraIntrinsics<f64>,
+    /// Latest visual frame represented by factors in this result.
+    pub latest_visual_measurement_time: Option<SystemTime>,
+    /// Optimized pose at `latest_visual_measurement_time`, when its spline interval is retained.
+    pub latest_visual_pose: Option<SE23<f64>>,
+    /// Outcome of the optimizer invocation that produced this result.
+    pub optimizer_status: super::BackendOptimizerStatus,
 }
 
 impl OptimizationResult {

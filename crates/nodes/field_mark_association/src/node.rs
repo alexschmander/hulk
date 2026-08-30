@@ -20,7 +20,7 @@ use types::{
 };
 
 use crate::{
-    FieldMarkAssociationState,
+    GlobalVisualLocalizer,
     frame_processing::{DetectionProcessingContext, process_detected_objects},
     parameters::FieldMarkAssociationParameters,
 };
@@ -72,15 +72,6 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await?;
 
-    let primary_state_subscriber = node
-        .subscriber::<PrimaryState>("primary_state")
-        .qos(QosProfile {
-            durability: QosDurability::TransientLocal,
-            ..Default::default()
-        })
-        .build()
-        .await?;
-
     let mut detected_objects = node
         .create_future_map_builder()
         .create_future_subscriber::<TimeWrapper<Vec<Object<RobocupObjectLabel>>>>(
@@ -98,31 +89,21 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .publisher::<Option<GlobalLocalizationDebug>>(GLOBAL_LOCALIZATION_DEBUG_TOPIC)
         .build()
         .await?;
-    let mut association_state = FieldMarkAssociationState::default();
-
+    let mut association_solver = GlobalVisualLocalizer::default();
     loop {
-        tokio::select! {
-            primary_state = primary_state_subscriber.recv() => {
-                if primary_state? == PrimaryState::Damping {
-                    association_state.reset_for_damping();
-                }
-            }
-            item = detected_objects.recv() => {
-                let item = item?;
-                process_detected_objects(
-                    item,
-                    DetectionProcessingContext {
-                        parameters: &parameters,
-                        camera_matrix_cache: &camera_matrix_cache,
-                        field_dimensions_cache: &field_dimensions_cache,
-                        localization_cache: &localization_cache,
-                        primary_state_cache: &primary_state_cache,
-                        association_state: &mut association_state,
-                        associations_publisher: &associations_publisher,
-                        global_localization_publisher: &global_localization_publisher,
-                    },
-                ).await?;
-            }
-        }
+        process_detected_objects(
+            detected_objects.recv().await?,
+            DetectionProcessingContext {
+                association_solver: &mut association_solver,
+                parameters: &parameters,
+                camera_matrix_cache: &camera_matrix_cache,
+                field_dimensions_cache: &field_dimensions_cache,
+                localization_cache: &localization_cache,
+                primary_state_cache: &primary_state_cache,
+                associations_publisher: &associations_publisher,
+                global_localization_publisher: &global_localization_publisher,
+            },
+        )
+        .await?;
     }
 }

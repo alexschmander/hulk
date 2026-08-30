@@ -73,6 +73,8 @@ pub struct VinsBackend {
     last_imu_knot_orientation: Option<imu::ImuKnotOrientation>,
     /// Optimizer status from the most recent solve.
     last_optimizer_status: Option<BackendOptimizerStatus>,
+    /// Latest visual frame that was converted into graph factors.
+    latest_visual_measurement_time: Option<SystemTime>,
     last_imu_kinematics_measurement_time: Option<SystemTime>,
 }
 
@@ -107,6 +109,7 @@ impl VinsBackend {
             next_imu_attitude_knot_index: 0,
             last_imu_knot_orientation: None,
             last_optimizer_status: None,
+            latest_visual_measurement_time: None,
             last_imu_kinematics_measurement_time: None,
         }
     }
@@ -172,26 +175,13 @@ impl VinsBackend {
         mut new_measurements: IntervalMeasurements,
     ) -> Result<(), VinsBackendError> {
         let latest_reset = new_measurements.latest_reset().cloned();
-        let latest_global_pose = new_measurements.latest_global_pose().cloned();
-        match (latest_reset, latest_global_pose) {
-            (Some(reset), Some(global_pose)) if reset.time >= global_pose.time => {
-                self.reset_to_initial_state(reset.initial_state, reset.time);
-                new_measurements.retain_at_or_after(reset.time);
-            }
-            (Some(_), Some(global_pose)) | (None, Some(global_pose)) => {
-                self.reset_to_global_pose(global_pose.clone());
-                new_measurements.retain_at_or_after(global_pose.time);
-            }
-            (Some(reset), None) => {
-                self.reset_to_initial_state(reset.initial_state, reset.time);
-                new_measurements.retain_at_or_after(reset.time);
-            }
-            (None, None) => {}
+        if let Some(reset) = latest_reset {
+            self.reset_to_initial_state(reset.initial_state, reset.time);
+            new_measurements.retain_at_or_after(reset.time);
         }
 
         self.ingest_imu(new_measurements.imu);
         self.ingest_visual(new_measurements.visual);
-        self.ingest_pose_hint_visual(new_measurements.pose_hint_visual);
         self.ingest_visual_odometry(new_measurements.visual_odometry);
         self.ingest_foot_heights(new_measurements.foot_heights);
 

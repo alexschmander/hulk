@@ -1,47 +1,18 @@
 use std::time::SystemTime;
 
-use factrs::{containers::FactorBuilder, core::Huber, traits::Optimizer};
-use nalgebra::Matrix2;
-
 use crate::{
     factors::visual_reprojection::VisualReprojectionFactor,
     measurements::VisualReprojectionMeasurement,
     symbols::{CameraIntrinsics, State},
 };
+use factrs::{containers::FactorBuilder, core::Huber, traits::Optimizer};
 
 use super::VinsBackend;
 
 const GLOBAL_VISUAL_HUBER_THRESHOLD: f64 = 2.0;
 
 impl VinsBackend {
-    pub(super) fn ingest_visual(&mut self, visuals: Vec<Vec<VisualReprojectionMeasurement>>) {
-        self.ingest_visual_frames(
-            visuals,
-            "visual",
-            self.config.visual_feature_noise,
-            GLOBAL_VISUAL_HUBER_THRESHOLD,
-        );
-    }
-
-    pub(super) fn ingest_pose_hint_visual(
-        &mut self,
-        visuals: Vec<Vec<VisualReprojectionMeasurement>>,
-    ) {
-        self.ingest_visual_frames(
-            visuals,
-            "pose-hint visual",
-            self.config.pose_hint_visual_feature_noise,
-            self.config.pose_hint_visual_huber_threshold,
-        );
-    }
-
-    fn ingest_visual_frames(
-        &mut self,
-        mut visuals: Vec<Vec<VisualReprojectionMeasurement>>,
-        sensor_name: &str,
-        noise: Matrix2<f64>,
-        huber_threshold: f64,
-    ) {
+    pub(super) fn ingest_visual(&mut self, mut visuals: Vec<Vec<VisualReprojectionMeasurement>>) {
         visuals.retain(|visual| !visual.is_empty());
         let Some(last) = visuals.last() else {
             return;
@@ -53,9 +24,18 @@ impl VinsBackend {
         let interval_groups = self.interval_groups(visuals, |visual| visual_frame_time(visual));
 
         for group in interval_groups {
-            if !self.prepare_interval_for_measurements(group.start_index, sensor_name) {
+            if !self.prepare_interval_for_measurements(group.start_index, "visual") {
                 continue;
             }
+            let latest_group_time = group
+                .measurements
+                .last()
+                .map(|visual| visual_frame_time(visual))
+                .expect("visual groups are non-empty");
+            self.latest_visual_measurement_time = Some(
+                self.latest_visual_measurement_time
+                    .map_or(latest_group_time, |current| current.max(latest_group_time)),
+            );
 
             let keys = (
                 State(group.start_index),
@@ -68,10 +48,10 @@ impl VinsBackend {
                     group.start_time,
                     group.end_time,
                     [measurement],
-                    noise,
+                    self.config.visual_feature_noise,
                 );
                 let factor = FactorBuilder::new(residual, keys)
-                    .robust(Huber::new(huber_threshold))
+                    .robust(Huber::new(GLOBAL_VISUAL_HUBER_THRESHOLD))
                     .build();
 
                 graph.add_factor(factor);

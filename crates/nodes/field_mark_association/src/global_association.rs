@@ -1,4 +1,3 @@
-mod associator;
 mod config;
 mod map;
 mod solver;
@@ -6,15 +5,11 @@ mod solver;
 mod tests;
 mod types;
 
-pub(crate) use associator::{
-    GlobalAssociator, GlobalLocalizationInput, GlobalLocalizationResult, PoseHintAssociationResult,
-};
 pub(crate) use config::GLOBAL_LOCALIZER_MAX_DETECTIONS;
-pub use config::{GlobalAssociationConfig, PoseHintAssociationConfig};
+pub use config::GlobalAssociationConfig;
 pub(crate) use map::candidate_points;
-pub(crate) use types::{FEATURE_CLASSES, FeatureAssociation, FeatureAssociations};
-pub use types::{
-    GlobalLocalizationDebugAssociation, GlobalLocalizationDebugDetection,
-    GlobalLocalizationDebugProjection, GlobalLocalizationDetailedDebug,
-    GlobalLocalizationDetailedStatus, GlobalLocalizationScore, VisualFeatureClass,
-};
+#[cfg(test)]
+pub(crate) use solver::solve;
+pub(crate) use solver::{GlobalAssociationResult, GlobalLocalizationInput, SolverWorkspace};
+pub(crate) use types::FEATURE_CLASSES;
+pub use types::VisualFeatureClass;

@@ -21,7 +21,9 @@ use crate::{
         Localization3dParameters, backend_configuration_from_parameters_and_field_dimensions,
     },
     pose::localization_transform_constrained_to_ground,
-    visual_localization::{GlobalVisualLock, handle_visual_localization_frame},
+    visual_localization::{
+        GlobalVisualLock, GlobalVisualLockTracker, handle_visual_localization_frame,
+    },
 };
 
 /// One deterministic backend checkpoint and its publication-ready poses.
@@ -44,7 +46,7 @@ pub struct SynchronousLocalization {
     frontend: VinsFrontend,
     backend: VinsBackend,
     live_localization: LiveVisualOdometryLocalization,
-    global_visual_lock: GlobalVisualLock,
+    global_visual_lock: GlobalVisualLockTracker,
 }
 
 impl SynchronousLocalization {
@@ -72,13 +74,13 @@ impl SynchronousLocalization {
             frontend,
             backend,
             live_localization: LiveVisualOdometryLocalization::default(),
-            global_visual_lock: GlobalVisualLock::Unlocked,
+            global_visual_lock: GlobalVisualLockTracker::default(),
         })
     }
 
     /// Returns whether global visual localization is unlocked, pending, or locked.
     pub fn global_visual_lock(&self) -> GlobalVisualLock {
-        self.global_visual_lock
+        self.global_visual_lock.status()
     }
 
     /// Ingests one timestamped IMU sample.
@@ -101,17 +103,12 @@ impl SynchronousLocalization {
         )
     }
 
-    /// Ingests one production visual-localization frame, including global reset semantics.
+    /// Ingests one production visual-localization association frame.
     pub fn ingest_visual_localization_frame(
         &mut self,
         frame: TimeWrapper<VisualLocalizationFrame>,
     ) -> Result<(), VinsFrontendError> {
-        handle_visual_localization_frame(
-            &mut self.frontend,
-            &mut self.live_localization,
-            &mut self.global_visual_lock,
-            frame,
-        )
+        handle_visual_localization_frame(&mut self.frontend, &mut self.global_visual_lock, frame)
     }
 
     /// Solves one deterministic backend checkpoint.
@@ -158,7 +155,7 @@ impl SynchronousLocalization {
             &result.transform,
             &camera_matrix.inner.ground_to_robot,
         );
-        if self.global_visual_lock.mark_backend_result() {
+        if self.global_visual_lock.handle_backend_result(&result) {
             self.live_localization.clear();
             if let Some(visual_odometer) = exact_visual_odometer {
                 let reset = self.live_localization.reset_with_exact_samples(
@@ -180,7 +177,7 @@ impl SynchronousLocalization {
             time,
             raw_backend_robot_to_field: result.transform.framed_transform(),
             backend_field_to_robot,
-            global_visual_lock: self.global_visual_lock,
+            global_visual_lock: self.global_visual_lock.status(),
             diagnostics,
         }))
     }
@@ -220,8 +217,6 @@ mod tests {
         Localization3dParameters {
             accelerometer_process_noise_variance: 10.0,
             visual_feature_noise_variance: 1.0,
-            pose_hint_visual_feature_noise_variance: 4.0,
-            pose_hint_visual_huber_threshold: 2.0,
             field_containment_sigma: 0.1,
         }
     }
@@ -247,13 +242,28 @@ mod tests {
         .expect("valid localization configuration")
     }
 
-    fn global_reset(time: Time) -> TimeWrapper<VisualLocalizationFrame> {
+    fn association_frame(time: Time) -> TimeWrapper<VisualLocalizationFrame> {
+        let associations = [
+            ([320.0, 240.0], [0.0, 0.0, 1.0]),
+            ([540.0, 240.0], [1.0, 0.0, 1.0]),
+            ([320.0, 460.0], [0.0, 1.0, 1.0]),
+        ]
+        .into_iter()
+        .map(
+            |(pixel, robot_point)| types::visual_localization::FieldMarkAssociation {
+                detection: linear_algebra::point![<coordinate_systems::Pixel>, pixel[0], pixel[1]],
+                field_point: initial_robot_to_field()
+                    * linear_algebra::point![<coordinate_systems::Robot>,
+                        robot_point[0], robot_point[1], robot_point[2]
+                    ],
+            },
+        )
+        .collect();
         TimeWrapper {
             time,
             inner: VisualLocalizationFrame {
                 robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
-                associations: Vec::new(),
-                backend_reset: Some(initial_robot_to_field()),
+                associations,
             },
         }
     }
@@ -289,12 +299,17 @@ mod tests {
     }
 
     #[test]
-    fn global_reset_locks_on_backend_result() {
+    fn unlocked_association_frame_waits_then_locks_on_backend_result_without_reset() {
         let mut localization = localization();
         let time = Time::from_nanos(2_000_000_000);
         localization
-            .ingest_visual_localization_frame(global_reset(time))
-            .expect("global reset ingestion succeeds");
+            .ingest_visual_localization_frame(association_frame(time))
+            .expect("association ingestion succeeds");
+
+        assert_eq!(
+            localization.global_visual_lock(),
+            GlobalVisualLock::WaitingForBackend
+        );
 
         let output = localization
             .solve_once(
@@ -305,10 +320,106 @@ mod tests {
                 None,
             )
             .expect("solve succeeds")
-            .expect("global reset creates a backend checkpoint");
+            .expect("association creates a backend checkpoint");
 
         assert_eq!(output.time, time);
         assert_eq!(output.global_visual_lock, GlobalVisualLock::Locked);
+    }
+
+    #[test]
+    fn invalid_association_frame_does_not_start_bootstrap() {
+        let mut localization = localization();
+        let time = Time::from_nanos(2_500_000_000);
+        let mut frame = association_frame(time);
+        frame.inner.associations[0].detection =
+            linear_algebra::point![<coordinate_systems::Pixel>, f32::NAN, 240.0];
+        localization
+            .ingest_visual_localization_frame(frame)
+            .expect("association ingestion succeeds");
+        assert_eq!(
+            localization.global_visual_lock(),
+            GlobalVisualLock::Unlocked
+        );
+
+        let output = localization
+            .solve_once(
+                TimeWrapper {
+                    time,
+                    inner: &camera_matrix(),
+                },
+                None,
+            )
+            .expect("solve succeeds");
+
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn underconstrained_association_frame_does_not_start_bootstrap() {
+        let mut localization = localization();
+        let time = Time::from_nanos(2_600_000_000);
+        let mut frame = association_frame(time);
+        frame.inner.associations.truncate(1);
+
+        localization
+            .ingest_visual_localization_frame(frame)
+            .expect("association ingestion succeeds");
+        assert_eq!(
+            localization.global_visual_lock(),
+            GlobalVisualLock::Unlocked
+        );
+    }
+
+    #[test]
+    fn invalid_camera_extrinsic_does_not_start_bootstrap() {
+        let mut localization = localization();
+        let time = Time::from_nanos(2_700_000_000);
+        let mut frame = association_frame(time);
+        frame.inner.robot_to_camera.inner.translation.vector.x = f32::NAN;
+
+        localization
+            .ingest_visual_localization_frame(frame)
+            .expect("association ingestion succeeds");
+        assert_eq!(
+            localization.global_visual_lock(),
+            GlobalVisualLock::Unlocked
+        );
+    }
+
+    #[test]
+    fn oversized_association_frame_does_not_start_bootstrap() {
+        let mut localization = localization();
+        let time = Time::from_nanos(2_800_000_000);
+        let mut frame = association_frame(time);
+        frame.inner.associations.resize(
+            types::visual_localization::MAX_CERTIFIED_VISUAL_ASSOCIATIONS + 1,
+            frame.inner.associations[0].clone(),
+        );
+
+        localization
+            .ingest_visual_localization_frame(frame)
+            .expect("association ingestion succeeds");
+        assert_eq!(
+            localization.global_visual_lock(),
+            GlobalVisualLock::Unlocked
+        );
+    }
+
+    #[test]
+    fn duplicate_association_frame_does_not_start_bootstrap() {
+        let mut localization = localization();
+        let time = Time::from_nanos(2_900_000_000);
+        let mut frame = association_frame(time);
+        let duplicate = frame.inner.associations[0].clone();
+        frame.inner.associations.fill(duplicate);
+
+        localization
+            .ingest_visual_localization_frame(frame)
+            .expect("association ingestion succeeds");
+        assert_eq!(
+            localization.global_visual_lock(),
+            GlobalVisualLock::Unlocked
+        );
     }
 
     #[test]
@@ -321,8 +432,8 @@ mod tests {
             current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
         };
         localization
-            .ingest_visual_localization_frame(global_reset(time))
-            .expect("global reset ingestion succeeds");
+            .ingest_visual_localization_frame(association_frame(time))
+            .expect("association ingestion succeeds");
         let output = localization
             .solve_once(
                 TimeWrapper {
@@ -332,7 +443,7 @@ mod tests {
                 Some(&visual_odometer),
             )
             .expect("solve succeeds")
-            .expect("global reset creates a backend checkpoint");
+            .expect("association creates a backend checkpoint");
 
         let live_pose = localization
             .update_live_odometry(
@@ -390,8 +501,8 @@ mod tests {
             current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
         };
         localization
-            .ingest_visual_localization_frame(global_reset(anchor_time))
-            .expect("global reset ingestion succeeds");
+            .ingest_visual_localization_frame(association_frame(anchor_time))
+            .expect("association ingestion succeeds");
         localization
             .solve_once(
                 TimeWrapper {

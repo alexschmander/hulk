@@ -4,7 +4,7 @@ pub use backend::{
 pub use camera_intrinsics::CameraIntrinsics;
 pub use frontend::{OptimizationResult, VinsFrontend, VinsFrontendError};
 pub use initial_state::InitialState;
-pub use measurements::{VisualReprojectionAssociation, VisualReprojectionAssociationKind};
+pub use measurements::VisualReprojectionAssociation;
 pub use splines::{SE23Kinematics, SE23Spline};
 pub use symbols::State;
 pub use utils::{interval_dt, tau};

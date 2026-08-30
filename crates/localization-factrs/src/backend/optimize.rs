@@ -1,7 +1,10 @@
+use std::time::SystemTime;
+
 use factrs::{
     optimizers::{OptError, OptStatus},
     residuals::ErasedResidual,
     traits::Optimizer,
+    variables::SE23,
 };
 
 use crate::{
@@ -89,12 +92,36 @@ impl VinsBackend {
         let latest_pose = SE23Spline::new(start, end, self.config.knot_spacing.as_secs_f64())
             .evaluate(tau(interval_start_time, interval_end_time, time));
         let camera_intrinsics = self.values.get(CameraIntrinsics(0))?.clone();
-
+        let latest_visual_pose = self
+            .latest_visual_measurement_time
+            .and_then(|time| self.pose_at(time));
         Some(OptimizationResult {
             time,
             latest_pose,
             camera_intrinsics,
+            latest_visual_measurement_time: self.latest_visual_measurement_time,
+            latest_visual_pose,
+            optimizer_status,
         })
+    }
+
+    fn pose_at(&self, time: SystemTime) -> Option<SE23<f64>> {
+        let interval_start_time = self
+            .interval_assigner
+            .current_or_initialize_interval_start_time(time)?;
+        let interval_index = self
+            .interval_assigner
+            .assign_or_initialize_interval(interval_start_time)?;
+        let start = self.values.get(State(interval_index))?.clone();
+        let end = self.values.get(State(interval_index + 1))?.clone();
+        let interval_end_time = interval_start_time + self.config.knot_spacing;
+        Some(
+            SE23Spline::new(start, end, self.config.knot_spacing.as_secs_f64()).evaluate(tau(
+                interval_start_time,
+                interval_end_time,
+                time,
+            )),
+        )
     }
 
     pub(super) fn solve_diagnostics(

@@ -16,7 +16,7 @@ use crate::{
     live_odometry::LiveVisualOdometryLocalization,
     pose::backend_localization_for_result,
     publish::LocalizationPublishers,
-    visual_localization::GlobalVisualLock,
+    visual_localization::GlobalVisualLockTracker,
 };
 
 pub(crate) fn handle_visual_odometry(
@@ -46,7 +46,7 @@ pub(crate) fn handle_visual_odometry(
 
 pub(crate) async fn handle_visual_odometer(
     live_localization: &mut LiveVisualOdometryLocalization,
-    global_visual_lock: GlobalVisualLock,
+    global_visual_lock: &GlobalVisualLockTracker,
     visual_odometer: VisualOdometer,
     visual_odometer_cache: &Cache<VisualOdometer>,
     camera_matrix_cache: &Cache<TimeWrapper<CameraMatrix>>,
@@ -75,7 +75,7 @@ pub(crate) async fn handle_visual_odometer(
 pub(crate) async fn handle_optimization_result(
     frontend: &mut VinsFrontend,
     live_localization: &mut LiveVisualOdometryLocalization,
-    global_visual_lock: &mut GlobalVisualLock,
+    global_visual_lock: &mut GlobalVisualLockTracker,
     visual_odometer_cache: &Cache<VisualOdometer>,
     camera_matrix_cache: &Cache<TimeWrapper<CameraMatrix>>,
     publishers: LocalizationPublishers<'_>,
@@ -87,7 +87,7 @@ pub(crate) async fn handle_optimization_result(
     let result_time = Time::from_wallclock(result.time);
     let camera_matrix = fresh_camera_matrix(camera_matrix_cache, result_time);
     let backend_transform = backend_localization_for_result(&result, camera_matrix.as_deref());
-    let transform = if global_visual_lock.mark_backend_result() {
+    let transform = if global_visual_lock.handle_backend_result(&result) {
         live_localization.reset(&result, visual_odometer_cache, camera_matrix_cache);
         Some(
             live_localization
@@ -112,4 +112,35 @@ pub(crate) async fn handle_optimization_result(
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use localization_factrs::{
+        CameraIntrinsics, OptimizationResult, backend::BackendOptimizerStatus,
+    };
+
+    use super::*;
+
+    #[test]
+    fn unrelated_backend_result_does_not_acquire_global_lock() {
+        let pending_time = Time::from_nanos(2_000_000_000);
+        let mut tracker = GlobalVisualLockTracker::default();
+        tracker.track_associations(pending_time, linear_algebra::Isometry3::identity(), &[]);
+        let stale_result = OptimizationResult {
+            time: Time::from_nanos(1_000_000_000).to_wallclock(),
+            transform: nalgebra::Isometry3::identity(),
+            velocity: nalgebra::Vector3::zeros(),
+            camera_intrinsics: CameraIntrinsics::new(
+                nalgebra::vector![200.0, 200.0],
+                nalgebra::vector![320.0, 240.0],
+            ),
+            latest_visual_measurement_time: None,
+            latest_visual_transform: None,
+            optimizer_status: BackendOptimizerStatus::Converged,
+        };
+
+        assert!(!tracker.handle_backend_result(&stale_result));
+        assert_eq!(tracker.status(), crate::GlobalVisualLock::WaitingForBackend);
+    }
 }

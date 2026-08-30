@@ -8,7 +8,7 @@ use types::{
 
 use crate::{
     live_odometry::LiveVisualOdometryLocalization, pose::initial_state_from_camera_matrix,
-    publish::LocalizationPublishers, visual_localization::GlobalVisualLock,
+    publish::LocalizationPublishers, visual_localization::GlobalVisualLockTracker,
 };
 
 pub(crate) fn localization_is_damping(primary_state_cache: &Cache<PrimaryState>) -> bool {
@@ -33,7 +33,7 @@ pub(crate) fn initial_state_for_reset(
 pub(crate) fn reset_localization_for_damping(
     frontend: &mut VinsFrontend,
     live_localization: &mut LiveVisualOdometryLocalization,
-    global_visual_lock: &mut GlobalVisualLock,
+    global_visual_lock: &mut GlobalVisualLockTracker,
     initial_state: InitialState,
     time: Time,
 ) -> Result<(), VinsFrontendError> {
@@ -46,7 +46,7 @@ pub(crate) fn reset_localization_for_damping(
 pub(crate) async fn reset_and_publish_startup_prior(
     frontend: &mut VinsFrontend,
     live_localization: &mut LiveVisualOdometryLocalization,
-    global_visual_lock: &mut GlobalVisualLock,
+    global_visual_lock: &mut GlobalVisualLockTracker,
     initial_state: InitialState,
     time: Time,
     field_dimensions: &FieldDimensions,
@@ -67,7 +67,7 @@ pub(crate) async fn reset_and_publish_startup_prior(
 pub(crate) async fn publish_damping_optimization_result(
     frontend: &mut VinsFrontend,
     live_localization: &mut LiveVisualOdometryLocalization,
-    global_visual_lock: &mut GlobalVisualLock,
+    global_visual_lock: &mut GlobalVisualLockTracker,
     time: Time,
     field_dimensions: &FieldDimensions,
     publishers: LocalizationPublishers<'_>,
@@ -78,4 +78,36 @@ pub(crate) async fn publish_damping_optimization_result(
     publishers
         .publish_startup_prior(time, field_dimensions)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use localization_factrs::{
+        CameraIntrinsics, OptimizationResult, backend::BackendOptimizerStatus,
+    };
+
+    use super::*;
+
+    #[test]
+    fn damping_reset_discards_pending_bootstrap() {
+        let time = Time::from_nanos(1_000_000_000);
+        let mut tracker = GlobalVisualLockTracker::default();
+        tracker.track_associations(time, linear_algebra::Isometry3::identity(), &[]);
+        tracker.reset_for_damping();
+        let matching_result = OptimizationResult {
+            time: time.to_wallclock(),
+            transform: nalgebra::Isometry3::identity(),
+            velocity: nalgebra::Vector3::zeros(),
+            camera_intrinsics: CameraIntrinsics::new(
+                nalgebra::vector![200.0, 200.0],
+                nalgebra::vector![320.0, 240.0],
+            ),
+            latest_visual_measurement_time: Some(time.to_wallclock()),
+            latest_visual_transform: Some(nalgebra::Isometry3::identity()),
+            optimizer_status: BackendOptimizerStatus::Converged,
+        };
+
+        assert_eq!(tracker.status(), crate::GlobalVisualLock::Unlocked);
+        assert!(!tracker.handle_backend_result(&matching_result));
+    }
 }

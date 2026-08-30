@@ -11,7 +11,7 @@ use rand_distr::StandardNormal;
 use ros_z::time::Time;
 use types::{
     field_dimensions::FieldDimensions,
-    visual_localization::{FieldMarkAssociation, FieldMarkAssociationSource},
+    visual_localization::FieldMarkAssociation,
     visual_odometry::{VisualOdometer, VisualOdometryDelta},
 };
 
@@ -151,7 +151,6 @@ impl SyntheticSensors {
             observations.true_associations.push(FieldMarkAssociation {
                 detection: framed_pixel,
                 field_point: Framed::wrap(field_point),
-                source: FieldMarkAssociationSource::GlobalUnique,
             });
         }
         observations

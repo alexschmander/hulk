@@ -6,7 +6,6 @@ use serde::Serialize;
 use types::field_dimensions::FieldDimensions;
 
 use field_mark_association::FieldMarkAssociationParameters;
-use types::visual_localization::FieldMarkAssociationSource;
 
 use crate::{
     SimulationConfig,
@@ -15,7 +14,7 @@ use crate::{
     trajectory::Scenario,
 };
 
-pub const REPORT_SCHEMA_VERSION: u32 = 1;
+pub const REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Complete deterministic output from one headless localization run.
 #[derive(Debug, Serialize)]
@@ -102,7 +101,6 @@ pub struct LandmarkFrameCountsReport {
     pub associated: usize,
     pub detections: Vec<LandmarkDetectionReport>,
     pub associations: Vec<LandmarkAssociationReport>,
-    pub backend_reset_robot_to_field: Option<Pose3>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -130,7 +128,6 @@ pub struct LandmarkDetectionReport {
 pub struct LandmarkAssociationReport {
     pub detection_pixel_xy: [f64; 2],
     pub field_point_m: [f64; 3],
-    pub source: AssociationSource,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -141,13 +138,6 @@ pub enum LandmarkClassReport {
     TSpot,
     XSpot,
     PenaltySpot,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AssociationSource {
-    GlobalUnique,
-    PoseHint,
 }
 
 /// Runs one complete deterministic scenario and builds its analysis report.
@@ -302,13 +292,8 @@ impl From<&LandmarkFrameCounts> for LandmarkFrameCountsReport {
                         association.field_point.inner.y as f64,
                         association.field_point.inner.z as f64,
                     ],
-                    source: association.source.into(),
                 })
                 .collect(),
-            backend_reset_robot_to_field: value
-                .backend_reset_robot_to_field
-                .as_ref()
-                .map(|pose| Pose3::from_isometry(&pose.inner.cast::<f64>())),
         }
     }
 }
@@ -335,15 +320,6 @@ impl From<LandmarkClass> for LandmarkClassReport {
             LandmarkClass::TSpot => Self::TSpot,
             LandmarkClass::XSpot => Self::XSpot,
             LandmarkClass::PenaltySpot => Self::PenaltySpot,
-        }
-    }
-}
-
-impl From<FieldMarkAssociationSource> for AssociationSource {
-    fn from(value: FieldMarkAssociationSource) -> Self {
-        match value {
-            FieldMarkAssociationSource::GlobalUnique => Self::GlobalUnique,
-            FieldMarkAssociationSource::PoseHint => Self::PoseHint,
         }
     }
 }
@@ -474,12 +450,6 @@ mod tests {
                 .landmark_frame
                 .as_ref()
                 .is_some_and(|frame| !frame.detections.is_empty() && !frame.associations.is_empty())
-        }));
-        assert!(report.samples.iter().any(|sample| {
-            sample
-                .landmark_frame
-                .as_ref()
-                .is_some_and(|frame| frame.backend_reset_robot_to_field.is_some())
         }));
         assert!(
             report

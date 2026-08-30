@@ -15,8 +15,8 @@ use types::{
 };
 
 use crate::{
-    FieldMarkAssociationState, GlobalVisualLocalization,
-    parameters::FieldMarkAssociationParameters, robot_to_camera,
+    GlobalVisualLocalization, GlobalVisualLocalizer, parameters::FieldMarkAssociationParameters,
+    robot_to_camera,
 };
 
 const MAX_CAMERA_MATRIX_TIME_DISTANCE: Duration = Duration::from_millis(100);
@@ -25,12 +25,12 @@ type DetectedObjects = TimeWrapper<Vec<Object<RobocupObjectLabel>>>;
 type DetectedObjectsItem<'a> = FutureItem<'a, (Option<DetectedObjects>,)>;
 
 pub(crate) struct DetectionProcessingContext<'a> {
+    pub(crate) association_solver: &'a mut GlobalVisualLocalizer,
     pub(crate) parameters: &'a NodeParameters<FieldMarkAssociationParameters>,
     pub(crate) camera_matrix_cache: &'a Cache<TimeWrapper<CameraMatrix>>,
     pub(crate) field_dimensions_cache: &'a Cache<FieldDimensions>,
     pub(crate) localization_cache: &'a Cache<TimeWrapper<Option<AssociationPoseHint>>>,
     pub(crate) primary_state_cache: &'a Cache<PrimaryState>,
-    pub(crate) association_state: &'a mut FieldMarkAssociationState,
     pub(crate) associations_publisher: &'a Publisher<TimeWrapper<VisualLocalizationFrame>>,
     pub(crate) global_localization_publisher: &'a Publisher<Option<GlobalLocalizationDebug>>,
 }
@@ -60,7 +60,6 @@ pub(crate) async fn process_detected_objects(
         let Some(processed_frame) =
             tokio::task::block_in_place(|| -> Result<Option<ProcessedDetectionFrame>> {
                 if association_is_damping(ctx.primary_state_cache) {
-                    ctx.association_state.reset_for_damping();
                     return Ok(None);
                 }
 
@@ -70,12 +69,9 @@ pub(crate) async fn process_detected_objects(
                 let image_time = frame.image_time;
                 let robot_to_camera = frame.robot_to_camera;
 
-                let state = std::mem::take(ctx.association_state);
-                let (next_state, localization) = associate_detection_frame(state, frame)?;
-                *ctx.association_state = next_state;
+                let localization = associate_detection_frame(frame, ctx.association_solver)?;
 
                 if association_is_damping(ctx.primary_state_cache) {
-                    ctx.association_state.reset_for_damping();
                     return Ok(None);
                 }
 
@@ -134,7 +130,7 @@ fn pose_hint_at(
     localization_cache
         .get_nearest_with_stamp(image_time)
         .and_then(|(stamp, localization)| {
-            if time_distance(stamp, image_time) > parameters.pose_hint.max_pose_age {
+            if time_distance(stamp, image_time) > parameters.max_pose_hint_age {
                 return None;
             }
             localization.inner.as_ref().map(|hint| hint.robot_to_field)
@@ -142,30 +138,25 @@ fn pose_hint_at(
 }
 
 fn associate_detection_frame(
-    mut state: FieldMarkAssociationState,
     frame: PreparedDetectionFrame,
-) -> Result<(FieldMarkAssociationState, GlobalVisualLocalization)> {
+    solver: &mut GlobalVisualLocalizer,
+) -> Result<GlobalVisualLocalization> {
     let visual_features = crate::find_detected_visual_features(&frame.objects);
     if visual_features.supported_feature_count() == 0 {
-        return Ok((
-            state,
-            GlobalVisualLocalization {
-                debug: None,
-                accepted_global_pose: None,
-                associations: Vec::new(),
-            },
-        ));
+        return Ok(GlobalVisualLocalization {
+            debug: None,
+            associations: Vec::new(),
+        });
     }
 
-    let localization = state.associate_visual_features_with_debug(
+    Ok(solver.localize_with_debug(
         &visual_features,
         &frame.camera_matrix,
         &frame.field_dimensions,
         frame.pose_hint,
-        &frame.parameters,
+        &frame.parameters.global_localizer,
         frame.include_debug,
-    );
-    Ok((state, localization))
+    ))
 }
 
 async fn publish_localization_frame(
@@ -183,7 +174,6 @@ async fn publish_localization_frame(
             inner: VisualLocalizationFrame {
                 robot_to_camera: processed_frame.robot_to_camera,
                 associations: processed_frame.localization.associations,
-                backend_reset: processed_frame.localization.accepted_global_pose,
             },
         })
         .await?;

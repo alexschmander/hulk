@@ -42,7 +42,7 @@ use crate::{
     },
     pose::initial_state_from_camera_matrix,
     publish::LocalizationPublishers,
-    visual_localization::{GlobalVisualLock, handle_visual_localization_frame},
+    visual_localization::{GlobalVisualLockTracker, handle_visual_localization_frame},
 };
 
 const VISUAL_ODOMETER_TOPIC: &str = "visual_odometry/current_left_camera_to_visual_odometer";
@@ -158,7 +158,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let mut backend_handle =
         std::pin::pin!(spawn_backend_task(backend, solve_diagnostics_publisher));
     let mut live_localization = LiveVisualOdometryLocalization::default();
-    let mut global_visual_lock = GlobalVisualLock::Unlocked;
+    let mut global_visual_lock = GlobalVisualLockTracker::default();
     let mut damping_reset_interval = tokio::time::interval(Duration::from_millis(100));
     let publishers = LocalizationPublishers::new(
         &localization_publisher,
@@ -194,7 +194,6 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
 
                 handle_visual_localization_frame(
                     &mut frontend,
-                    &mut live_localization,
                     &mut global_visual_lock,
                     visual_localization,
                 )
@@ -223,7 +222,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 }
                 handle_visual_odometer(
                     &mut live_localization,
-                    global_visual_lock,
+                    &global_visual_lock,
                     visual_odometer,
                     &visual_odometer_cache,
                     &camera_matrix_cache,
@@ -295,5 +294,18 @@ async fn wait_for_field_dimensions(
             return *field_dimensions.as_ref();
         }
         interval.tick().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_starts_without_a_global_visual_lock() {
+        let tracker = GlobalVisualLockTracker::default();
+
+        assert_eq!(tracker.status(), crate::GlobalVisualLock::Unlocked);
+        assert!(!tracker.has_backend_result());
     }
 }

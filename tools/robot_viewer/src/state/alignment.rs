@@ -110,7 +110,6 @@ mod tests {
         FieldMarkAssociations {
             robot_to_camera: Isometry3::<Robot, Camera>::identity(),
             associations: Vec::new(),
-            backend_reset: None,
         }
     }
 

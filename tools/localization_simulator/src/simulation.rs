@@ -2,7 +2,7 @@ use booster::ImuState;
 use color_eyre::{Result, eyre::eyre};
 use coordinate_systems::{Camera, Field, Ground, Head, Robot};
 use field_mark_association::{
-    DetectedVisualFeatures, FieldMarkAssociationParameters, FieldMarkAssociationState,
+    DetectedVisualFeatures, FieldMarkAssociationParameters, GlobalVisualLocalizer,
 };
 use linear_algebra::{Framed, IntoTransform, Isometry3 as FramedIsometry3};
 use localization_3d::{
@@ -41,8 +41,6 @@ pub struct LandmarkFrameCounts {
     pub detections: Vec<LandmarkDetection>,
     /// Pixel-to-field correspondences actually passed to localization.
     pub associations: Vec<FieldMarkAssociation>,
-    /// Global-association reset pose passed to the backend, if one was accepted.
-    pub backend_reset_robot_to_field: Option<FramedIsometry3<Robot, Field>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -93,9 +91,9 @@ pub struct LocalizationSimulation {
     history: Vec<SimulationHistorySample>,
     localization: SynchronousLocalization,
     sensors: SyntheticSensors,
-    association_state: FieldMarkAssociationState,
     field_dimensions: FieldDimensions,
     association_parameters: FieldMarkAssociationParameters,
+    association_solver: GlobalVisualLocalizer,
     step_index: usize,
     previous_camera_matrix: Option<CameraMatrix>,
     latest_backend_output: Option<SynchronousLocalizationOutput>,
@@ -129,9 +127,9 @@ impl LocalizationSimulation {
             config,
             history: Vec::new(),
             localization,
-            association_state: FieldMarkAssociationState::default(),
             field_dimensions,
             association_parameters,
+            association_solver: GlobalVisualLocalizer::default(),
             step_index: 0,
             previous_camera_matrix: None,
             latest_backend_output: None,
@@ -201,7 +199,10 @@ impl LocalizationSimulation {
         }
 
         let mut landmark_frame = None;
-        if self.step_index % interval_steps(FIELD_MARK_INTERVAL) == 0 {
+        if self
+            .step_index
+            .is_multiple_of(interval_steps(FIELD_MARK_INTERVAL))
+        {
             let observations = self
                 .sensors
                 .observe_landmarks(&camera_to_field, &current_camera_matrix);
@@ -209,36 +210,25 @@ impl LocalizationSimulation {
             let emitted_detections = observations.detections.supported_feature_count();
             let association_count;
             let frame = match self.config.association_mode {
-                AssociationMode::KnownCorrespondences if self.step_index == 0 => {
-                    association_count = 0;
-                    VisualLocalizationFrame {
-                        robot_to_camera: framed_robot_to_camera(),
-                        associations: Vec::new(),
-                        backend_reset: Some(robot_to_field.framed_transform()),
-                    }
-                }
                 AssociationMode::KnownCorrespondences => {
                     association_count = observations.true_associations.len();
                     VisualLocalizationFrame {
                         robot_to_camera: framed_robot_to_camera(),
                         associations: observations.true_associations,
-                        backend_reset: None,
                     }
                 }
                 AssociationMode::ProductionAssociation => {
-                    let result = self.association_state.associate_visual_features_with_debug(
+                    let result = self.association_solver.localize(
                         &observations.detections,
                         &current_camera_matrix,
                         &self.field_dimensions,
                         Some(self.latest_pose_hint),
-                        &self.association_parameters,
-                        false,
+                        &self.association_parameters.global_localizer,
                     );
                     association_count = result.associations.len();
                     VisualLocalizationFrame {
                         robot_to_camera: framed_robot_to_camera(),
                         associations: result.associations,
-                        backend_reset: result.accepted_global_pose,
                     }
                 }
             };
@@ -248,13 +238,14 @@ impl LocalizationSimulation {
                 associated: association_count,
                 detections: flatten_detections(&observations.detections),
                 associations: frame.associations.clone(),
-                backend_reset_robot_to_field: frame.backend_reset,
             });
             self.localization
                 .ingest_visual_localization_frame(TimeWrapper { time, inner: frame })?;
         }
 
-        if self.step_index % interval_steps(SOLVE_INTERVAL) == 0
+        if self
+            .step_index
+            .is_multiple_of(interval_steps(SOLVE_INTERVAL))
             && let Some(output) = self.localization.solve_once(
                 TimeWrapper {
                     time,
@@ -513,6 +504,50 @@ mod tests {
     }
 
     #[test]
+    fn noisy_production_associations_match_sensor_correspondences() {
+        let field = FieldDimensions::SPL_2025;
+        let scenario = Scenario::stationary();
+        let config = SimulationConfig {
+            seed: 0,
+            association_mode: AssociationMode::ProductionAssociation,
+            landmark_pixel_sigma: 2.0,
+            landmark_dropout_probability: 0.2,
+            ..Default::default()
+        };
+        let camera_to_field = scenario.sample_camera_to_field(0.0);
+        let robot_to_field = robot_to_field_from_camera_to_field(&camera_to_field);
+        let camera_matrix = camera_matrix(&robot_to_field);
+        let mut sensors = SyntheticSensors::new(&config, &field);
+        let parameters = production_association_parameters().unwrap();
+        let mut localizer = GlobalVisualLocalizer::default();
+        let mut accepted = false;
+        for _ in 0..30 {
+            let observations = sensors.observe_landmarks(&camera_to_field, &camera_matrix);
+            let result = localizer.localize(
+                &observations.detections,
+                &camera_matrix,
+                &field,
+                Some(robot_to_field.framed_transform()),
+                &parameters.global_localizer,
+            );
+            if result.associations.is_empty() {
+                continue;
+            }
+            accepted = true;
+            for association in result.associations {
+                assert!(observations.true_associations.iter().any(|expected| {
+                    (expected.detection - association.detection).inner.norm() < 1.0e-4
+                        && (expected.field_point - association.field_point)
+                            .inner
+                            .norm()
+                            < 1.0e-4
+                }));
+            }
+        }
+        assert!(accepted, "no noisy frame produced a certified assignment");
+    }
+
+    #[test]
     fn complete_simulation_is_deterministic_for_the_same_seed() {
         let config = SimulationConfig {
             seed: 0x5eed,
@@ -600,11 +635,15 @@ mod tests {
         let last = simulation.history.last().expect("history is non-empty");
         let estimate = last
             .live_robot_to_field
-            .expect("known reset establishes live localization")
+            .expect("known correspondences establish live localization")
             .inner;
         let truth = last.truth_robot_to_field.inner;
 
-        assert!((estimate.translation.vector - truth.translation.vector).norm() < 0.01);
+        let translation_error = (estimate.translation.vector - truth.translation.vector).norm();
+        assert!(
+            translation_error < 0.1,
+            "translation error was {translation_error}"
+        );
         assert!(estimate.rotation.angle_to(&truth.rotation) < 0.5_f32.to_radians());
     }
 
@@ -631,7 +670,7 @@ mod tests {
             };
             let estimate = current
                 .live_robot_to_field
-                .expect("known reset establishes live localization")
+                .expect("known correspondences establish live localization")
                 .inner;
             let truth = current.truth_robot_to_field.inner;
             let error = estimate.translation.vector - truth.translation.vector;

@@ -36,7 +36,7 @@ pub enum AssociationMode {
     /// Feed the estimator known ground-truth landmark correspondences.
     #[default]
     KnownCorrespondences,
-    /// Feed class-grouped pixels through the production association state machine.
+    /// Feed class-grouped pixels through the production stateless associator.
     ProductionAssociation,
 }
 

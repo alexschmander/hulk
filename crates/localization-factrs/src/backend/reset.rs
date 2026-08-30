@@ -1,31 +1,14 @@
 use std::time::SystemTime;
 
-use crate::{
-    initial_state::InitialState, measurements::GlobalPoseMeasurement, symbols::CameraIntrinsics,
-};
+use crate::initial_state::InitialState;
 
 use super::{
     VinsBackend,
     graph::{initialize_graph, optimizer_from_graph},
     interval_assigner::IntervalAssigner,
-    state::zero_velocity_pose,
 };
 
 impl VinsBackend {
-    pub(super) fn reset_to_global_pose(&mut self, global_pose: GlobalPoseMeasurement) {
-        let camera_intrinsics = self
-            .values
-            .get(CameraIntrinsics(0))
-            .cloned()
-            .unwrap_or_else(|| self.initial_state.camera_intrinsics.clone());
-        self.initial_state = InitialState::new(
-            zero_velocity_pose(&global_pose.robot_to_field),
-            camera_intrinsics,
-        );
-
-        self.reset_to_initial_state(self.initial_state.clone(), global_pose.time);
-    }
-
     pub(super) fn reset_to_initial_state(&mut self, initial_state: InitialState, time: SystemTime) {
         self.initial_state = initial_state;
 
@@ -41,6 +24,7 @@ impl VinsBackend {
         self.next_imu_attitude_knot_index = 0;
         self.last_imu_knot_orientation = None;
         self.last_optimizer_status = None;
+        self.latest_visual_measurement_time = None;
         self.last_imu_kinematics_measurement_time = None;
         self.init_intervals_through(0);
     }

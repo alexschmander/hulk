@@ -4,46 +4,76 @@ use projection::camera_matrix::CameraMatrix;
 use types::{field_dimensions::FieldDimensions, visual_localization::FieldMarkAssociation};
 
 use crate::{
-    debug::global_localization_debug_from_result,
     features::DetectedVisualFeatures,
     global_association::{
-        FeatureAssociation, GlobalAssociationConfig as GlobalLocalizerParameters, GlobalAssociator,
-        GlobalLocalizationDetailedDebug, GlobalLocalizationInput, GlobalLocalizationResult,
+        GlobalAssociationConfig as GlobalLocalizerParameters, GlobalAssociationResult,
+        GlobalLocalizationInput, SolverWorkspace,
     },
-    parameters::FieldMarkAssociationParameters,
     robot_to_camera,
-    tracking::FieldMarkAssociationState,
 };
 
 /// Result of running visual global localization on one object-detection frame.
 pub struct GlobalVisualLocalization {
     /// Debug payload for the best visual global localization result, if any.
     pub debug: Option<types::visual_localization::GlobalLocalizationDebug>,
-    /// Accepted global pose when global recovery should reset the backend state.
-    pub accepted_global_pose: Option<Isometry3<Robot, Field>>,
-    /// Fixed associations selected by either global uniqueness or pose-hint fallback.
+    /// Globally certified fixed associations.
     pub associations: Vec<FieldMarkAssociation>,
 }
 
-/// Runs global localization first and falls back to pose-hint association when needed.
-pub fn associate_visual_features(
-    visual_features: &DetectedVisualFeatures,
-    camera_matrix: &CameraMatrix,
-    field_dimensions: &FieldDimensions,
-    pose_hint: Option<Isometry3<Robot, Field>>,
-    parameters: &FieldMarkAssociationParameters,
-) -> GlobalVisualLocalization {
-    FieldMarkAssociationState::default().associate_visual_features_with_debug(
-        visual_features,
-        camera_matrix,
-        field_dimensions,
-        pose_hint,
-        parameters,
-        true,
-    )
+/// Reusable stateless global localizer with retained scratch storage.
+#[derive(Default)]
+pub struct GlobalVisualLocalizer {
+    workspace: SolverWorkspace,
+}
+
+impl GlobalVisualLocalizer {
+    /// Localizes one frame. Previous frames do not influence the result.
+    pub fn localize(
+        &mut self,
+        visual_features: &DetectedVisualFeatures,
+        camera_matrix: &CameraMatrix,
+        field_dimensions: &FieldDimensions,
+        pose_hint: Option<Isometry3<Robot, Field>>,
+        parameters: &GlobalLocalizerParameters,
+    ) -> GlobalVisualLocalization {
+        self.localize_with_debug(
+            visual_features,
+            camera_matrix,
+            field_dimensions,
+            pose_hint,
+            parameters,
+            true,
+        )
+    }
+
+    pub(crate) fn localize_with_debug(
+        &mut self,
+        visual_features: &DetectedVisualFeatures,
+        camera_matrix: &CameraMatrix,
+        field_dimensions: &FieldDimensions,
+        pose_hint: Option<Isometry3<Robot, Field>>,
+        parameters: &GlobalLocalizerParameters,
+        include_debug: bool,
+    ) -> GlobalVisualLocalization {
+        let result = self.workspace.solve(
+            GlobalLocalizationInput {
+                visual_features,
+                field_dimensions,
+                ground_to_robot: camera_matrix.ground_to_robot,
+                robot_to_camera: robot_to_camera(camera_matrix),
+                camera_intrinsic: camera_matrix.intrinsics,
+                pose_hint,
+            },
+            *parameters,
+        );
+        localization_result(result, include_debug)
+    }
 }
 
 /// Runs global localization and returns debug data plus backend-safe associations.
+///
+/// `pose_hint` is used only to select one representative of an already-certified 180-degree field
+/// symmetry. It never creates fallback associations or changes uniqueness certification.
 pub fn localize_global_visual_features(
     visual_features: &DetectedVisualFeatures,
     camera_matrix: &CameraMatrix,
@@ -51,83 +81,27 @@ pub fn localize_global_visual_features(
     pose_hint: Option<Isometry3<Robot, Field>>,
     parameters: &GlobalLocalizerParameters,
 ) -> GlobalVisualLocalization {
-    localize_global_visual_features_with_debug(
+    GlobalVisualLocalizer::default().localize(
         visual_features,
         camera_matrix,
         field_dimensions,
         pose_hint,
         parameters,
-        true,
     )
 }
 
-fn localize_global_visual_features_with_debug(
-    visual_features: &DetectedVisualFeatures,
-    camera_matrix: &CameraMatrix,
-    field_dimensions: &FieldDimensions,
-    pose_hint: Option<Isometry3<Robot, Field>>,
-    parameters: &GlobalLocalizerParameters,
+fn localization_result(
+    result: Option<GlobalAssociationResult>,
     include_debug: bool,
 ) -> GlobalVisualLocalization {
-    let localizer = GlobalAssociator::new(*parameters);
-    let result = localizer.localize(GlobalLocalizationInput {
-        visual_features,
-        field_dimensions,
-        ground_to_robot: camera_matrix.ground_to_robot,
-        robot_to_camera: robot_to_camera(camera_matrix),
-        camera_intrinsic: camera_matrix.intrinsics,
-        pose_hint,
-    });
-
-    GlobalVisualLocalization {
-        debug: if include_debug {
-            result.as_ref().map(global_localization_debug_from_result)
-        } else {
-            None
+    match result {
+        Some(result) => GlobalVisualLocalization {
+            debug: include_debug.then_some(result.debug),
+            associations: result.associations,
         },
-        accepted_global_pose: None,
-        associations: result
-            .as_ref()
-            .map(GlobalLocalizationResult::unique_feature_associations)
-            .map(|associations| {
-                field_mark_associations(
-                    associations.iter(),
-                    types::visual_localization::FieldMarkAssociationSource::GlobalUnique,
-                )
-            })
-            .unwrap_or_default(),
+        None => GlobalVisualLocalization {
+            debug: None,
+            associations: Vec::new(),
+        },
     }
-}
-
-pub(crate) fn field_mark_associations<'a>(
-    associations: impl IntoIterator<Item = &'a FeatureAssociation>,
-    source: types::visual_localization::FieldMarkAssociationSource,
-) -> Vec<FieldMarkAssociation> {
-    associations
-        .into_iter()
-        .map(|association| FieldMarkAssociation {
-            detection: association.detection,
-            field_point: association.field_point.extend(0.0),
-            source,
-        })
-        .collect()
-}
-
-/// Runs global localization and returns per-feature debug data for visual inspection.
-pub fn localize_global_visual_features_detailed_debug(
-    visual_features: &DetectedVisualFeatures,
-    camera_matrix: &CameraMatrix,
-    field_dimensions: &FieldDimensions,
-    pose_hint: Option<Isometry3<Robot, Field>>,
-    parameters: &GlobalLocalizerParameters,
-) -> Option<GlobalLocalizationDetailedDebug> {
-    let localizer = GlobalAssociator::new(*parameters);
-    localizer.localize_detailed(GlobalLocalizationInput {
-        visual_features,
-        field_dimensions,
-        ground_to_robot: camera_matrix.ground_to_robot,
-        robot_to_camera: robot_to_camera(camera_matrix),
-        camera_intrinsic: camera_matrix.intrinsics,
-        pose_hint,
-    })
 }
