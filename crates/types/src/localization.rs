@@ -1,11 +1,57 @@
-use nalgebra::{Matrix3, vector};
-use ros_z::Message;
+use nalgebra::{Matrix3, SMatrix, vector};
+use ros_z::time::Time;
+use ros_z::{Message, MessageSchema, SchemaBuilder, SerdeCdrCodec};
 use serde::{Deserialize, Serialize};
 
 use coordinate_systems::{Field, Ground, Robot};
 use linear_algebra::{Isometry2, Isometry3, Point2, Pose2};
 
 use crate::multivariate_normal_distribution::MultivariateNormalDistribution;
+
+pub const LOCALIZATION_STATE_3D_TOPIC: &str = "localization/state_3d";
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct LocalizationEstimate3D {
+    /// Global pose in the same direction as the estimator's composed output.
+    pub robot_to_field: Isometry3<Robot, Field>,
+    /// Fact-rs tangent covariance for `robot_to_field`, ordered rotation then translation.
+    pub covariance: SMatrix<f32, 6, 6>,
+}
+
+impl Message for LocalizationEstimate3D {
+    type Codec = SerdeCdrCodec<Self>;
+
+    fn type_name() -> String {
+        "types::localization::LocalizationEstimate3D".to_string()
+    }
+}
+
+impl MessageSchema for LocalizationEstimate3D {
+    fn build_schema(
+        builder: &mut SchemaBuilder,
+    ) -> Result<ros_z::__private::ros_z_schema::TypeDef, ros_z::__private::ros_z_schema::SchemaError>
+    {
+        builder.define_message_struct::<Self>(|fields| {
+            fields.field::<Isometry3<Robot, Field>>("robot_to_field")?;
+            let covariance = fields.shape::<[f32; 36]>()?;
+            fields.field_with_shape("covariance", covariance);
+            Ok(())
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq)]
+pub enum LocalizationState3D {
+    Startup,
+    Tracking {
+        estimate: LocalizationEstimate3D,
+        last_successful_solve: Time,
+    },
+    LostTrack {
+        last_known_estimate: LocalizationEstimate3D,
+        last_successful_solve: Time,
+    },
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ros_z::Message)]
 pub struct Update {

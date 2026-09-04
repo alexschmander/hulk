@@ -37,7 +37,12 @@ pub(crate) struct PoseCorrespondence {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OdometryDiagnostics {
     pub correspondences: usize,
+    pub previous_disparity_mean: Option<f32>,
+    pub previous_disparity_below_4px: usize,
+    pub previous_disparity_below_6px: usize,
+    pub previous_disparity_below_8px: usize,
     pub left_ransac_inliers: usize,
+    pub used_identity_initialization: bool,
     pub right_observations: usize,
     pub trusted_right_observations: usize,
     pub used_outlier_free_pose: bool,
@@ -57,6 +62,15 @@ pub struct OdometryDiagnostics {
     pub weighted_cost_after_lm: Option<f32>,
     pub right_bad_fraction_before_lm: Option<f32>,
     pub right_bad_fraction_after_lm: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PoseEvaluationDiagnostics {
+    pub left_rmse: Option<f32>,
+    pub right_rmse: Option<f32>,
+    pub left_inliers_1px: usize,
+    pub left_inliers_2px: usize,
+    pub left_inliers_6px: usize,
 }
 
 pub struct PreviousFrame {
@@ -86,6 +100,53 @@ impl OdometryScratch {
 
     pub fn diagnostics(&self) -> OdometryDiagnostics {
         self.diagnostics
+    }
+
+    pub fn evaluate_pose(
+        &self,
+        pose: &na::Isometry3<f32>,
+        triangulator: &StereoTriangulator,
+    ) -> Option<PoseEvaluationDiagnostics> {
+        let rotation = pose.rotation.to_rotation_matrix();
+        let rotation = rotation.matrix();
+        let pose = PnPResult {
+            rotation: Mat3AF32::from_cols(
+                Vec3AF32::new(rotation[(0, 0)], rotation[(1, 0)], rotation[(2, 0)]),
+                Vec3AF32::new(rotation[(0, 1)], rotation[(1, 1)], rotation[(2, 1)]),
+                Vec3AF32::new(rotation[(0, 2)], rotation[(1, 2)], rotation[(2, 2)]),
+            ),
+            translation: Vec3AF32::new(pose.translation.x, pose.translation.y, pose.translation.z),
+            rvec: Vec3AF32::new(0.0, 0.0, 0.0),
+            reproj_rmse: None,
+            num_iterations: None,
+            converged: None,
+        };
+        let metrics = reprojection_metrics(
+            &pose,
+            &self.correspondences,
+            triangulator.intrinsics_f32(),
+            triangulator.baseline(),
+        )?;
+        let mut diagnostics = PoseEvaluationDiagnostics {
+            left_rmse: metrics.left_rmse(),
+            right_rmse: metrics.right_rmse(),
+            ..Default::default()
+        };
+        for correspondence in &self.correspondences {
+            let camera_point =
+                vector3_from_vec3a(pose.rotation * correspondence.world_point + pose.translation);
+            let error = residual_with_x_offset(
+                camera_point,
+                correspondence.image_point,
+                triangulator.intrinsics_f32(),
+                0.0,
+            )?
+            .norm();
+            diagnostics.left_inliers_1px += (error <= 1.0) as usize;
+            diagnostics.left_inliers_2px += (error <= 2.0) as usize;
+            diagnostics.left_inliers_6px += (error <= 6.0) as usize;
+        }
+        Some(diagnostics)
     }
 }
 
@@ -252,6 +313,26 @@ pub fn estimate_previous_to_current(
     }
 
     scratch.diagnostics.correspondences = scratch.correspondences.len();
+    let disparities =
+        temporal_matches
+            .left_to_right()
+            .filter_map(|(previous_index, current_index, _)| {
+                current_left
+                    .is_valid(current_index)
+                    .then(|| previous.point(previous_index).map(|point| point.disparity))
+                    .flatten()
+            });
+    let mut disparity_sum = 0.0;
+    let mut disparity_count = 0;
+    for disparity in disparities {
+        disparity_sum += disparity;
+        disparity_count += 1;
+        scratch.diagnostics.previous_disparity_below_4px += (disparity < 4.0) as usize;
+        scratch.diagnostics.previous_disparity_below_6px += (disparity < 6.0) as usize;
+        scratch.diagnostics.previous_disparity_below_8px += (disparity < 8.0) as usize;
+    }
+    scratch.diagnostics.previous_disparity_mean =
+        (disparity_count > 0).then(|| disparity_sum / disparity_count as f32);
     scratch.diagnostics.right_observations = scratch
         .correspondences
         .iter()
@@ -272,13 +353,74 @@ pub fn estimate_previous_to_current(
         &mut scratch.pnp_image_points,
     );
 
-    let pose = if let Some(pose) = estimate_outlier_free_pose(triangulator, parameters, scratch) {
-        pose
-    } else {
-        estimate_ransac_pose(triangulator, parameters, scratch)?
-    };
+    let pose =
+        if let Some(pose) = estimate_identity_initialized_pose(triangulator, parameters, scratch) {
+            pose
+        } else if let Some(pose) = estimate_outlier_free_pose(triangulator, parameters, scratch) {
+            pose
+        } else {
+            estimate_ransac_pose(triangulator, parameters, scratch)?
+        };
 
     Some(pnp_pose_to_isometry(&pose))
+}
+
+fn estimate_identity_initialized_pose(
+    triangulator: &StereoTriangulator,
+    parameters: &StereoVisualOdometryPoseEstimationParameters,
+    scratch: &mut OdometryScratch,
+) -> Option<PnPResult> {
+    let mut diagnostics = scratch.diagnostics;
+    let identity = identity_pnp_pose();
+    let identity_metrics = reprojection_metrics(
+        &identity,
+        &scratch.correspondences,
+        triangulator.intrinsics_f32(),
+        triangulator.baseline(),
+    )?;
+    if identity_metrics
+        .left_rmse()
+        .is_some_and(|rmse| rmse <= parameters.lm_cost_tolerance.sqrt())
+        && passes_soft_stereo_validation(identity_metrics, parameters.minimum_pnp_correspondences)
+    {
+        diagnostics.used_identity_initialization = true;
+        fill_diagnostics_before_lm(&mut diagnostics, identity_metrics);
+        fill_diagnostics_after_lm(&mut diagnostics, identity_metrics);
+        scratch.diagnostics = diagnostics;
+        return Some(with_stereo_rmse(identity, identity_metrics));
+    }
+    let pose = refine_pose(
+        &identity,
+        &scratch.correspondences,
+        triangulator,
+        parameters,
+        false,
+        &mut diagnostics,
+    )?;
+    if !pose
+        .reproj_rmse
+        .is_some_and(|rmse| rmse.is_finite() && rmse <= parameters.ransac_reprojection_threshold_px)
+    {
+        return None;
+    }
+    diagnostics.used_identity_initialization = true;
+    scratch.diagnostics = diagnostics;
+    Some(pose)
+}
+
+fn identity_pnp_pose() -> PnPResult {
+    PnPResult {
+        rotation: Mat3AF32::from_cols(
+            Vec3AF32::new(1.0, 0.0, 0.0),
+            Vec3AF32::new(0.0, 1.0, 0.0),
+            Vec3AF32::new(0.0, 0.0, 1.0),
+        ),
+        translation: Vec3AF32::new(0.0, 0.0, 0.0),
+        rvec: Vec3AF32::new(0.0, 0.0, 0.0),
+        reproj_rmse: None,
+        num_iterations: None,
+        converged: None,
+    }
 }
 
 fn right_observation_weight(left_pixel: Vec2F32, observation: RightImageObservation) -> f32 {
@@ -708,16 +850,8 @@ mod tests {
 
     fn identity_pose(rmse: Option<f32>) -> PnPResult {
         PnPResult {
-            rotation: Mat3AF32::from_cols(
-                Vec3AF32::new(1.0, 0.0, 0.0),
-                Vec3AF32::new(0.0, 1.0, 0.0),
-                Vec3AF32::new(0.0, 0.0, 1.0),
-            ),
-            translation: Vec3AF32::new(0.0, 0.0, 0.0),
-            rvec: Vec3AF32::new(0.0, 0.0, 0.0),
             reproj_rmse: rmse,
-            num_iterations: None,
-            converged: None,
+            ..identity_pnp_pose()
         }
     }
 
@@ -729,6 +863,55 @@ mod tests {
             weight: 1.0,
             right_weight: right_image_point.map_or(0.0, |_| 1.0),
         }
+    }
+
+    fn solve_exact_points(
+        points: &[Vec3AF32],
+        previous_to_current: &na::Isometry3<f32>,
+    ) -> na::Isometry3<f32> {
+        let correspondences = points
+            .iter()
+            .map(|point| {
+                let point = previous_to_current * na::Point3::new(point.x, point.y, point.z);
+                let left = Vec2F32::new(100.0 * point.x / point.z, 100.0 * point.y / point.z);
+                PoseCorrespondence {
+                    world_point: Vec3AF32::new(
+                        previous_to_current.inverse_transform_point(&point).x,
+                        previous_to_current.inverse_transform_point(&point).y,
+                        previous_to_current.inverse_transform_point(&point).z,
+                    ),
+                    image_point: left,
+                    right_image_point: Some(Vec2F32::new(left.x - 50.0 / point.z, left.y)),
+                    weight: 1.0,
+                    right_weight: 1.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let parameters = StereoVisualOdometryPoseEstimationParameters {
+            minimum_pnp_correspondences: 4,
+            ransac_reprojection_threshold_px: 6.0,
+            ransac_max_iterations: 100,
+            ransac_confidence: 0.99,
+            lm_max_iterations: 100,
+            lm_initial_lambda: 0.001,
+            lm_min_lambda: 1.0e-7,
+            lm_max_lambda: 1.0e10,
+            lm_step_tolerance: 1.0e-7,
+            lm_cost_tolerance: 1.0e-7,
+            lm_huber_threshold_px: 3.0,
+            full_weight_disparity_px: 8.0,
+            min_disparity_weight: 0.5,
+            max_vertical_disparity_px: 3.0,
+        };
+        let result = refine_pose_lm_direct(
+            &correspondences,
+            &intrinsics(),
+            0.5,
+            &parameters,
+            &identity_pose(None),
+        )
+        .unwrap();
+        pnp_pose_to_isometry(&result)
     }
 
     #[test]
@@ -801,5 +984,48 @@ mod tests {
 
         assert!(is_refinement_better(initial, better));
         assert!(!is_refinement_better(initial, bad_left_regression));
+    }
+
+    #[test]
+    fn exact_non_planar_identity_lm_returns_previous_to_current() {
+        let points = [
+            Vec3AF32::new(-1.0, -0.7, 3.0),
+            Vec3AF32::new(0.8, -0.5, 3.5),
+            Vec3AF32::new(-0.6, 0.9, 4.0),
+            Vec3AF32::new(1.1, 0.8, 4.5),
+            Vec3AF32::new(-1.2, 0.2, 5.0),
+            Vec3AF32::new(0.3, -0.9, 5.5),
+            Vec3AF32::new(0.7, 0.4, 6.0),
+            Vec3AF32::new(-0.2, 0.6, 6.5),
+        ];
+        let expected = na::Isometry3::new(
+            na::Vector3::new(0.05, -0.02, -0.1),
+            na::Vector3::new(0.01, -0.02, 0.015),
+        );
+        let estimated = solve_exact_points(&points, &expected);
+
+        assert!(
+            (estimated.translation.vector - expected.translation.vector).norm() < 1.0e-3,
+            "expected {expected:?}, got {estimated:?}"
+        );
+        assert!(estimated.rotation.angle_to(&expected.rotation) < 1.0e-3);
+    }
+
+    #[test]
+    fn exact_planar_identity_lm_returns_previous_to_current() {
+        let points = (-2..=2)
+            .flat_map(|x| (-2..=2).map(move |y| Vec3AF32::new(x as f32 * 0.4, y as f32 * 0.3, 4.0)))
+            .collect::<Vec<_>>();
+        let expected = na::Isometry3::new(
+            na::Vector3::new(0.05, -0.02, -0.1),
+            na::Vector3::new(0.01, -0.02, 0.015),
+        );
+        let estimated = solve_exact_points(&points, &expected);
+
+        assert!(
+            (estimated.translation.vector - expected.translation.vector).norm() < 1.0e-3,
+            "expected {expected:?}, got {estimated:?}"
+        );
+        assert!(estimated.rotation.angle_to(&expected.rotation) < 1.0e-3);
     }
 }

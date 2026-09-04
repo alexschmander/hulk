@@ -1,8 +1,8 @@
 use ::types::field_dimensions::FieldDimensions;
-use coordinate_systems::{Camera, Field, Ground, Pixel, Robot};
-use linear_algebra::{Isometry3, Point2, point};
+use coordinate_systems::{Camera, Field, Local, Pixel, Robot};
+use linear_algebra::{Isometry2, Isometry3, Point2, point};
 use linear_sum_assignment::{AssignmentSolver, Objective};
-use nalgebra::{Matrix2, Similarity2, Translation3, UnitQuaternion, Vector2, Vector3};
+use nalgebra::{Matrix2, Similarity2, UnitQuaternion, Vector2, Vector3};
 use ndarray::{ArrayView2, s};
 use projection::intrinsic::Intrinsic;
 use smallvec::SmallVec;
@@ -23,6 +23,7 @@ const DUPLICATE_PIXEL_DISTANCE: f32 = 1.0;
 const MAX_ASSIGNMENT_REFIT_ITERATIONS: usize = 4;
 const MAX_ASSIGNMENT_COLUMNS: usize = MAX_LANDMARKS_PER_CLASS + GLOBAL_LOCALIZER_MAX_DETECTIONS;
 const INLINE_MATCH_CAPACITY: usize = 8;
+const MIDFIELD_EPSILON: f32 = 0.05;
 type MatchSet = SmallVec<[Match; INLINE_MATCH_CAPACITY]>;
 type AssociationKey = SmallVec<[(usize, usize); INLINE_MATCH_CAPACITY]>;
 
@@ -30,10 +31,10 @@ type AssociationKey = SmallVec<[(usize, usize); INLINE_MATCH_CAPACITY]>;
 pub(crate) struct GlobalLocalizationInput<'a> {
     pub visual_features: &'a DetectedVisualFeatures,
     pub field_dimensions: &'a FieldDimensions,
-    pub ground_to_robot: Isometry3<Ground, Robot>,
     pub robot_to_camera: Isometry3<Robot, Camera>,
+    pub robot_to_local: Isometry3<Robot, Local>,
     pub camera_intrinsic: Intrinsic,
-    pub pose_hint: Option<Isometry3<Robot, Field>>,
+    pub alignment_hint: Option<Isometry2<Local, Field>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -110,6 +111,7 @@ struct Problem<'a> {
 
 pub(crate) struct GlobalAssociationResult {
     pub associations: Vec<FieldMarkAssociation>,
+    pub local_to_field: Isometry2<Local, Field>,
     pub debug: GlobalLocalizationDebug,
 }
 
@@ -144,7 +146,7 @@ impl<'a> Problem<'a> {
     fn new(input: GlobalLocalizationInput<'a>, config: GlobalAssociationConfig) -> Option<Self> {
         if !valid_intrinsic(input.camera_intrinsic)
             || !input
-                .ground_to_robot
+                .robot_to_local
                 .inner
                 .to_homogeneous()
                 .iter()
@@ -176,10 +178,10 @@ fn preprocess(
     map: &LandmarkMap,
     config: GlobalAssociationConfig,
 ) -> Option<Vec<Detection>> {
-    let ground_to_camera = input.robot_to_camera * input.ground_to_robot;
-    let camera_to_ground = ground_to_camera.inverse();
-    let camera_to_ground_rotation = camera_to_ground.inner.rotation;
-    let camera_origin_z = camera_to_ground.inner.translation.vector.z;
+    let local_to_camera = input.robot_to_camera * input.robot_to_local.inverse();
+    let camera_to_local = local_to_camera.inverse();
+    let camera_to_local_rotation = camera_to_local.inner.rotation;
+    let camera_origin_z = camera_to_local.inner.translation.vector.z;
     let mut detections = raw_detections(input.visual_features)
         .enumerate()
         .filter_map(|(id, (class, feature))| {
@@ -191,15 +193,15 @@ fn preprocess(
                 return None;
             }
             let bearing = input.camera_intrinsic.bearing(feature.pixel).inner;
-            let ray = camera_to_ground_rotation * bearing;
+            let ray = camera_to_local_rotation * bearing;
             if camera_origin_z.abs() > RAY_EPSILON && camera_origin_z * ray.z >= 0.0 {
                 return None;
             }
-            let a = normalized_ground_direction(ray)?;
+            let a = normalized_local_direction(ray)?;
             let covariance = normalized_ray_covariance(
                 input.camera_intrinsic,
                 feature.pixel,
-                camera_to_ground_rotation,
+                camera_to_local_rotation,
                 config,
             )?;
             let weight = feature.confidence * map.rarity_weight(class);
@@ -397,25 +399,27 @@ fn select_unique_orbit(
 }
 
 fn select_symmetry_representative(problem: &Problem<'_>, best: Candidate) -> Option<Candidate> {
-    let symmetric_key = symmetric_key(&best.key, &problem.map);
-    let Some(hint) = problem.input.pose_hint.filter(is_finite_pose) else {
-        return Some(if symmetric_key < best.key {
-            symmetric_candidate(&best, &problem.map)
-        } else {
-            best
-        });
-    };
-
     let symmetric = symmetric_candidate(&best, &problem.map);
-    if yaw_error(robot_to_field(problem, &symmetric), hint)
-        .abs()
-        .total_cmp(&yaw_error(robot_to_field(problem, &best), hint).abs())
-        .then_with(|| symmetric.key.cmp(&best.key))
-        .is_lt()
-    {
-        Some(symmetric)
-    } else {
-        Some(best)
+    if let Some(hint) = problem.input.alignment_hint.filter(is_finite_alignment) {
+        return Some(
+            if alignment_error(local_to_field(problem, &symmetric), hint)
+                .total_cmp(&alignment_error(local_to_field(problem, &best), hint))
+                .then_with(|| symmetric.key.cmp(&best.key))
+                .is_lt()
+            {
+                symmetric
+            } else {
+                best
+            },
+        );
+    }
+
+    let best_x = robot_field_x(problem, &best);
+    let symmetric_x = robot_field_x(problem, &symmetric);
+    match (best_x < -MIDFIELD_EPSILON, symmetric_x < -MIDFIELD_EPSILON) {
+        (true, false) => Some(best),
+        (false, true) => Some(symmetric),
+        _ => None,
     }
 }
 
@@ -808,13 +812,13 @@ fn valid_intrinsic(intrinsic: Intrinsic) -> bool {
 fn normalized_ray(
     intrinsic: Intrinsic,
     pixel: Point2<Pixel>,
-    camera_to_ground_rotation: UnitQuaternion<f32>,
+    camera_to_local_rotation: UnitQuaternion<f32>,
 ) -> Option<Vector2<f32>> {
     let bearing = intrinsic.bearing(pixel).inner;
-    normalized_ground_direction(camera_to_ground_rotation * bearing)
+    normalized_local_direction(camera_to_local_rotation * bearing)
 }
 
-fn normalized_ground_direction(ray: Vector3<f32>) -> Option<Vector2<f32>> {
+fn normalized_local_direction(ray: Vector3<f32>) -> Option<Vector2<f32>> {
     if !ray.iter().all(|value| value.is_finite()) || ray.z.abs() <= RAY_EPSILON {
         return None;
     }
@@ -828,31 +832,31 @@ fn normalized_ground_direction(ray: Vector3<f32>) -> Option<Vector2<f32>> {
 fn normalized_ray_covariance(
     intrinsic: Intrinsic,
     pixel: Point2<Pixel>,
-    camera_to_ground_rotation: UnitQuaternion<f32>,
+    camera_to_local_rotation: UnitQuaternion<f32>,
     config: GlobalAssociationConfig,
 ) -> Option<Matrix2<f32>> {
     let pixel_x = normalized_ray(
         intrinsic,
         point![<Pixel>, pixel.x() + 1.0, pixel.y()],
-        camera_to_ground_rotation,
+        camera_to_local_rotation,
     )? - normalized_ray(
         intrinsic,
         point![<Pixel>, pixel.x() - 1.0, pixel.y()],
-        camera_to_ground_rotation,
+        camera_to_local_rotation,
     )?;
     let pixel_y = normalized_ray(
         intrinsic,
         point![<Pixel>, pixel.x(), pixel.y() + 1.0],
-        camera_to_ground_rotation,
+        camera_to_local_rotation,
     )? - normalized_ray(
         intrinsic,
         point![<Pixel>, pixel.x(), pixel.y() - 1.0],
-        camera_to_ground_rotation,
+        camera_to_local_rotation,
     )?;
     let pixel_jacobian = Matrix2::from_columns(&[pixel_x / 2.0, pixel_y / 2.0]);
 
     let bearing = intrinsic.bearing(pixel).inner;
-    let ray = camera_to_ground_rotation * bearing;
+    let ray = camera_to_local_rotation * bearing;
     let roll = finite_tilt_difference(ray, Vector3::x_axis())?;
     let pitch = finite_tilt_difference(ray, Vector3::y_axis())?;
     let tilt_jacobian = Matrix2::from_columns(&[roll, pitch]);
@@ -874,7 +878,7 @@ fn finite_tilt_difference(
     let positive = UnitQuaternion::from_axis_angle(&axis, TILT_JACOBIAN_STEP) * ray;
     let negative = UnitQuaternion::from_axis_angle(&axis, -TILT_JACOBIAN_STEP) * ray;
     Some(
-        (normalized_ground_direction(positive)? - normalized_ground_direction(negative)?)
+        (normalized_local_direction(positive)? - normalized_local_direction(negative)?)
             / (2.0 * TILT_JACOBIAN_STEP),
     )
 }
@@ -906,6 +910,7 @@ fn to_public(problem: &Problem<'_>, candidate: &Candidate) -> GlobalAssociationR
                 field_point: problem.map.landmarks[matched.landmark].xy.extend(0.0),
             })
             .collect(),
+        local_to_field: local_to_field(problem, candidate),
         debug: GlobalLocalizationDebug {
             inliers: candidate.matches.len(),
             candidate_score: candidate.score,
@@ -914,29 +919,33 @@ fn to_public(problem: &Problem<'_>, candidate: &Candidate) -> GlobalAssociationR
     }
 }
 
-// The internal proposal is converted to a pose only to select a certified symmetry representative.
-fn robot_to_field(problem: &Problem<'_>, candidate: &Candidate) -> Isometry3<Robot, Field> {
-    let ground_to_camera = problem.input.robot_to_camera * problem.input.ground_to_robot;
-    let camera_to_ground = ground_to_camera.inverse();
-    let camera_xy = camera_to_ground.inner.translation.vector.xy();
+fn local_to_field(problem: &Problem<'_>, candidate: &Candidate) -> Isometry2<Local, Field> {
+    let local_to_camera = problem.input.robot_to_camera * problem.input.robot_to_local.inverse();
+    let camera_to_local = local_to_camera.inverse();
+    let camera_xy = camera_to_local.inner.translation.vector.xy();
     let yaw = candidate.transform.isometry.rotation.angle();
     let translation = candidate.transform.isometry.translation.vector
         - candidate.transform.isometry.rotation * camera_xy;
-    let ground_to_field = Isometry3::<Ground, Field>::wrap(nalgebra::Isometry3::from_parts(
-        Translation3::new(translation.x, translation.y, 0.0),
-        nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::z_axis(), yaw),
-    ));
-    ground_to_field * problem.input.ground_to_robot.inverse()
+    Isometry2::wrap(nalgebra::Isometry2::new(translation, yaw))
 }
 
-fn yaw_error(left: Isometry3<Robot, Field>, right: Isometry3<Robot, Field>) -> f32 {
-    let left = left.inner.rotation.euler_angles().2;
-    let right = right.inner.rotation.euler_angles().2;
-    (left - right + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+fn alignment_error(left: Isometry2<Local, Field>, right: Isometry2<Local, Field>) -> f32 {
+    let translation = (left.inner.translation.vector - right.inner.translation.vector).norm();
+    let yaw = (left.inner.rotation.angle() - right.inner.rotation.angle() + std::f32::consts::PI)
+        .rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI;
+    translation + yaw.abs()
 }
 
-fn is_finite_pose(pose: &Isometry3<Robot, Field>) -> bool {
-    pose.inner
+fn robot_field_x(problem: &Problem<'_>, candidate: &Candidate) -> f32 {
+    let local_to_field = local_to_field(problem, candidate);
+    let robot_in_local = problem.input.robot_to_local.inner.translation.vector.xy();
+    (local_to_field.inner * nalgebra::Point2::from(robot_in_local)).x
+}
+
+fn is_finite_alignment(alignment: &Isometry2<Local, Field>) -> bool {
+    alignment
+        .inner
         .to_homogeneous()
         .iter()
         .all(|value| value.is_finite())

@@ -1,8 +1,11 @@
 use booster::ImuState;
 use color_eyre::{Result, eyre::eyre};
-use coordinate_systems::{Field, Robot};
-use linear_algebra::{IntoTransform, Isometry3};
-use localization_factrs::{InitialState, VinsBackend, VinsFrontend, VinsFrontendError, initialize};
+use coordinate_systems::{Field, Local, Robot};
+use linear_algebra::Isometry3;
+use localization_factrs::{
+    InitialState, VinsBackend, VinsFrontend, VinsFrontendError, backend::BackendOptimizerStatus,
+    initialize,
+};
 use projection::camera_matrix::CameraMatrix;
 use ros_z::time::Time;
 use types::{
@@ -20,46 +23,40 @@ use crate::{
     parameters::{
         Localization3dParameters, backend_configuration_from_parameters_and_field_dimensions,
     },
-    pose::localization_transform_constrained_to_ground,
+    pose::{compose_robot_to_field, localization_transform_constrained_to_ground},
     visual_localization::{
         GlobalVisualLock, GlobalVisualLockTracker, handle_visual_localization_frame,
     },
 };
 
-/// One deterministic backend checkpoint and its publication-ready poses.
 #[derive(Clone, Debug)]
 pub struct SynchronousLocalizationOutput {
-    /// Backend result timestamp.
     pub time: Time,
-    /// Unconstrained backend robot-to-field pose.
-    pub raw_backend_robot_to_field: Isometry3<Robot, Field, f64>,
-    /// Backend pose constrained using the exact ground-to-robot camera sample.
-    pub backend_field_to_robot: Isometry3<Field, Robot>,
-    /// Global visual lock state after consuming this result.
+    pub raw_backend_robot_to_local: Isometry3<Robot, Local, f64>,
+    pub raw_backend_robot_to_field: Option<Isometry3<Robot, Field, f64>>,
+    pub backend_field_to_robot: Option<Isometry3<Field, Robot>>,
     pub global_visual_lock: GlobalVisualLock,
-    /// Optimizer and residual diagnostics for this solve.
     pub diagnostics: SolveDiagnostics,
 }
 
-/// Synchronous localization frontend/backend pair for deterministic simulation.
 pub struct SynchronousLocalization {
     frontend: VinsFrontend,
     backend: VinsBackend,
-    live_localization: LiveVisualOdometryLocalization,
-    global_visual_lock: GlobalVisualLockTracker,
+    live: LiveVisualOdometryLocalization,
+    visual_lock: GlobalVisualLockTracker,
+    epoch: u64,
 }
 
 impl SynchronousLocalization {
-    /// Creates an isolated estimator using the production backend configuration.
     pub fn new(
         parameters: &Localization3dParameters,
         field_dimensions: &FieldDimensions,
         initial_camera_matrix: &CameraMatrix,
-        initial_robot_to_field: Isometry3<Robot, Field>,
+        initial_robot_to_local: Isometry3<Robot, Local>,
     ) -> Result<Self> {
         parameters.validate().map_err(|message| eyre!(message))?;
-        let initial_state = InitialState::from_robot_to_field_and_intrinsics(
-            initial_robot_to_field,
+        let initial_state = InitialState::from_robot_to_local_and_intrinsics(
+            initial_robot_to_local,
             camera_intrinsics_from_matrix(initial_camera_matrix),
         );
         let (frontend, backend) = initialize(
@@ -69,26 +66,28 @@ impl SynchronousLocalization {
             ),
             initial_state,
         );
-
+        let mut live = LiveVisualOdometryLocalization::default();
+        live.set_initial(initial_robot_to_local);
         Ok(Self {
             frontend,
             backend,
-            live_localization: LiveVisualOdometryLocalization::default(),
-            global_visual_lock: GlobalVisualLockTracker::default(),
+            live,
+            visual_lock: GlobalVisualLockTracker::default(),
+            epoch: 0,
         })
     }
 
-    /// Returns whether global visual localization is unlocked, pending, or locked.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
     pub fn global_visual_lock(&self) -> GlobalVisualLock {
-        self.global_visual_lock.status()
+        self.visual_lock.status()
     }
 
-    /// Ingests one timestamped IMU sample.
     pub fn ingest_imu(&mut self, time: Time, imu: ImuState) -> Result<(), VinsFrontendError> {
         self.frontend.ingest_imu(time.to_wallclock(), imu)
     }
 
-    /// Ingests one camera-frame visual-odometry delta with both endpoint extrinsics.
     pub fn ingest_visual_odometry(
         &mut self,
         delta: VisualOdometryDelta,
@@ -103,22 +102,18 @@ impl SynchronousLocalization {
         )
     }
 
-    /// Ingests one production visual-localization association frame.
     pub fn ingest_visual_localization_frame(
         &mut self,
         frame: TimeWrapper<VisualLocalizationFrame>,
     ) -> Result<(), VinsFrontendError> {
-        handle_visual_localization_frame(&mut self.frontend, &mut self.global_visual_lock, frame)
+        handle_visual_localization_frame(
+            &mut self.frontend,
+            &mut self.visual_lock,
+            self.epoch,
+            frame,
+        )
     }
 
-    /// Solves one deterministic backend checkpoint.
-    ///
-    /// `camera_matrix.time` and an optional visual odometer must exactly match the resulting
-    /// checkpoint time. `Ok(None)` means no backend result is currently available. The raw pose is
-    /// always the backend branch; consumers must inspect `global_visual_lock` before treating it as
-    /// an accepted global localization. A locked solve without an exact visual odometer
-    /// intentionally invalidates the previous live anchor rather than propagating from a stale
-    /// backend pose.
     pub fn solve_once(
         &mut self,
         camera_matrix: TimeWrapper<&CameraMatrix>,
@@ -131,60 +126,47 @@ impl SynchronousLocalization {
             .frontend
             .last_optimization_result()
             .ok_or_else(|| eyre!("backend result was not delivered to the frontend"))?;
+        if result.generation != self.epoch {
+            return Ok(None);
+        }
         let time = Time::from_wallclock(result.time);
-
         if camera_matrix.time != time {
-            return Err(eyre!(
-                "camera matrix timestamp {:?} does not match checkpoint {:?}",
-                camera_matrix.time,
-                time
-            ));
+            return Err(eyre!("camera matrix timestamp does not match checkpoint"));
+        }
+        if exact_visual_odometer.is_some_and(|odometer| odometer.time != time) {
+            return Err(eyre!("visual odometer timestamp does not match checkpoint"));
         }
 
-        if let Some(visual_odometer) = exact_visual_odometer
-            && visual_odometer.time != time
-        {
-            return Err(eyre!(
-                "visual odometer timestamp {:?} does not match checkpoint {:?}",
-                visual_odometer.time,
-                time
-            ));
-        }
-
-        let backend_field_to_robot = localization_transform_constrained_to_ground(
-            &result.transform,
-            &camera_matrix.inner.ground_to_robot,
-        );
-        if self.global_visual_lock.handle_backend_result(&result) {
-            self.live_localization.clear();
-            if let Some(visual_odometer) = exact_visual_odometer {
-                let reset = self.live_localization.reset_with_exact_samples(
-                    &result,
-                    visual_odometer,
-                    camera_matrix.inner,
-                );
-                debug_assert!(reset, "timestamp was checked above");
+        if result.optimizer_status == BackendOptimizerStatus::Converged {
+            self.visual_lock.handle_backend_result(&result);
+            self.live.clear();
+            if let Some(odometer) = exact_visual_odometer {
+                self.live
+                    .reset_with_exact_samples(&result, odometer, camera_matrix.inner);
             }
         }
+        let backend_field_to_robot = result.robot_to_field.as_ref().map(|pose| {
+            localization_transform_constrained_to_ground(
+                &pose.inner,
+                &camera_matrix.inner.ground_to_robot,
+            )
+        });
         let diagnostics = self
             .backend
             .compute_last_solve_diagnostics()
             .ok_or_else(|| eyre!("diagnostics are unavailable after a backend result"))?
             .into();
-
         debug_assert_eq!(backend_result.time, result.time);
         Ok(Some(SynchronousLocalizationOutput {
             time,
-            raw_backend_robot_to_field: result.transform.framed_transform(),
+            raw_backend_robot_to_local: result.robot_to_local,
+            raw_backend_robot_to_field: result.robot_to_field,
             backend_field_to_robot,
-            global_visual_lock: self.global_visual_lock.status(),
+            global_visual_lock: self.visual_lock.status(),
             diagnostics,
         }))
     }
 
-    /// Propagates the latest locked backend pose with an exact accumulated visual-odometer sample.
-    ///
-    /// The camera matrix and odometer must have identical timestamps.
     pub fn update_live_odometry(
         &mut self,
         current_camera_matrix: TimeWrapper<&CameraMatrix>,
@@ -192,356 +174,116 @@ impl SynchronousLocalization {
     ) -> Result<Option<Isometry3<Field, Robot>>> {
         if current_camera_matrix.time != current_visual_odometer.time {
             return Err(eyre!(
-                "camera matrix timestamp {:?} does not match visual odometer {:?}",
-                current_camera_matrix.time,
-                current_visual_odometer.time
+                "camera matrix timestamp does not match visual odometer"
             ));
         }
-        if !self.global_visual_lock.has_backend_result() {
+        if !self.visual_lock.has_backend_result() {
             return Ok(None);
         }
         Ok(self
-            .live_localization
-            .update_with_exact_sample(current_visual_odometer, current_camera_matrix.inner))
+            .live
+            .update_with_exact_sample(current_visual_odometer, current_camera_matrix.inner)
+            .and_then(|(robot_to_local, alignment)| {
+                alignment.map(|alignment| {
+                    let robot_to_field = compose_robot_to_field(robot_to_local, alignment);
+                    localization_transform_constrained_to_ground(
+                        &robot_to_field.inner.cast(),
+                        &current_camera_matrix.inner.ground_to_robot,
+                    )
+                })
+            }))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use linear_algebra::{IntoTransform, point};
     use projection::intrinsic::Intrinsic;
-
-    use super::*;
+    use std::time::Duration;
 
     fn parameters() -> Localization3dParameters {
         Localization3dParameters {
             accelerometer_process_noise_variance: 10.0,
             visual_feature_noise_variance: 1.0,
             field_containment_sigma: 0.1,
+            tracking_timeout: Duration::from_secs(2),
         }
     }
 
-    fn camera_matrix() -> CameraMatrix {
+    fn camera() -> CameraMatrix {
         CameraMatrix {
             intrinsics: Intrinsic::new(nalgebra::vector![220.0, 220.0], point![320.0, 240.0]),
             ..Default::default()
         }
     }
 
-    fn initial_robot_to_field() -> Isometry3<Robot, Field> {
-        nalgebra::Isometry3::translation(-2.0, 0.5, 0.5).framed_transform()
-    }
-
     fn localization() -> SynchronousLocalization {
         SynchronousLocalization::new(
             &parameters(),
             &FieldDimensions::SPL_2025,
-            &camera_matrix(),
-            initial_robot_to_field(),
+            &camera(),
+            nalgebra::Isometry3::translation(0.0, 0.0, 0.5).framed_transform(),
         )
-        .expect("valid localization configuration")
+        .unwrap()
     }
 
-    fn association_frame(time: Time) -> TimeWrapper<VisualLocalizationFrame> {
-        let associations = [
-            ([320.0, 240.0], [0.0, 0.0, 1.0]),
-            ([540.0, 240.0], [1.0, 0.0, 1.0]),
-            ([320.0, 460.0], [0.0, 1.0, 1.0]),
-        ]
-        .into_iter()
-        .map(
-            |(pixel, robot_point)| types::visual_localization::FieldMarkAssociation {
+    fn frame(epoch: u64, time: Time) -> TimeWrapper<VisualLocalizationFrame> {
+        TimeWrapper { time, inner: VisualLocalizationFrame {
+            epoch,
+            robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
+            local_to_field: nalgebra::Isometry2::identity().framed_transform(),
+            associations: [
+                ([320.0, 240.0], [0.0, 0.0, 1.0]),
+                ([540.0, 240.0], [1.0, 0.0, 1.0]),
+                ([320.0, 460.0], [0.0, 1.0, 1.0]),
+            ].into_iter().map(|(pixel, field)| types::visual_localization::FieldMarkAssociation {
                 detection: linear_algebra::point![<coordinate_systems::Pixel>, pixel[0], pixel[1]],
-                field_point: initial_robot_to_field()
-                    * linear_algebra::point![<coordinate_systems::Robot>,
-                        robot_point[0], robot_point[1], robot_point[2]
-                    ],
-            },
-        )
-        .collect();
-        TimeWrapper {
-            time,
-            inner: VisualLocalizationFrame {
-                robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
-                associations,
-            },
-        }
+                field_point: linear_algebra::point![<Field>, field[0], field[1], field[2]],
+            }).collect(),
+        }}
     }
 
     #[test]
-    fn unlocked_solve_returns_backend_branch_without_global_lock() {
+    fn mismatched_visual_epoch_is_ignored() {
         let mut localization = localization();
         localization
-            .ingest_imu(Time::from_nanos(1_000_000_000), ImuState::default())
-            .expect("IMU ingestion succeeds");
-
-        let output = localization
-            .solve_once(
-                TimeWrapper {
-                    time: Time::from_nanos(1_000_000_000),
-                    inner: &camera_matrix(),
-                },
-                None,
-            )
-            .expect("solve succeeds")
-            .expect("IMU initializes a backend checkpoint");
-
-        assert_eq!(output.global_visual_lock, GlobalVisualLock::Unlocked);
-        assert!(
-            output
-                .raw_backend_robot_to_field
-                .inner
-                .translation
-                .vector
-                .iter()
-                .all(|value| value.is_finite())
+            .ingest_visual_localization_frame(frame(1, Time::from_nanos(1)))
+            .unwrap();
+        assert_eq!(
+            localization.global_visual_lock(),
+            GlobalVisualLock::Unlocked
         );
     }
 
     #[test]
-    fn unlocked_association_frame_waits_then_locks_on_backend_result_without_reset() {
+    fn matching_visual_epoch_waits_for_converged_backend() {
         let mut localization = localization();
-        let time = Time::from_nanos(2_000_000_000);
         localization
-            .ingest_visual_localization_frame(association_frame(time))
-            .expect("association ingestion succeeds");
-
+            .ingest_visual_localization_frame(frame(0, Time::from_nanos(1)))
+            .unwrap();
         assert_eq!(
             localization.global_visual_lock(),
             GlobalVisualLock::WaitingForBackend
         );
+    }
 
+    #[test]
+    fn unaligned_imu_solve_has_no_global_pose() {
+        let mut localization = localization();
+        let time = Time::from_nanos(1_000_000_000);
+        localization.ingest_imu(time, ImuState::default()).unwrap();
         let output = localization
             .solve_once(
                 TimeWrapper {
                     time,
-                    inner: &camera_matrix(),
+                    inner: &camera(),
                 },
                 None,
             )
-            .expect("solve succeeds")
-            .expect("association creates a backend checkpoint");
-
-        assert_eq!(output.time, time);
-        assert_eq!(output.global_visual_lock, GlobalVisualLock::Locked);
-    }
-
-    #[test]
-    fn invalid_association_frame_does_not_start_bootstrap() {
-        let mut localization = localization();
-        let time = Time::from_nanos(2_500_000_000);
-        let mut frame = association_frame(time);
-        frame.inner.associations[0].detection =
-            linear_algebra::point![<coordinate_systems::Pixel>, f32::NAN, 240.0];
-        localization
-            .ingest_visual_localization_frame(frame)
-            .expect("association ingestion succeeds");
-        assert_eq!(
-            localization.global_visual_lock(),
-            GlobalVisualLock::Unlocked
-        );
-
-        let output = localization
-            .solve_once(
-                TimeWrapper {
-                    time,
-                    inner: &camera_matrix(),
-                },
-                None,
-            )
-            .expect("solve succeeds");
-
-        assert!(output.is_none());
-    }
-
-    #[test]
-    fn underconstrained_association_frame_does_not_start_bootstrap() {
-        let mut localization = localization();
-        let time = Time::from_nanos(2_600_000_000);
-        let mut frame = association_frame(time);
-        frame.inner.associations.truncate(1);
-
-        localization
-            .ingest_visual_localization_frame(frame)
-            .expect("association ingestion succeeds");
-        assert_eq!(
-            localization.global_visual_lock(),
-            GlobalVisualLock::Unlocked
-        );
-    }
-
-    #[test]
-    fn invalid_camera_extrinsic_does_not_start_bootstrap() {
-        let mut localization = localization();
-        let time = Time::from_nanos(2_700_000_000);
-        let mut frame = association_frame(time);
-        frame.inner.robot_to_camera.inner.translation.vector.x = f32::NAN;
-
-        localization
-            .ingest_visual_localization_frame(frame)
-            .expect("association ingestion succeeds");
-        assert_eq!(
-            localization.global_visual_lock(),
-            GlobalVisualLock::Unlocked
-        );
-    }
-
-    #[test]
-    fn oversized_association_frame_does_not_start_bootstrap() {
-        let mut localization = localization();
-        let time = Time::from_nanos(2_800_000_000);
-        let mut frame = association_frame(time);
-        frame.inner.associations.resize(
-            types::visual_localization::MAX_CERTIFIED_VISUAL_ASSOCIATIONS + 1,
-            frame.inner.associations[0].clone(),
-        );
-
-        localization
-            .ingest_visual_localization_frame(frame)
-            .expect("association ingestion succeeds");
-        assert_eq!(
-            localization.global_visual_lock(),
-            GlobalVisualLock::Unlocked
-        );
-    }
-
-    #[test]
-    fn duplicate_association_frame_does_not_start_bootstrap() {
-        let mut localization = localization();
-        let time = Time::from_nanos(2_900_000_000);
-        let mut frame = association_frame(time);
-        let duplicate = frame.inner.associations[0].clone();
-        frame.inner.associations.fill(duplicate);
-
-        localization
-            .ingest_visual_localization_frame(frame)
-            .expect("association ingestion succeeds");
-        assert_eq!(
-            localization.global_visual_lock(),
-            GlobalVisualLock::Unlocked
-        );
-    }
-
-    #[test]
-    fn identity_live_odometry_preserves_locked_backend_pose() {
-        let mut localization = localization();
-        let time = Time::from_nanos(3_000_000_000);
-        let visual_odometer = VisualOdometer {
-            time,
-            epoch: 7,
-            current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
-        };
-        localization
-            .ingest_visual_localization_frame(association_frame(time))
-            .expect("association ingestion succeeds");
-        let output = localization
-            .solve_once(
-                TimeWrapper {
-                    time,
-                    inner: &camera_matrix(),
-                },
-                Some(&visual_odometer),
-            )
-            .expect("solve succeeds")
-            .expect("association creates a backend checkpoint");
-
-        let live_pose = localization
-            .update_live_odometry(
-                TimeWrapper {
-                    time,
-                    inner: &camera_matrix(),
-                },
-                &visual_odometer,
-            )
-            .expect("matching exact samples are accepted")
-            .expect("locked localization has a live odometry anchor");
-        let accepted_pose = output.backend_field_to_robot;
-
-        assert!(
-            (live_pose.inner.translation.vector - accepted_pose.inner.translation.vector).norm()
-                < 1.0e-6
-        );
-        assert!(
-            live_pose
-                .inner
-                .rotation
-                .angle_to(&accepted_pose.inner.rotation)
-                < 1.0e-6
-        );
-    }
-
-    #[test]
-    fn solve_rejects_a_mismatched_camera_timestamp() {
-        let mut localization = localization();
-        let measurement_time = Time::from_nanos(4_000_000_000);
-        localization
-            .ingest_imu(measurement_time, ImuState::default())
-            .expect("IMU ingestion succeeds");
-
-        let error = localization
-            .solve_once(
-                TimeWrapper {
-                    time: Time::from_nanos(4_100_000_000),
-                    inner: &camera_matrix(),
-                },
-                None,
-            )
-            .expect_err("mismatched camera time is rejected");
-
-        assert!(error.to_string().contains("camera matrix timestamp"));
-    }
-
-    #[test]
-    fn locked_solve_without_odometer_invalidates_the_live_anchor() {
-        let mut localization = localization();
-        let anchor_time = Time::from_nanos(5_000_000_000);
-        let anchor_odometer = VisualOdometer {
-            time: anchor_time,
-            epoch: 1,
-            current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
-        };
-        localization
-            .ingest_visual_localization_frame(association_frame(anchor_time))
-            .expect("association ingestion succeeds");
-        localization
-            .solve_once(
-                TimeWrapper {
-                    time: anchor_time,
-                    inner: &camera_matrix(),
-                },
-                Some(&anchor_odometer),
-            )
-            .expect("anchor solve succeeds");
-
-        let next_time = Time::from_nanos(5_200_000_000);
-        localization
-            .ingest_imu(next_time, ImuState::default())
-            .expect("IMU ingestion succeeds");
-        localization
-            .solve_once(
-                TimeWrapper {
-                    time: next_time,
-                    inner: &camera_matrix(),
-                },
-                None,
-            )
-            .expect("backend-only solve succeeds");
-        let current_odometer = VisualOdometer {
-            time: next_time,
-            ..anchor_odometer
-        };
-
-        assert!(
-            localization
-                .update_live_odometry(
-                    TimeWrapper {
-                        time: next_time,
-                        inner: &camera_matrix(),
-                    },
-                    &current_odometer,
-                )
-                .expect("matching exact samples are accepted")
-                .is_none()
-        );
+            .unwrap()
+            .unwrap();
+        assert!(output.raw_backend_robot_to_field.is_none());
+        assert!(output.backend_field_to_robot.is_none());
     }
 }

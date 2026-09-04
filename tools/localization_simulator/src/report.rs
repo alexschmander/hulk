@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use booster::ImuState;
 use color_eyre::{Result, eyre::eyre};
 use localization_3d::{GlobalVisualLock, Localization3dParameters, SolveDiagnostics};
@@ -10,11 +12,12 @@ use field_mark_association::FieldMarkAssociationParameters;
 use crate::{
     SimulationConfig,
     config::{production_association_parameters, production_localization_parameters},
+    production_vo::{ProductionVoDiagnostics, ProductionVoStatus},
     simulation::{LandmarkClass, LandmarkFrameCounts, LocalizationSimulation},
-    trajectory::Scenario,
+    trajectory::{Scenario, fixed_robot_to_camera},
 };
 
-pub const REPORT_SCHEMA_VERSION: u32 = 2;
+pub const REPORT_SCHEMA_VERSION: u32 = 4;
 
 /// Complete deterministic output from one headless localization run.
 #[derive(Debug, Serialize)]
@@ -38,6 +41,8 @@ pub struct AnalysisSummary {
     pub live_error: ErrorStatistics,
     pub backend_step: StepStatistics,
     pub live_step: StepStatistics,
+    pub visual_odometry_error: ErrorStatistics,
+    pub production_visual_odometry: Option<ProductionVoSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,6 +54,8 @@ pub struct AnalysisSample {
     pub live_robot_to_field: Option<Pose3>,
     pub noisy_camera_to_visual_odometer: Pose3,
     pub visual_odometry_delta: Option<VisualOdometryDeltaSample>,
+    pub visual_odometry_error: Option<PoseError>,
+    pub production_visual_odometry: Option<ProductionVoDiagnostics>,
     pub global_visual_lock: GlobalLock,
     pub backend_error: Option<PoseError>,
     pub live_error: Option<PoseError>,
@@ -84,6 +91,18 @@ pub struct StepStatistics {
     pub step_count: usize,
     pub translation_max_m: Option<f64>,
     pub rotation_max_rad: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProductionVoSummary {
+    pub frame_count: usize,
+    pub estimate_count: usize,
+    pub reset_count: usize,
+    pub identity_initialized_estimate_count: usize,
+    pub processing_mean_ms: f64,
+    pub processing_max_ms: f64,
+    pub correspondences_mean: f64,
+    pub inliers_mean: f64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -155,8 +174,11 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
     let mut live_errors = StatisticsAccumulator::default();
     let mut backend_steps = StepAccumulator::default();
     let mut live_steps = StepAccumulator::default();
+    let mut visual_odometry_errors = StatisticsAccumulator::default();
+    let mut production_visual_odometry = ProductionVoAccumulator::default();
     let mut previous_backend = None;
     let mut previous_live = None;
+    let mut truth_camera_to_field_by_time = HashMap::new();
     let mut lock_acquired_at = None;
     let samples = simulation
         .history()
@@ -190,6 +212,27 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
             if lock_acquired_at.is_none() && sample.global_visual_lock == GlobalVisualLock::Locked {
                 lock_acquired_at = Some(sample.time.as_nanos());
             }
+            let truth_camera_to_field =
+                sample.truth_robot_to_field.inner * fixed_robot_to_camera().inverse();
+            let visual_odometry_error = sample.visual_odometry_delta.as_ref().and_then(|delta| {
+                truth_camera_to_field_by_time
+                    .get(&delta.previous_time.as_nanos())
+                    .map(|previous: &Isometry3<f32>| {
+                        let truth_delta = previous.inverse() * truth_camera_to_field;
+                        let error = pose_error(
+                            &truth_delta.cast::<f64>(),
+                            &delta
+                                .current_left_camera_to_previous_left_camera
+                                .cast::<f64>(),
+                        );
+                        visual_odometry_errors.add(error);
+                        error
+                    })
+            });
+            truth_camera_to_field_by_time.insert(sample.time.as_nanos(), truth_camera_to_field);
+            if let Some(diagnostics) = sample.production_vo_diagnostics {
+                production_visual_odometry.add(diagnostics);
+            }
 
             AnalysisSample {
                 time_ns: sample.time.as_nanos(),
@@ -213,6 +256,8 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
                         ),
                     }
                 }),
+                visual_odometry_error,
+                production_visual_odometry: sample.production_vo_diagnostics,
                 global_visual_lock: sample.global_visual_lock.into(),
                 backend_error,
                 live_error,
@@ -238,6 +283,8 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
             live_error: live_errors.finish(),
             backend_step: backend_steps.finish(),
             live_step: live_steps.finish(),
+            visual_odometry_error: visual_odometry_errors.finish(),
+            production_visual_odometry: production_visual_odometry.finish(),
         },
         samples,
     })
@@ -403,6 +450,48 @@ impl StepAccumulator {
     }
 }
 
+#[derive(Default)]
+struct ProductionVoAccumulator {
+    frame_count: usize,
+    estimate_count: usize,
+    reset_count: usize,
+    identity_initialized_estimate_count: usize,
+    processing_seconds_sum: f64,
+    processing_seconds_max: f64,
+    correspondences_sum: usize,
+    inliers_sum: usize,
+}
+
+impl ProductionVoAccumulator {
+    fn add(&mut self, diagnostics: ProductionVoDiagnostics) {
+        self.frame_count += 1;
+        self.estimate_count += matches!(diagnostics.status, ProductionVoStatus::Estimated) as usize;
+        self.reset_count += matches!(diagnostics.status, ProductionVoStatus::Reset) as usize;
+        self.identity_initialized_estimate_count +=
+            diagnostics.used_identity_initialization as usize;
+        self.processing_seconds_sum += diagnostics.processing_seconds;
+        self.processing_seconds_max = self
+            .processing_seconds_max
+            .max(diagnostics.processing_seconds);
+        self.correspondences_sum += diagnostics.correspondences;
+        self.inliers_sum += diagnostics.inliers;
+    }
+
+    fn finish(self) -> Option<ProductionVoSummary> {
+        let frame_count = (self.frame_count > 0).then_some(self.frame_count as f64)?;
+        Some(ProductionVoSummary {
+            frame_count: self.frame_count,
+            estimate_count: self.estimate_count,
+            reset_count: self.reset_count,
+            identity_initialized_estimate_count: self.identity_initialized_estimate_count,
+            processing_mean_ms: self.processing_seconds_sum / frame_count * 1_000.0,
+            processing_max_ms: self.processing_seconds_max * 1_000.0,
+            correspondences_mean: self.correspondences_sum as f64 / frame_count,
+            inliers_mean: self.inliers_sum as f64 / frame_count,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +534,11 @@ mod tests {
                 .count(),
             report.samples.len() - 1
         );
+        assert_eq!(
+            report.summary.visual_odometry_error.sample_count,
+            report.samples.len() - 1
+        );
+        assert!(report.summary.production_visual_odometry.is_none());
         assert!(report.samples.iter().any(|sample| {
             sample
                 .landmark_frame
@@ -468,5 +562,36 @@ mod tests {
         assert!(json.contains("truth_robot_to_field"));
         assert!(json.contains("translation_rms_m"));
         assert!(json.contains("solve_diagnostics"));
+    }
+
+    #[test]
+    fn exact_moving_visual_odometry_has_negligible_reported_error() {
+        let report = run_analysis(
+            Scenario::six_dof_loop(),
+            SimulationConfig {
+                landmark_pixel_sigma: 0.0,
+                vo_translation_sigma_m: 0.0,
+                vo_rotation_sigma_rad: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            report
+                .summary
+                .visual_odometry_error
+                .translation_rms_m
+                .unwrap()
+                < 1.0e-6
+        );
+        assert!(
+            report
+                .summary
+                .visual_odometry_error
+                .rotation_rms_rad
+                .unwrap()
+                < 1.0e-6
+        );
     }
 }

@@ -5,7 +5,7 @@ pub mod pipeline;
 mod pose_refinement;
 mod triangulator;
 
-pub use odometry::OdometryDiagnostics;
+pub use odometry::{OdometryDiagnostics, PoseEvaluationDiagnostics};
 pub use pipeline::VisualOdometryPipeline;
 
 use std::{

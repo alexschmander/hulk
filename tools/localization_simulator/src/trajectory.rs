@@ -230,10 +230,11 @@ impl Scenario {
     pub fn field_figure_eight_twice() -> Self {
         const DURATION_SECONDS: f32 = 24.0;
         const SEGMENTS: usize = 80;
+        const START_THETA: f32 = -std::f32::consts::FRAC_PI_4;
         let poses = (0..=SEGMENTS)
             .map(|index| {
                 let progress = index as f32 / SEGMENTS as f32;
-                let theta = progress * 4.0 * std::f32::consts::PI;
+                let theta = progress * 4.0 * std::f32::consts::PI + START_THETA;
                 let x = 4.0 * theta.sin();
                 let y = 2.5 * (2.0 * theta).sin();
                 let dx = 4.0 * theta.cos();
@@ -430,9 +431,30 @@ mod tests {
 
         assert!(max_x > 3.9);
         assert!(max_y > 2.4);
+        assert!(start.translation.x < 0.0);
+        assert!(start.translation.y < -2.4);
         assert!((start.translation.vector - after_one_lap.translation.vector).norm() < 1.0e-5);
         assert!((start.translation.vector - after_two_laps.translation.vector).norm() < 1.0e-5);
         assert!(start.rotation.angle_to(&after_one_lap.rotation) < 1.0e-5);
         assert!(start.rotation.angle_to(&after_two_laps.rotation) < 1.0e-5);
+    }
+
+    #[test]
+    fn built_in_scenarios_start_on_own_half() {
+        for scenario in [
+            Scenario::stationary(),
+            Scenario::six_dof_loop(),
+            Scenario::field_figure_eight_twice(),
+            Scenario::pose_teleport(),
+            Scenario::vo_fault(),
+        ] {
+            let robot_to_field =
+                robot_to_field_from_camera_to_field(&scenario.sample_camera_to_field(0.0));
+            assert!(
+                robot_to_field.translation.x < -0.05,
+                "{} starts outside its own half",
+                scenario.name()
+            );
+        }
     }
 }

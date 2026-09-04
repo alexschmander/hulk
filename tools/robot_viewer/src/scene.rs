@@ -2,6 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use bevy::{
     asset::RenderAssetUsages,
+    camera_controller::pan_orbit_camera::prelude::PanOrbitCamera,
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
@@ -489,14 +490,15 @@ fn setup_scene(
 
 fn position_camera_once(
     mut positioned: Local<bool>,
-    mut cameras: Query<&mut Transform, With<Camera3d>>,
+    mut cameras: Query<(&mut Transform, &mut PanOrbitCamera), With<Camera3d>>,
 ) {
     if *positioned {
         return;
     }
 
-    for mut transform in &mut cameras {
+    for (mut transform, mut camera) in &mut cameras {
         *transform = Transform::from_xyz(4.0, 6.0, 7.0).looking_at(Vec3::ZERO, Vec3::Y);
+        camera.last_anchor_depth = -(transform.translation.length() as f64);
         *positioned = true;
     }
 }

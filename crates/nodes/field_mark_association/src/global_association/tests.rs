@@ -1,8 +1,8 @@
 use super::*;
 use crate::{DetectedVisualFeature, DetectedVisualFeatures};
 use ::types::field_dimensions::{FieldDimensions, Half, Side};
-use coordinate_systems::{Camera, Field, Ground, Pixel, Robot};
-use linear_algebra::{IntoTransform, Isometry3, Point2, point};
+use coordinate_systems::{Camera, Field, Local, Pixel, Robot};
+use linear_algebra::{IntoTransform, Isometry2, Isometry3, Point2, point};
 use projection::intrinsic::Intrinsic;
 
 fn camera_intrinsic() -> Intrinsic {
@@ -16,15 +16,15 @@ fn robot_to_camera() -> Isometry3<Robot, Camera> {
 fn input<'a>(
     visual_features: &'a DetectedVisualFeatures,
     field_dimensions: &'a FieldDimensions,
-    config_hint: Option<Isometry3<Robot, Field>>,
+    alignment_hint: Option<Isometry2<Local, Field>>,
 ) -> GlobalLocalizationInput<'a> {
     GlobalLocalizationInput {
         visual_features,
         field_dimensions,
-        ground_to_robot: Isometry3::<Ground, Robot>::identity(),
         robot_to_camera: robot_to_camera(),
+        robot_to_local: Isometry3::<Robot, Local>::identity(),
         camera_intrinsic: camera_intrinsic(),
-        pose_hint: config_hint,
+        alignment_hint,
     }
 }
 
@@ -136,7 +136,7 @@ fn recovers_mixed_feature_associations_with_static_height_gate() -> Result<(), S
         input(
             &features,
             &field,
-            Some(Isometry3::<Robot, Field>::identity()),
+            Some(Isometry2::<Local, Field>::identity()),
         ),
         GlobalAssociationConfig::default(),
     ) else {
@@ -158,7 +158,7 @@ fn recovers_noisy_mixed_feature_assignments() -> Result<(), String> {
         input(
             &features,
             &field,
-            Some(Isometry3::<Robot, Field>::identity()),
+            Some(Isometry2::<Local, Field>::identity()),
         ),
         GlobalAssociationConfig::default(),
     )
@@ -208,7 +208,14 @@ fn varied_pose_noise_sweep_never_returns_incorrect_associations() -> Result<(), 
         let mut features = synthetic_features_from_pose(&field, pose);
         perturb_pixels(&mut features);
         let Some(result) = solve(
-            input(&features, &field, Some(pose)),
+            input(
+                &features,
+                &field,
+                Some(Isometry2::wrap(nalgebra::Isometry2::new(
+                    pose.inner.translation.vector.xy(),
+                    pose.inner.rotation.euler_angles().2,
+                ))),
+            ),
             GlobalAssociationConfig::default(),
         ) else {
             continue;
@@ -237,7 +244,10 @@ fn matching_does_not_use_supplied_camera_height() {
     let features = synthetic_features(&field);
     assert!(
         solve(
-            input_with_camera_height(&features, &field, 0.0),
+            GlobalLocalizationInput {
+                alignment_hint: Some(Isometry2::identity()),
+                ..input_with_camera_height(&features, &field, 0.0)
+            },
             GlobalAssociationConfig::default(),
         )
         .is_some()
@@ -245,16 +255,10 @@ fn matching_does_not_use_supplied_camera_height() {
 }
 
 #[test]
-fn pose_hint_selects_concrete_symmetry_branch_after_certification() -> Result<(), String> {
+fn alignment_hint_selects_concrete_symmetry_branch_after_certification() -> Result<(), String> {
     let field = FieldDimensions::SPL_2025;
     let features = synthetic_features(&field);
-    let half_turn = Isometry3::<Robot, Field>::wrap(nalgebra::Isometry3::from_parts(
-        nalgebra::Translation3::identity(),
-        nalgebra::UnitQuaternion::from_axis_angle(
-            &nalgebra::Vector3::z_axis(),
-            std::f32::consts::PI,
-        ),
-    ));
+    let half_turn = Isometry2::<Local, Field>::rotation(std::f32::consts::PI);
     let result = solve(
         input(&features, &field, Some(half_turn)),
         GlobalAssociationConfig::default(),
@@ -271,7 +275,7 @@ fn pose_hint_selects_concrete_symmetry_branch_after_certification() -> Result<()
 }
 
 #[test]
-fn pose_hint_does_not_create_fallback_associations() {
+fn alignment_hint_does_not_create_fallback_associations() {
     let field = FieldDimensions::SPL_2025;
     let features = DetectedVisualFeatures {
         penalty_spots: vec![project_point(field.penalty_spot(Half::Opponent))],
@@ -283,7 +287,7 @@ fn pose_hint_does_not_create_fallback_associations() {
             input(
                 &features,
                 &field,
-                Some(Isometry3::<Robot, Field>::identity()),
+                Some(Isometry2::<Local, Field>::identity()),
             ),
             GlobalAssociationConfig::default(),
         )
@@ -300,7 +304,7 @@ fn duplicate_clutter_is_left_unmatched() -> Result<(), String> {
         input(
             &features,
             &field,
-            Some(Isometry3::<Robot, Field>::identity()),
+            Some(Isometry2::<Local, Field>::identity()),
         ),
         GlobalAssociationConfig::default(),
     )
@@ -332,7 +336,7 @@ fn rejects_static_height_outside_gate() {
             input(
                 &features,
                 &field,
-                Some(Isometry3::<Robot, Field>::identity())
+                Some(Isometry2::<Local, Field>::identity())
             ),
             config,
         )
@@ -359,7 +363,7 @@ fn rejects_low_confidence_detections() {
             input(
                 &features,
                 &field,
-                Some(Isometry3::<Robot, Field>::identity())
+                Some(Isometry2::<Local, Field>::identity())
             ),
             GlobalAssociationConfig::default(),
         )
@@ -399,11 +403,12 @@ fn repeated_frames_are_associated_without_cross_frame_state() -> Result<(), Stri
     let features = synthetic_features(&field);
     let config = GlobalAssociationConfig::default();
     let mut workspace = SolverWorkspace::default();
+    let hint = Some(Isometry2::<Local, Field>::identity());
     let first = workspace
-        .solve(input(&features, &field, None), config)
+        .solve(input(&features, &field, hint), config)
         .ok_or_else(|| "first frame should localize".to_string())?;
     let second = workspace
-        .solve(input(&features, &field, None), config)
+        .solve(input(&features, &field, hint), config)
         .ok_or_else(|| "second frame should localize independently".to_string())?;
 
     let association_key = |result: &GlobalAssociationResult| {
@@ -456,35 +461,48 @@ fn proposal_budget_overflow_fails_closed() {
 }
 
 #[test]
-fn non_finite_pose_hint_is_ignored() -> Result<(), String> {
+fn non_finite_alignment_hint_fails_closed_at_midfield() {
     let field = FieldDimensions::SPL_2025;
     let features = synthetic_features(&field);
-    let expected = solve(
+    let mut invalid_hint = Isometry2::<Local, Field>::identity();
+    invalid_hint.inner.translation.vector.x = f32::NAN;
+    assert!(
+        solve(
+            input(&features, &field, Some(invalid_hint)),
+            GlobalAssociationConfig::default(),
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn no_hint_selects_the_certified_own_half_branch() -> Result<(), String> {
+    let field = FieldDimensions::SPL_2025;
+    let own_half_pose =
+        Isometry3::<Robot, Field>::wrap(nalgebra::Isometry3::translation(-1.0, 0.3, 0.0));
+    let features = synthetic_features_from_pose(&field, own_half_pose);
+    let result = solve(
         input(&features, &field, None),
         GlobalAssociationConfig::default(),
     )
-    .ok_or_else(|| "synthetic features should localize".to_string())?;
-    let mut invalid_hint = Isometry3::<Robot, Field>::identity();
-    invalid_hint.inner.translation.vector.x = f32::NAN;
-    let actual = solve(
-        input(&features, &field, Some(invalid_hint)),
-        GlobalAssociationConfig::default(),
-    )
-    .ok_or_else(|| "invalid hint should not suppress localization".to_string())?;
+    .ok_or_else(|| "an own-half candidate should select the initial symmetry".to_string())?;
 
-    assert_eq!(
-        expected
-            .associations
-            .iter()
-            .map(|association| association.field_point)
-            .collect::<Vec<_>>(),
-        actual
-            .associations
-            .iter()
-            .map(|association| association.field_point)
-            .collect::<Vec<_>>()
-    );
+    assert!(result.local_to_field.inner.translation.vector.x < -0.05);
     Ok(())
+}
+
+#[test]
+fn no_hint_fails_closed_at_midfield() {
+    let field = FieldDimensions::SPL_2025;
+    let features = synthetic_features(&field);
+
+    assert!(
+        solve(
+            input(&features, &field, None),
+            GlobalAssociationConfig::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -507,14 +525,14 @@ fn rich_frame_runtime_characterization() {
         features: &DetectedVisualFeatures,
         field: &FieldDimensions,
     ) -> (std::time::Duration, bool) {
-        let pose_hint = Some(Isometry3::<Robot, Field>::identity());
+        let alignment_hint = Some(Isometry2::<Local, Field>::identity());
         let config = GlobalAssociationConfig::default();
-        let _ = solver.solve(input(features, field, pose_hint), config);
+        let _ = solver.solve(input(features, field, alignment_hint), config);
         let start = std::time::Instant::now();
         let mut accepted = false;
         for _ in 0..SAMPLE_COUNT {
             accepted = solver
-                .solve(input(features, field, pose_hint), config)
+                .solve(input(features, field, alignment_hint), config)
                 .is_some();
         }
         (start.elapsed() / SAMPLE_COUNT, accepted)

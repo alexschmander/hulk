@@ -2,8 +2,8 @@ use std::time::SystemTime;
 
 use crate::{
     factors::visual_reprojection::VisualReprojectionFactor,
-    measurements::VisualReprojectionMeasurement,
-    symbols::{CameraIntrinsics, State},
+    measurements::VisualFrameMeasurement,
+    symbols::{CameraIntrinsics, LocalToField, State},
 };
 use factrs::{containers::FactorBuilder, core::Huber, traits::Optimizer};
 
@@ -12,8 +12,8 @@ use super::VinsBackend;
 const GLOBAL_VISUAL_HUBER_THRESHOLD: f64 = 2.0;
 
 impl VinsBackend {
-    pub(super) fn ingest_visual(&mut self, mut visuals: Vec<Vec<VisualReprojectionMeasurement>>) {
-        visuals.retain(|visual| !visual.is_empty());
+    pub(super) fn ingest_visual(&mut self, mut visuals: Vec<VisualFrameMeasurement>) {
+        visuals.retain(|visual| !visual.measurements.is_empty());
         let Some(last) = visuals.last() else {
             return;
         };
@@ -21,16 +21,34 @@ impl VinsBackend {
         let last_time = visual_frame_time(last);
         self.update_last_knot_time(last_time);
 
-        let interval_groups = self.interval_groups(visuals, |visual| visual_frame_time(visual));
+        let interval_groups = self.interval_groups(visuals, visual_frame_time);
 
         for group in interval_groups {
             if !self.prepare_interval_for_measurements(group.start_index, "visual") {
                 continue;
             }
+            if self.values.get(LocalToField(0)).is_none() {
+                self.values.insert(
+                    LocalToField(0),
+                    group.measurements[0].local_to_field_candidate.clone(),
+                );
+                let last_state = self
+                    .highest_initialized_interval
+                    .map_or(0, |index| index + 1);
+                for index in 0..=last_state {
+                    if self.values.get(State(index)).is_some() {
+                        super::graph::add_field_containment_factor(
+                            self.optimizer.graph_mut(),
+                            State(index),
+                            &self.config,
+                        );
+                    }
+                }
+            }
             let latest_group_time = group
                 .measurements
                 .last()
-                .map(|visual| visual_frame_time(visual))
+                .map(visual_frame_time)
                 .expect("visual groups are non-empty");
             self.latest_visual_measurement_time = Some(
                 self.latest_visual_measurement_time
@@ -40,10 +58,15 @@ impl VinsBackend {
             let keys = (
                 State(group.start_index),
                 State(group.start_index + 1),
+                LocalToField(0),
                 CameraIntrinsics(0),
             );
             let graph = self.optimizer.graph_mut();
-            for measurement in group.measurements.into_iter().flatten() {
+            for measurement in group
+                .measurements
+                .into_iter()
+                .flat_map(|frame| frame.measurements)
+            {
                 let residual = VisualReprojectionFactor::new(
                     group.start_time,
                     group.end_time,
@@ -60,8 +83,9 @@ impl VinsBackend {
     }
 }
 
-fn visual_frame_time(visual: &[VisualReprojectionMeasurement]) -> SystemTime {
+fn visual_frame_time(visual: &VisualFrameMeasurement) -> SystemTime {
     visual
+        .measurements
         .first()
         .expect("visual frames must contain at least one measurement")
         .time

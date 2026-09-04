@@ -2,7 +2,10 @@ use std::path::Path;
 
 use crate::{
     feature_extractor::{FeatureExtractor, NUM_KEYPOINTS, PreviousFeatureState},
-    odometry::{OdometryDiagnostics, OdometryScratch, PreviousFrame, estimate_previous_to_current},
+    odometry::{
+        OdometryDiagnostics, OdometryScratch, PoseEvaluationDiagnostics, PreviousFrame,
+        estimate_previous_to_current,
+    },
     parameters::StereoVisualOdometryPoseEstimationParameters,
     triangulator::StereoTriangulator,
 };
@@ -115,6 +118,14 @@ impl VisualOdometryPipeline {
 
     pub fn latest_odometry_diagnostics(&self) -> OdometryDiagnostics {
         self.odometry_scratch.diagnostics()
+    }
+
+    pub fn evaluate_previous_to_current(
+        &self,
+        pose: &na::Isometry3<f32>,
+    ) -> Option<PoseEvaluationDiagnostics> {
+        self.odometry_scratch
+            .evaluate_pose(pose, &self.triangulator)
     }
 
     pub fn reset_tracking(&mut self) {

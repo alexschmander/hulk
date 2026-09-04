@@ -9,10 +9,16 @@ use super::{
 };
 
 impl VinsBackend {
-    pub(super) fn reset_to_initial_state(&mut self, initial_state: InitialState, time: SystemTime) {
+    pub(super) fn reset_to_initial_state(
+        &mut self,
+        initial_state: InitialState,
+        time: SystemTime,
+        generation: u64,
+    ) {
         self.initial_state = initial_state;
+        self.generation = generation;
 
-        let (graph, values) = initialize_graph(&self.initial_state, &self.config);
+        let (graph, values) = initialize_graph(&self.initial_state);
         self.optimizer = optimizer_from_graph(&self.config, graph);
         self.values = values;
         self.interval_assigner = IntervalAssigner::new(self.config.knot_spacing);

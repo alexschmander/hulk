@@ -43,6 +43,12 @@ generate_coordinate_system!(
     /// X axis pointing along the startup ground-frame X axis.
     /// Y axis pointing along the startup ground-frame Y axis.
     Odometry,
+    /// 3D gravity-aligned frame fixed when 3D localization starts or resets.
+    ///
+    /// The initial robot has x, y, and yaw zero in this frame. Its z is the nominal robot height,
+    /// and its roll and pitch are initialized from the IMU. Leaving Damping creates a new Local
+    /// frame.
+    Local,
     /// coordinate system used to express feet positions in the walking engine.
     ///
     /// Origin: below the robot's hip

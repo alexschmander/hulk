@@ -1,6 +1,6 @@
-use coordinate_systems::{Field, Robot};
-use linear_algebra::Isometry3;
-use projection::camera_matrix::CameraMatrix;
+use coordinate_systems::{Camera, Field, Local, Robot};
+use linear_algebra::{Isometry2, Isometry3};
+use projection::intrinsic::Intrinsic;
 use types::{field_dimensions::FieldDimensions, visual_localization::FieldMarkAssociation};
 
 use crate::{
@@ -9,7 +9,6 @@ use crate::{
         GlobalAssociationConfig as GlobalLocalizerParameters, GlobalAssociationResult,
         GlobalLocalizationInput, SolverWorkspace,
     },
-    robot_to_camera,
 };
 
 /// Result of running visual global localization on one object-detection frame.
@@ -18,6 +17,8 @@ pub struct GlobalVisualLocalization {
     pub debug: Option<types::visual_localization::GlobalLocalizationDebug>,
     /// Globally certified fixed associations.
     pub associations: Vec<FieldMarkAssociation>,
+    /// Certified planar alignment for the returned associations.
+    pub local_to_field: Option<Isometry2<Local, Field>>,
 }
 
 /// Reusable stateless global localizer with retained scratch storage.
@@ -31,16 +32,20 @@ impl GlobalVisualLocalizer {
     pub fn localize(
         &mut self,
         visual_features: &DetectedVisualFeatures,
-        camera_matrix: &CameraMatrix,
+        robot_to_camera: Isometry3<Robot, Camera>,
+        robot_to_local: Isometry3<Robot, Local>,
+        camera_intrinsic: Intrinsic,
         field_dimensions: &FieldDimensions,
-        pose_hint: Option<Isometry3<Robot, Field>>,
+        alignment_hint: Option<Isometry2<Local, Field>>,
         parameters: &GlobalLocalizerParameters,
     ) -> GlobalVisualLocalization {
         self.localize_with_debug(
             visual_features,
-            camera_matrix,
+            robot_to_camera,
+            robot_to_local,
+            camera_intrinsic,
             field_dimensions,
-            pose_hint,
+            alignment_hint,
             parameters,
             true,
         )
@@ -49,9 +54,11 @@ impl GlobalVisualLocalizer {
     pub(crate) fn localize_with_debug(
         &mut self,
         visual_features: &DetectedVisualFeatures,
-        camera_matrix: &CameraMatrix,
+        robot_to_camera: Isometry3<Robot, Camera>,
+        robot_to_local: Isometry3<Robot, Local>,
+        camera_intrinsic: Intrinsic,
         field_dimensions: &FieldDimensions,
-        pose_hint: Option<Isometry3<Robot, Field>>,
+        alignment_hint: Option<Isometry2<Local, Field>>,
         parameters: &GlobalLocalizerParameters,
         include_debug: bool,
     ) -> GlobalVisualLocalization {
@@ -59,10 +66,10 @@ impl GlobalVisualLocalizer {
             GlobalLocalizationInput {
                 visual_features,
                 field_dimensions,
-                ground_to_robot: camera_matrix.ground_to_robot,
-                robot_to_camera: robot_to_camera(camera_matrix),
-                camera_intrinsic: camera_matrix.intrinsics,
-                pose_hint,
+                robot_to_camera,
+                robot_to_local,
+                camera_intrinsic,
+                alignment_hint,
             },
             *parameters,
         );
@@ -72,20 +79,24 @@ impl GlobalVisualLocalizer {
 
 /// Runs global localization and returns debug data plus backend-safe associations.
 ///
-/// `pose_hint` is used only to select one representative of an already-certified 180-degree field
+/// `alignment_hint` is used only to select one representative of an already-certified 180-degree field
 /// symmetry. It never creates fallback associations or changes uniqueness certification.
 pub fn localize_global_visual_features(
     visual_features: &DetectedVisualFeatures,
-    camera_matrix: &CameraMatrix,
+    robot_to_camera: Isometry3<Robot, Camera>,
+    robot_to_local: Isometry3<Robot, Local>,
+    camera_intrinsic: Intrinsic,
     field_dimensions: &FieldDimensions,
-    pose_hint: Option<Isometry3<Robot, Field>>,
+    alignment_hint: Option<Isometry2<Local, Field>>,
     parameters: &GlobalLocalizerParameters,
 ) -> GlobalVisualLocalization {
     GlobalVisualLocalizer::default().localize(
         visual_features,
-        camera_matrix,
+        robot_to_camera,
+        robot_to_local,
+        camera_intrinsic,
         field_dimensions,
-        pose_hint,
+        alignment_hint,
         parameters,
     )
 }
@@ -98,10 +109,12 @@ fn localization_result(
         Some(result) => GlobalVisualLocalization {
             debug: include_debug.then_some(result.debug),
             associations: result.associations,
+            local_to_field: Some(result.local_to_field),
         },
         None => GlobalVisualLocalization {
             debug: None,
             associations: Vec::new(),
+            local_to_field: None,
         },
     }
 }

@@ -7,7 +7,7 @@ use eframe::{
 use egui_bevy::BevyWidget;
 use localization_simulator::{
     AssociationMode, LocalizationSimulation, PoseKeyframe, Scenario, SimulationConfig,
-    SimulationHistorySample, VisualOdometryOutlier,
+    SimulationHistorySample, VisualOdometryMode, VisualOdometryOutlier,
     config::TICK_INTERVAL,
     trajectory::{fixed_robot_to_camera, robot_to_field_from_camera_to_field},
 };
@@ -305,6 +305,34 @@ impl LocalizationSimulatorApp {
                     "Production association",
                 );
             });
+        ComboBox::from_label("Visual odometry")
+            .selected_text(match self.config.visual_odometry_mode {
+                VisualOdometryMode::SyntheticDelta => "Synthetic delta",
+                VisualOdometryMode::ProductionStereo => "Production stereo",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.config.visual_odometry_mode,
+                    VisualOdometryMode::SyntheticDelta,
+                    "Synthetic delta",
+                );
+                ui.selectable_value(
+                    &mut self.config.visual_odometry_mode,
+                    VisualOdometryMode::ProductionStereo,
+                    "Production stereo",
+                );
+            });
+        if self.config.visual_odometry_mode == VisualOdometryMode::ProductionStereo {
+            ui.add(
+                Slider::new(&mut self.config.right_camera_delay_ms, 0.0..=20.0)
+                    .step_by(0.1)
+                    .text("Right camera delay (ms)"),
+            );
+            ui.checkbox(
+                &mut self.config.assume_synchronized_stereo_timestamps,
+                "Assume synchronized stereo timestamps",
+            );
+        }
         ui.horizontal(|ui| {
             ui.label("Seed");
             ui.add(egui::DragValue::new(&mut self.config.seed));

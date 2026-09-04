@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use factrs::{
     linalg::{ForwardProp, Numeric, VectorX},
     traits::{Residual, Variable},
-    variables::{MatrixLieGroup, SE23},
+    variables::{MatrixLieGroup, SE2, SE23},
 };
 use nalgebra::Matrix2;
 
@@ -28,7 +28,7 @@ pub struct VisualReprojectionFactor {
 
 #[factrs::mark]
 impl Residual for VisualReprojectionFactor {
-    type Input = (SE23, SE23, CameraIntrinsics);
+    type Input = (SE23, SE23, SE2, CameraIntrinsics);
     type Differ = ForwardProp;
 
     fn dim_out(&self) -> usize {
@@ -37,9 +37,14 @@ impl Residual for VisualReprojectionFactor {
 
     fn residual<T: Numeric>(
         &self,
-        (start, end, camera_intrinsics): (SE23<T>, SE23<T>, CameraIntrinsics<T>),
+        (start, end, local_to_field, camera_intrinsics): (
+            SE23<T>,
+            SE23<T>,
+            SE2<T>,
+            CameraIntrinsics<T>,
+        ),
     ) -> VectorX<T> {
-        self.residuals_on_spline(start, end, camera_intrinsics)
+        self.residuals_on_spline(start, end, local_to_field, camera_intrinsics)
     }
 }
 
@@ -87,6 +92,7 @@ impl VisualReprojectionFactor {
         &self,
         start: SE23<T>,
         end: SE23<T>,
+        local_to_field: SE2<T>,
         intrinsics: CameraIntrinsics<T>,
     ) -> VectorX<T> {
         assert_eq!(self.measurements.len(), self.measurement_taus.len());
@@ -101,11 +107,15 @@ impl VisualReprojectionFactor {
             .zip(self.measurement_taus.iter())
             .enumerate()
         {
-            let robot_to_field = spline.evaluate(T::from(*measurement_tau));
-            let field_to_robot = robot_to_field.inverse();
+            let robot_to_local = spline.evaluate(T::from(*measurement_tau));
+            let field_to_local = local_to_field.inverse();
             let robot_to_camera = measurement.robot_to_camera.cast::<T>();
             let field_point = measurement.field_point.coords.cast::<T>();
-            let point_robot = field_to_robot.apply(field_point.as_view());
+            let field_point_xy = field_point.fixed_rows::<2>(0).into_owned();
+            let point_local_xy = field_to_local.apply(field_point_xy.as_view());
+            let point_local =
+                nalgebra::Vector3::new(point_local_xy.x, point_local_xy.y, field_point.z);
+            let point_robot = robot_to_local.inverse().apply(point_local.as_view());
             let point_camera = robot_to_camera.apply(point_robot.as_view());
             let Some(projected) =
                 intrinsics.project_checked(point_camera.as_view(), T::from(MIN_REPROJECTION_DEPTH))
@@ -132,7 +142,7 @@ mod tests {
         core::{SE3, SO3, Vector3},
         linalg::VectorX,
         traits::{Residual, Variable},
-        variables::SE23,
+        variables::{SE2, SE23},
     };
     use nalgebra::{Matrix2, Point2, Point3, vector};
 
@@ -158,8 +168,12 @@ mod tests {
         );
         let intrinsics = CameraIntrinsics::new(vector![100.0, 100.0], vector![0.0, 0.0]);
 
-        let residual =
-            factor.residual((state(Vector3::zeros()), state(Vector3::zeros()), intrinsics));
+        let residual = factor.residual((
+            state(Vector3::zeros()),
+            state(Vector3::zeros()),
+            SE2::identity(),
+            intrinsics,
+        ));
 
         assert!(residual.norm() < 1.0e-9);
     }
@@ -183,10 +197,37 @@ mod tests {
         let residual = factor.residual((
             state(vector![0.1, 0.0, 0.0]),
             state(vector![0.1, 0.0, 0.0]),
+            SE2::identity(),
             intrinsics,
         ));
 
         assert!(residual.norm() > 1.0);
+    }
+
+    #[test]
+    fn reprojection_composes_local_alignment_with_robot_pose() {
+        let time = SystemTime::UNIX_EPOCH;
+        let factor = VisualReprojectionFactor::new(
+            time,
+            time + Duration::from_secs(1),
+            [VisualReprojectionMeasurement {
+                time,
+                detection: Point2::new(0.0, 0.0),
+                field_point: Point3::new(1.0, 0.0, 2.0),
+                robot_to_camera: SE3::identity(),
+            }],
+            Matrix2::identity(),
+        );
+        let intrinsics = CameraIntrinsics::new(vector![100.0, 100.0], vector![0.0, 0.0]);
+
+        let residual = factor.residual((
+            state(Vector3::zeros()),
+            state(Vector3::zeros()),
+            SE2::new(0.0, 1.0, 0.0),
+            intrinsics,
+        ));
+
+        assert!(residual.norm() < 1.0e-9);
     }
 
     #[test]
@@ -214,7 +255,8 @@ mod tests {
         let intrinsics = CameraIntrinsics::new(vector![100.0, 100.0], vector![0.0, 0.0]);
         let pose = state(Vector3::zeros());
 
-        let linearized = factor.residual_jacobian((pose.clone(), pose, intrinsics));
+        let linearized =
+            factor.residual_jacobian((pose.clone(), pose, SE2::identity(), intrinsics));
 
         assert!(linearized.value.iter().all(|value| value.is_finite()));
         assert!(linearized.diff.iter().all(|value| value.is_finite()));
@@ -239,7 +281,12 @@ mod tests {
         let intrinsics = CameraIntrinsics::new(vector![100.0, 100.0], vector![0.0, 0.0]);
         let pose = state(vector![0.1, -0.2, 0.0]);
 
-        let linearized = factor.residual_jacobian((pose.clone(), pose.clone(), intrinsics.clone()));
+        let linearized = factor.residual_jacobian((
+            pose.clone(),
+            pose.clone(),
+            SE2::identity(),
+            intrinsics.clone(),
+        ));
 
         assert_close(linearized.value[0], -5.0, 1.0e-9);
         assert_close(linearized.value[1], 10.0, 1.0e-9);
@@ -262,7 +309,8 @@ mod tests {
         assert_close(translation_step[start_y_column], 0.2, 1.0e-9);
 
         let corrected_pose = pose.oplus(translation_step.as_view());
-        let corrected_residual = factor.residual((corrected_pose, pose, intrinsics));
+        let corrected_residual =
+            factor.residual((corrected_pose, pose, SE2::identity(), intrinsics));
 
         assert!(corrected_residual.norm() < 1.0e-9);
     }

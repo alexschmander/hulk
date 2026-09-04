@@ -6,7 +6,9 @@ use std::{
 
 use clap::{Args, ValueEnum};
 use color_eyre::{Result, eyre::Context as _};
-use localization_simulator::{AssociationMode, Scenario, SimulationConfig, report::run_analysis};
+use localization_simulator::{
+    AssociationMode, Scenario, SimulationConfig, VisualOdometryMode, report::run_analysis,
+};
 
 #[derive(Args, Debug)]
 pub struct HeadlessArgs {
@@ -25,6 +27,9 @@ pub struct HeadlessArgs {
     /// Override the field-mark association path.
     #[arg(long, value_enum)]
     association: Option<AssociationPreset>,
+    /// Override the visual-odometry input path.
+    #[arg(long, value_enum)]
+    visual_odometry: Option<VisualOdometryPreset>,
     /// Write the JSON report to this path, or '-' for standard output.
     #[arg(short, long, default_value = "-", value_name = "PATH")]
     output: PathBuf,
@@ -48,6 +53,12 @@ enum AssociationPreset {
     ProductionAssociation,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum VisualOdometryPreset {
+    SyntheticDelta,
+    ProductionStereo,
+}
+
 pub fn run(args: HeadlessArgs) -> Result<()> {
     let scenario = load_scenario(&args)?;
     let mut config = load_config(args.config.as_deref())?;
@@ -62,6 +73,9 @@ pub fn run(args: HeadlessArgs) -> Result<()> {
     }
     if let Some(association) = args.association {
         config.association_mode = association.into();
+    }
+    if let Some(visual_odometry) = args.visual_odometry {
+        config.visual_odometry_mode = visual_odometry.into();
     }
     config
         .validate()
@@ -142,5 +156,38 @@ impl From<AssociationPreset> for AssociationMode {
             AssociationPreset::KnownCorrespondences => Self::KnownCorrespondences,
             AssociationPreset::ProductionAssociation => Self::ProductionAssociation,
         }
+    }
+}
+
+impl From<VisualOdometryPreset> for VisualOdometryMode {
+    fn from(value: VisualOdometryPreset) -> Self {
+        match value {
+            VisualOdometryPreset::SyntheticDelta => Self::SyntheticDelta,
+            VisualOdometryPreset::ProductionStereo => Self::ProductionStereo,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct TestArgs {
+        #[command(flatten)]
+        headless: HeadlessArgs,
+    }
+
+    #[test]
+    fn parses_visual_odometry_override() {
+        let args =
+            TestArgs::try_parse_from(["test", "--visual-odometry", "production-stereo"]).unwrap();
+
+        assert!(matches!(
+            args.headless.visual_odometry,
+            Some(VisualOdometryPreset::ProductionStereo)
+        ));
     }
 }

@@ -1,13 +1,12 @@
 use bevy::{
     asset::RenderAssetUsages,
+    camera::visibility::RenderLayers,
+    camera_controller::pan_orbit_camera::prelude::PanOrbitCamera,
     mesh::{PrimitiveTopology, VertexAttributeValues},
     prelude::*,
 };
+use localization_simulator::bevy_scene::setup_field_scene;
 use nalgebra::{Isometry3, Matrix3, Rotation3, UnitQuaternion, Vector3};
-use types::{
-    field_dimensions::FieldDimensions,
-    field_marks::{FieldMark, field_marks_from_field_dimensions},
-};
 
 const TRUTH: Color = Color::srgb(0.0, 0.9, 0.95);
 const BACKEND: Color = Color::srgb(1.0, 0.82, 0.05);
@@ -41,91 +40,18 @@ pub(crate) fn configure(app: &mut App) {
             brightness: 450.0,
             ..default()
         })
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup_field_scene, setup_overlays))
         .add_systems(
             Update,
             (position_camera_once, update_markers, update_trails),
         );
 }
 
-fn setup(
+fn setup_overlays(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let dimensions = FieldDimensions::SPL_2025;
-    let green = material(&mut materials, Color::srgb(0.035, 0.32, 0.11), false);
-    let white = material(&mut materials, Color::WHITE, true);
-
-    commands.spawn((
-        PointLight {
-            intensity: 2_000.0,
-            range: 18.0,
-            ..default()
-        },
-        Transform::from_xyz(0.0, 7.0, 0.0),
-    ));
-
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(
-            dimensions.length + 2.0 * dimensions.border_strip_width,
-            0.025,
-            dimensions.width + 2.0 * dimensions.border_strip_width,
-        ))),
-        MeshMaterial3d(green),
-        Transform::from_xyz(0.0, -0.015, 0.0),
-    ));
-
-    let half_length = dimensions.length / 2.0;
-    let mut segments = Vec::new();
-    for mark in field_marks_from_field_dimensions(&dimensions) {
-        match mark {
-            FieldMark::Line { line, .. } => {
-                segments.push(([line.0.x(), line.0.y()], [line.1.x(), line.1.y()]))
-            }
-            FieldMark::Circle { center, radius } => {
-                for index in 0..48 {
-                    let start = std::f32::consts::TAU * index as f32 / 48.0;
-                    let end = std::f32::consts::TAU * (index + 1) as f32 / 48.0;
-                    segments.push((
-                        [
-                            center.x() + radius * start.cos(),
-                            center.y() + radius * start.sin(),
-                        ],
-                        [
-                            center.x() + radius * end.cos(),
-                            center.y() + radius * end.sin(),
-                        ],
-                    ));
-                }
-            }
-        }
-    }
-    for (start, end) in segments {
-        spawn_line(
-            &mut commands,
-            &mut meshes,
-            white.clone(),
-            start,
-            end,
-            dimensions.line_width,
-        );
-    }
-
-    for sign in [-1.0_f32, 1.0] {
-        for side in [-1.0_f32, 1.0] {
-            commands.spawn((
-                Mesh3d(meshes.add(Cylinder::new(dimensions.goal_post_diameter / 2.0, 0.8))),
-                MeshMaterial3d(white.clone()),
-                Transform::from_xyz(
-                    sign * half_length,
-                    0.4,
-                    -side * (dimensions.goal_inner_width + dimensions.goal_post_diameter) / 2.0,
-                ),
-            ));
-        }
-    }
-
     for (kind, color) in [
         (PoseKind::Truth, TRUTH),
         (PoseKind::Backend, BACKEND),
@@ -139,17 +65,20 @@ fn setup(
                 Mesh3d(meshes.add(Cuboid::new(0.28, 0.16, 0.2))),
                 MeshMaterial3d(material(&mut materials, color, false)),
                 Transform::default(),
+                RenderLayers::layer(1),
             ));
             parent.spawn((
                 Mesh3d(meshes.add(Cuboid::new(0.26, 0.07, 0.07))),
                 MeshMaterial3d(material(&mut materials, color, true)),
                 Transform::from_xyz(0.25, 0.0, 0.0),
+                RenderLayers::layer(1),
             ));
         });
         commands.spawn((
             Trail(kind),
             Mesh3d(meshes.add(empty_line_mesh())),
             MeshMaterial3d(material(&mut materials, color, true)),
+            RenderLayers::layer(1),
         ));
     }
 }
@@ -167,33 +96,20 @@ fn material(
     })
 }
 
-fn spawn_line(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    material: Handle<StandardMaterial>,
-    start: [f32; 2],
-    end: [f32; 2],
-    width: f32,
-) {
-    let dx = end[0] - start[0];
-    let dy = end[1] - start[1];
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(dx.hypot(dy), 0.012, width))),
-        MeshMaterial3d(material),
-        Transform::from_xyz((start[0] + end[0]) / 2.0, 0.008, -(start[1] + end[1]) / 2.0)
-            .with_rotation(Quat::from_rotation_y(dy.atan2(dx))),
-    ));
-}
-
 fn position_camera_once(
+    mut commands: Commands,
     mut positioned: Local<bool>,
-    mut cameras: Query<&mut Transform, With<Camera3d>>,
+    mut cameras: Query<(Entity, &mut Transform, &mut PanOrbitCamera), With<Camera3d>>,
 ) {
     if *positioned {
         return;
     }
-    for mut camera in &mut cameras {
-        *camera = Transform::from_xyz(6.5, 7.5, 8.5).looking_at(Vec3::ZERO, Vec3::Y);
+    for (entity, mut transform, mut camera) in &mut cameras {
+        *transform = Transform::from_xyz(6.5, 7.5, 8.5).looking_at(Vec3::ZERO, Vec3::Y);
+        camera.last_anchor_depth = -(transform.translation.length() as f64);
+        commands
+            .entity(entity)
+            .insert(RenderLayers::from_layers(&[0, 1]));
         *positioned = true;
     }
 }

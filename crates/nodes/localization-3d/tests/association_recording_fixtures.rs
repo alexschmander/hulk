@@ -5,12 +5,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use coordinate_systems::{Camera, Field, Pixel, Robot};
+use coordinate_systems::{Camera, Field, Local, Pixel, Robot};
 use field_mark_association::{
     DetectedVisualFeature, GlobalLocalizerParameters, find_detected_visual_features,
     localize_global_visual_features,
 };
-use linear_algebra::{Isometry3, Point2};
+use linear_algebra::{IntoTransform, Isometry3, Point2};
 use mcap::MessageStream;
 use projection::{camera_matrix::CameraMatrix, intrinsic::Intrinsic};
 use serde::{Deserialize, Serialize};
@@ -79,7 +79,9 @@ fn real_recording_association_fixtures_match_expected_landmarks() -> Result<(), 
         let features = find_detected_visual_features(&fixture.detections);
         let localization = localize_global_visual_features(
             &features,
-            &fixture.camera_matrix,
+            robot_to_camera(&fixture.camera_matrix),
+            robot_to_local(&fixture.camera_matrix),
+            fixture.camera_matrix.intrinsics,
             &FieldDimensions::SPL_2025,
             None,
             &recording_parameters(),
@@ -313,7 +315,9 @@ fn new_solver_matches(
     let features = find_detected_visual_features(objects);
     let localization = localize_global_visual_features(
         &features,
-        camera_matrix,
+        robot_to_camera(camera_matrix),
+        robot_to_local(camera_matrix),
+        camera_matrix.intrinsics,
         &FieldDimensions::SPL_2025,
         None,
         &recording_parameters(),
@@ -564,6 +568,15 @@ fn system_time_from_nanos(nanos: u64) -> SystemTime {
 
 fn robot_to_camera(camera_matrix: &CameraMatrix) -> Isometry3<Robot, Camera> {
     camera_matrix.head_to_camera * camera_matrix.robot_to_head
+}
+
+// Recordings predate Local and use Ground as the equivalent frame for one fixture.
+fn robot_to_local(camera_matrix: &CameraMatrix) -> Isometry3<Robot, Local> {
+    camera_matrix
+        .ground_to_robot
+        .inverse()
+        .inner
+        .framed_transform()
 }
 
 fn fixture_path() -> PathBuf {

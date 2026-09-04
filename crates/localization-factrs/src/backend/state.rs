@@ -9,8 +9,9 @@ use factrs::{
 use itertools::Itertools;
 
 use crate::{
-    factors::gaussian_process_prior::GaussianProcessPriorFactor, initial_state::InitialState,
-    symbols::State,
+    factors::gaussian_process_prior::GaussianProcessPriorFactor,
+    initial_state::InitialState,
+    symbols::{LocalToField, State},
 };
 
 use super::{
@@ -32,12 +33,14 @@ impl VinsBackend {
         if is_long_gap {
             reset_state_velocity(&mut self.values, State(first_missing_interval));
         }
+        let has_local_to_field = self.values.get(LocalToField(0)).is_some();
         for index in first_missing_interval..=interval_start_index {
             init_interval_states(
                 &mut self.values,
                 self.optimizer.graph_mut(),
                 &self.config,
                 &self.initial_state,
+                has_local_to_field,
                 index,
                 is_long_gap && index < interval_start_index,
             );
@@ -134,6 +137,7 @@ fn init_interval_states(
     graph: &mut Graph,
     config: &BackendConfiguration,
     initial_state: &InitialState,
+    has_local_to_field: bool,
     interval_start_index: u32,
     is_empty_bridge_interval: bool,
 ) {
@@ -141,20 +145,24 @@ fn init_interval_states(
     let end = State(interval_start_index + 1);
 
     if values.init_if_missing(
-        &initial_state.pose,
+        &initial_state.robot_to_local,
         start,
         false,
         config.knot_spacing.as_secs_f64(),
     ) {
-        add_field_containment_factor(graph, start, config);
+        if has_local_to_field {
+            add_field_containment_factor(graph, start, config);
+        }
     }
     if values.init_if_missing(
-        &initial_state.pose,
+        &initial_state.robot_to_local,
         end,
         is_empty_bridge_interval,
         config.knot_spacing.as_secs_f64(),
     ) {
-        add_field_containment_factor(graph, end, config);
+        if has_local_to_field {
+            add_field_containment_factor(graph, end, config);
+        }
         let gp_residual = if is_empty_bridge_interval {
             GaussianProcessPriorFactor::new_zero_start_velocity_bridge(
                 config.knot_spacing.as_secs_f64(),

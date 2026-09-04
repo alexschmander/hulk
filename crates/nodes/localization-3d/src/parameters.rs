@@ -16,6 +16,13 @@ pub struct Localization3dParameters {
     pub visual_feature_noise_variance: f64,
     /// Soft field containment sigma in meters outside field plus border strip.
     pub field_containment_sigma: f64,
+    /// Time without a converged aligned backend result before localization is declared lost.
+    #[serde(default = "default_tracking_timeout")]
+    pub tracking_timeout: Duration,
+}
+
+fn default_tracking_timeout() -> Duration {
+    Duration::from_secs(2)
 }
 
 impl Localization3dParameters {
@@ -32,6 +39,9 @@ impl Localization3dParameters {
         }
         if !self.field_containment_sigma.is_finite() || self.field_containment_sigma <= 0.0 {
             return Err("field_containment_sigma must be finite and > 0".to_string());
+        }
+        if self.tracking_timeout.is_zero() {
+            return Err("tracking_timeout must be > 0".to_string());
         }
         Ok(())
     }
@@ -59,7 +69,7 @@ fn backend_configuration(
     BackendConfiguration {
         knot_spacing: Duration::from_millis(200),
         max_optimization_window: Duration::from_secs(2),
-        optimizer_max_iterations: 2,
+        optimizer_max_iterations: 5,
         gyroscope_noise: Matrix3::identity() * 0.1_f64.powi(2),
         // TODO: tune accelerometer noise
         accelerometer_noise: Matrix3::from_diagonal(&vector![

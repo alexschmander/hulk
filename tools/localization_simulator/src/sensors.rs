@@ -15,12 +15,13 @@ use types::{
     visual_odometry::{VisualOdometer, VisualOdometryDelta},
 };
 
-use crate::config::SimulationConfig;
+use crate::{config::SimulationConfig, production_vo::ProductionVoDiagnostics};
 
 #[derive(Clone, Debug)]
 pub(crate) struct VisualOdometryMeasurement {
     pub delta: Option<VisualOdometryDelta>,
     pub odometer: VisualOdometer,
+    pub production_diagnostics: Option<ProductionVoDiagnostics>,
 }
 
 #[derive(Debug, Default)]
@@ -84,6 +85,7 @@ impl SyntheticSensors {
                 epoch: 0,
                 current_left_camera_to_visual_odometer: self.current_camera_to_visual_odometer,
             },
+            production_diagnostics: None,
         }
     }
 

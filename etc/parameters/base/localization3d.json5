@@ -2,4 +2,5 @@
   accelerometer_process_noise_variance: 10.0,
   visual_feature_noise_variance: 10000.0,
   field_containment_sigma: 1.0,
+  tracking_timeout: { secs: 2, nanos: 0 },
 }

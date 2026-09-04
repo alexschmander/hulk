@@ -14,16 +14,18 @@ use crate::{
         },
         visual_reprojection::VisualReprojectionFactor,
     },
-    measurements::VisualReprojectionMeasurement,
-    symbols::{CameraIntrinsics, State},
+    measurements::{VisualFrameMeasurement, VisualReprojectionMeasurement},
+    symbols::{CameraIntrinsics, LocalToField, State},
 };
 use booster::ImuState;
 use factrs::{
-    core::{SE3, SO3, Values, Vector3},
+    containers::FactorBuilder,
+    core::{PriorResidual, SE3, SO3, Values, Vector3},
     linalg::Matrix3,
+    noise::GaussianNoise,
     optimizers::OptObserver,
     traits::{Optimizer, Variable},
-    variables::SE23,
+    variables::{SE2, SE23},
 };
 use linear_algebra::IntoFramed;
 use nalgebra::{Matrix2, SMatrix};
@@ -108,9 +110,10 @@ fn visual_odometry(
     })
 }
 
-fn reset(time: SystemTime, initial_state: InitialState) -> SensorMeasurement {
+fn reset(time: SystemTime, generation: u64, initial_state: InitialState) -> SensorMeasurement {
     SensorMeasurement::Reset(crate::measurements::ResetMeasurement {
         time,
+        generation,
         initial_state,
     })
 }
@@ -128,7 +131,20 @@ fn visual_reprojection_measurement(
 }
 
 fn visual_reprojection(time: SystemTime) -> SensorMeasurement {
-    SensorMeasurement::Visual(vec![visual_reprojection_measurement(time, 0.0)])
+    visual_frame(
+        vec![visual_reprojection_measurement(time, 0.0)],
+        SE2::identity(),
+    )
+}
+
+fn visual_frame(
+    measurements: Vec<VisualReprojectionMeasurement>,
+    local_to_field_candidate: SE2,
+) -> SensorMeasurement {
+    SensorMeasurement::Visual(VisualFrameMeasurement {
+        local_to_field_candidate,
+        measurements,
+    })
 }
 
 fn visual_reprojection_factor_count(backend: &mut VinsBackend, state: State) -> usize {
@@ -138,6 +154,7 @@ fn visual_reprojection_factor_count(backend: &mut VinsBackend, state: State) -> 
         .factors_for_residual::<VisualReprojectionFactor, _>((
             state,
             State(state.0 + 1),
+            LocalToField(0),
             CameraIntrinsics(0),
         ))
         .count()
@@ -150,6 +167,7 @@ fn visual_reprojection_factor_dimensions(backend: &VinsBackend, state: State) ->
         .factors_for_residual::<VisualReprojectionFactor, _>((
             state,
             State(state.0 + 1),
+            LocalToField(0),
             CameraIntrinsics(0),
         ))
         .map(|factor| {
@@ -214,7 +232,7 @@ fn field_containment_factor_count(backend: &VinsBackend, state: State) -> usize 
     backend
         .optimizer
         .graph()
-        .factors_for_residual::<FieldContainmentFactor, _>(state)
+        .factors_for_residual::<FieldContainmentFactor, _>((state, LocalToField(0)))
         .count()
 }
 
@@ -228,7 +246,7 @@ fn foot_heights(time: SystemTime) -> SensorMeasurement {
 
 fn moving_initial_state(velocity: Vector3<f64>) -> InitialState {
     InitialState {
-        pose: SE23::from_rot_vel_trans(SO3::identity(), velocity, Vector3::zeros()),
+        robot_to_local: SE23::from_rot_vel_trans(SO3::identity(), velocity, Vector3::zeros()),
         ..InitialState::default()
     }
 }
@@ -244,6 +262,56 @@ fn initial_state_with_intrinsics(
         ),
         ..InitialState::default()
     }
+}
+
+fn solve_aligned_graph(alignment_sigma: f64) -> OptimizationResult {
+    let (_measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
+    let mut config = backend_configuration();
+    config.optimizer_max_iterations = 10;
+    let mut backend = VinsBackend::new(
+        config,
+        InitialState::default(),
+        measurement_receiver,
+        result_sender,
+    );
+    let time = SystemTime::UNIX_EPOCH + Duration::from_millis(50);
+    backend
+        .ingest_sensor_measurements([visual_reprojection(time)])
+        .expect("visual measurement should ingest");
+    backend.optimizer.graph_mut().add_factor(
+        FactorBuilder::new(PriorResidual::new(SE2::identity()), LocalToField(0))
+            .noise(GaussianNoise::<3>::from_scalar_sigma(alignment_sigma))
+            .build(),
+    );
+
+    backend
+        .optimize()
+        .expect("aligned graph should produce a result")
+}
+
+#[test]
+fn converged_aligned_result_has_joint_robot_to_field_covariance() {
+    let tight = solve_aligned_graph(0.01);
+    let loose = solve_aligned_graph(0.2);
+
+    assert_eq!(tight.optimizer_status, BackendOptimizerStatus::Converged);
+    assert_eq!(loose.optimizer_status, BackendOptimizerStatus::Converged);
+    let tight = tight
+        .robot_to_field_covariance
+        .expect("constrained aligned graph should have covariance");
+    let loose = loose
+        .robot_to_field_covariance
+        .expect("constrained aligned graph should have covariance");
+    assert!(
+        tight
+            .iter()
+            .chain(loose.iter())
+            .all(|value| value.is_finite())
+    );
+    assert!((tight - tight.transpose()).norm() < 1.0e-12);
+    assert!((loose - loose.transpose()).norm() < 1.0e-12);
+    assert!(loose.trace() > tight.trace());
 }
 
 #[test]
@@ -267,7 +335,7 @@ fn solve_once_before_measurements_preserves_initial_values() {
 }
 
 #[test]
-fn field_containment_factors_are_attached_to_initialized_states() {
+fn field_containment_factors_are_added_to_existing_states_after_alignment() {
     let (_measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
     let mut backend = VinsBackend::new(
@@ -278,7 +346,8 @@ fn field_containment_factors_are_attached_to_initialized_states() {
     );
     let start = SystemTime::UNIX_EPOCH;
 
-    assert_eq!(field_containment_factor_count(&backend, State(0)), 1);
+    assert!(backend.values().get(LocalToField(0)).is_none());
+    assert_eq!(field_containment_factor_count(&backend, State(0)), 0);
 
     backend
         .ingest_sensor_measurements([stationary_imu(start)])
@@ -287,6 +356,14 @@ fn field_containment_factors_are_attached_to_initialized_states() {
         .ingest_sensor_measurements([stationary_imu(start + Duration::from_millis(50))])
         .expect("IMU should ingest");
 
+    assert_eq!(field_containment_factor_count(&backend, State(0)), 0);
+    assert_eq!(field_containment_factor_count(&backend, State(1)), 0);
+
+    backend
+        .ingest_sensor_measurements([visual_reprojection(start + Duration::from_millis(50))])
+        .expect("visual frame should ingest");
+
+    assert!(backend.values().get(LocalToField(0)).is_some());
     assert_eq!(field_containment_factor_count(&backend, State(0)), 1);
     assert_eq!(field_containment_factor_count(&backend, State(1)), 1);
 }
@@ -315,6 +392,7 @@ fn solve_once_result_includes_camera_intrinsics() {
         .expect("solve should succeed")
         .expect("result should be available");
 
+    assert_eq!(result.generation, 0);
     assert_eq!(
         result.camera_intrinsics.focals(),
         nalgebra::vector![200.0, 210.0]
@@ -382,10 +460,13 @@ fn visual_reprojection_huber_is_per_measurement_residual_block() {
     let start = SystemTime::UNIX_EPOCH;
 
     backend
-        .ingest_sensor_measurements([SensorMeasurement::Visual(vec![
-            visual_reprojection_measurement(start, 0.0),
-            visual_reprojection_measurement(start, 1.0),
-        ])])
+        .ingest_sensor_measurements([visual_frame(
+            vec![
+                visual_reprojection_measurement(start, 0.0),
+                visual_reprojection_measurement(start, 1.0),
+            ],
+            SE2::identity(),
+        )])
         .expect("visual measurements should ingest");
 
     assert_eq!(visual_reprojection_factor_count(&mut backend, State(0)), 2);
@@ -585,7 +666,7 @@ fn reset_measurement_resets_backend_to_initial_state() {
         backend.initial_state.camera_intrinsics.clone(),
     );
     measurement_sender
-        .send(reset(reset_time, initial_state))
+        .send(reset(reset_time, 7, initial_state))
         .expect("reset should send");
 
     let result = backend
@@ -594,7 +675,8 @@ fn reset_measurement_resets_backend_to_initial_state() {
         .expect("reset should produce a result");
 
     assert_eq!(result.time, reset_time);
-    assert!((result.latest_pose.xyz() - Vector3::new(1.0, 2.0, 0.45)).norm() < 1.0e-9);
+    assert_eq!(result.generation, 7);
+    assert!((result.latest_robot_to_local.xyz() - Vector3::new(1.0, 2.0, 0.45)).norm() < 1.0e-9);
     assert_eq!(visual_odometry_factor_count(&mut backend, State(0)), 0);
 }
 
@@ -769,6 +851,53 @@ fn marginalization_happens_after_optimizer_step() {
         backend.values().get_raw(State(0)).is_none(),
         "state 0 should be marginalized after optimization"
     );
+}
+
+#[test]
+fn local_to_field_is_initialized_once_and_retained_by_marginalization() {
+    let (_measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
+    let mut config = backend_configuration();
+    config.max_optimization_window = Duration::from_millis(400);
+    let mut backend = VinsBackend::new(
+        config,
+        InitialState::default(),
+        measurement_receiver,
+        result_sender,
+    );
+    let start = SystemTime::UNIX_EPOCH;
+
+    assert!(backend.values().get(LocalToField(0)).is_none());
+    backend
+        .ingest_sensor_measurements([
+            visual_frame(
+                vec![visual_reprojection_measurement(start, 0.0)],
+                SE2::new(0.2, 1.0, 2.0),
+            ),
+            visual_frame(
+                vec![visual_reprojection_measurement(
+                    start + Duration::from_millis(50),
+                    0.0,
+                )],
+                SE2::new(-0.4, 9.0, 8.0),
+            ),
+        ])
+        .expect("visual frames should ingest");
+
+    let alignment = backend
+        .values()
+        .get(LocalToField(0))
+        .expect("first visual candidate should initialize alignment");
+    assert!((alignment.x() - 1.0).abs() < 1.0e-12);
+    assert!((alignment.y() - 2.0).abs() < 1.0e-12);
+
+    backend
+        .ingest_sensor_measurements([stationary_imu(start + Duration::from_secs(2))])
+        .expect("later IMU should ingest");
+    let _ = backend.optimize();
+
+    assert!(backend.values().get(State(0)).is_none());
+    assert!(backend.values().get(LocalToField(0)).is_some());
 }
 
 #[test]

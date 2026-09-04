@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use color_eyre::Result;
-use coordinate_systems::{Camera, Field, Robot};
+use coordinate_systems::{Camera, Robot};
 use linear_algebra::Isometry3;
 use localization_factrs::{
     OptimizationResult, VinsFrontend, VinsFrontendError, VisualReprojectionAssociation,
@@ -10,10 +10,7 @@ use localization_factrs::{
 use ros_z::time::Time;
 use types::{
     time_wrapper::TimeWrapper,
-    visual_localization::{
-        AssociationPoseHint, AssociationPoseHintSource, FieldMarkAssociation,
-        VisualLocalizationFrame,
-    },
+    visual_localization::{FieldMarkAssociation, VisualLocalizationFrame},
 };
 
 const MIN_REPROJECTION_DEPTH: f64 = 0.01;
@@ -87,10 +84,7 @@ impl GlobalVisualLockTracker {
     }
 
     pub(crate) fn handle_backend_result(&mut self, result: &OptimizationResult) -> bool {
-        if !matches!(
-            result.optimizer_status,
-            BackendOptimizerStatus::Converged | BackendOptimizerStatus::MaxIterations
-        ) {
+        if !matches!(result.optimizer_status, BackendOptimizerStatus::Converged) {
             return false;
         }
         if self.status.has_backend_result() {
@@ -126,8 +120,9 @@ fn pending_reprojection_rms(
     pending: &PendingVisualFrame,
     result: &OptimizationResult,
 ) -> Option<f64> {
-    let robot_to_field = result.latest_visual_transform.as_ref()?;
-    let field_to_camera = pending.robot_to_camera.inner.cast::<f64>() * robot_to_field.inverse();
+    let robot_to_field = result.latest_visual_robot_to_field.as_ref()?;
+    let field_to_camera =
+        pending.robot_to_camera.inner.cast::<f64>() * robot_to_field.inner.inverse();
     let total_squared_error = pending
         .associations
         .iter()
@@ -144,30 +139,22 @@ fn pending_reprojection_rms(
     Some((total_squared_error / pending.associations.len() as f64).sqrt())
 }
 
-pub(crate) fn association_pose_hint(
-    time: Time,
-    field_to_robot: Option<Isometry3<Field, Robot>>,
-    source: AssociationPoseHintSource,
-) -> TimeWrapper<Option<AssociationPoseHint>> {
-    TimeWrapper {
-        time,
-        inner: field_to_robot.map(|pose| AssociationPoseHint {
-            robot_to_field: pose.inverse(),
-            source,
-        }),
-    }
-}
-
 pub(crate) fn handle_visual_localization_frame(
     frontend: &mut VinsFrontend,
     global_visual_lock: &mut GlobalVisualLockTracker,
+    epoch: u64,
     frame: TimeWrapper<VisualLocalizationFrame>,
 ) -> Result<(), VinsFrontendError> {
     let TimeWrapper { time, inner } = frame;
     let VisualLocalizationFrame {
+        epoch: frame_epoch,
         robot_to_camera,
+        local_to_field,
         associations,
     } = inner;
+    if frame_epoch != epoch {
+        return Ok(());
+    }
     if associations.len() < types::visual_localization::MIN_CERTIFIED_VISUAL_ASSOCIATIONS
         || associations.len() > types::visual_localization::MAX_CERTIFIED_VISUAL_ASSOCIATIONS
     {
@@ -203,6 +190,7 @@ pub(crate) fn handle_visual_localization_frame(
         frontend,
         time,
         robot_to_camera,
+        local_to_field,
         associations.iter().cloned(),
     )?;
     global_visual_lock.track_associations(time, robot_to_camera, &associations);
@@ -213,6 +201,7 @@ fn ingest_visual_localization_associations(
     frontend: &mut VinsFrontend,
     time: Time,
     robot_to_camera: Isometry3<Robot, Camera>,
+    local_to_field: linear_algebra::Isometry2<coordinate_systems::Local, coordinate_systems::Field>,
     associations: impl IntoIterator<Item = FieldMarkAssociation>,
 ) -> Result<(), VinsFrontendError> {
     let associations = associations
@@ -225,11 +214,14 @@ fn ingest_visual_localization_associations(
         time.to_wallclock(),
         associations,
         robot_to_camera,
+        local_to_field,
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use coordinate_systems::Field;
+    use linear_algebra::IntoTransform;
     use localization_factrs::CameraIntrinsics;
 
     use super::*;
@@ -237,14 +229,21 @@ mod tests {
     fn result(time: Time, acknowledged_visual: Option<Time>) -> OptimizationResult {
         OptimizationResult {
             time: time.to_wallclock(),
-            transform: nalgebra::Isometry3::identity(),
+            generation: 0,
+            robot_to_local: nalgebra::Isometry3::identity().framed_transform(),
+            local_to_field: Some(nalgebra::Isometry2::identity().framed_transform()),
+            robot_to_field: Some(nalgebra::Isometry3::identity().framed_transform()),
+            robot_to_field_covariance: Some(nalgebra::SMatrix::identity()),
             velocity: nalgebra::Vector3::zeros(),
             camera_intrinsics: CameraIntrinsics::new(
                 nalgebra::vector![200.0, 200.0],
                 nalgebra::vector![320.0, 240.0],
             ),
             latest_visual_measurement_time: acknowledged_visual.map(Time::to_wallclock),
-            latest_visual_transform: acknowledged_visual.map(|_| nalgebra::Isometry3::identity()),
+            latest_visual_robot_to_local: acknowledged_visual
+                .map(|_| nalgebra::Isometry3::identity().framed_transform()),
+            latest_visual_robot_to_field: acknowledged_visual
+                .map(|_| nalgebra::Isometry3::identity().framed_transform()),
             optimizer_status: BackendOptimizerStatus::Converged,
         }
     }
@@ -340,6 +339,17 @@ mod tests {
         let mut associations = associations();
         associations[0].detection.inner.x += (MAX_VISUAL_LOCK_REPROJECTION_RMS_PX as f32) * 3.0;
         tracker.track_associations(time, Isometry3::identity(), &associations);
+        let mut result = result(time, Some(time));
+        result.optimizer_status = BackendOptimizerStatus::MaxIterations;
+
+        assert!(!tracker.handle_backend_result(&result));
+        assert_eq!(tracker.status(), GlobalVisualLock::WaitingForBackend);
+    }
+
+    #[test]
+    fn max_iterations_with_valid_reprojection_does_not_lock() {
+        let time = Time::from_nanos(7_250_000_000);
+        let mut tracker = waiting_tracker(time);
         let mut result = result(time, Some(time));
         result.optimizer_status = BackendOptimizerStatus::MaxIterations;
 

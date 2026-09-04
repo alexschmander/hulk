@@ -37,7 +37,7 @@ use interval_assigner::IntervalAssigner;
 pub use optimization_result::OptimizationResult;
 
 const INITIAL_CAMERA_INTRINSICS_PRIOR_SIGMA: f64 = 1e-3;
-const INITIAL_POSE_PRIOR_SIGMA: f64 = 10.0;
+const INITIAL_POSE_PRIOR_SIGMA: f64 = 1.0e-6;
 // Empty intervals are inserted only to keep graph components connected across
 // dropped recording data. They use zero-start-velocity GP priors so stale
 // pre-gap velocity is not treated as measured ballistic motion.
@@ -53,6 +53,8 @@ pub struct VinsBackend {
     config: BackendConfiguration,
     /// Initial state of the graph
     initial_state: InitialState,
+    /// Generation assigned by the latest reset.
+    generation: u64,
     /// Stores the optimizer and the optimization graph
     optimizer: GaussNewton,
     /// Stores the optimized graph values.
@@ -90,7 +92,7 @@ impl VinsBackend {
             "optimizer_max_iterations must be positive"
         );
 
-        let (graph, values) = initialize_graph(&initial_state, &config);
+        let (graph, values) = initialize_graph(&initial_state);
 
         let optimizer = optimizer_from_graph(&config, graph);
 
@@ -100,6 +102,7 @@ impl VinsBackend {
             result_sender,
             config,
             initial_state,
+            generation: 0,
             optimizer,
             values,
             last_knot_time: None,
@@ -176,7 +179,7 @@ impl VinsBackend {
     ) -> Result<(), VinsBackendError> {
         let latest_reset = new_measurements.latest_reset().cloned();
         if let Some(reset) = latest_reset {
-            self.reset_to_initial_state(reset.initial_state, reset.time);
+            self.reset_to_initial_state(reset.initial_state, reset.time, reset.generation);
             new_measurements.retain_at_or_after(reset.time);
         }
 

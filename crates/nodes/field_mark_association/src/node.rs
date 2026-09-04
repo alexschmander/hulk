@@ -14,7 +14,7 @@ use types::{
     primary_state::PrimaryState,
     time_wrapper::TimeWrapper,
     visual_localization::{
-        ASSOCIATION_POSE_HINT_TOPIC, AssociationPoseHint, GLOBAL_LOCALIZATION_DEBUG_TOPIC,
+        ASSOCIATION_GEOMETRY_TOPIC, AssociationGeometry, GLOBAL_LOCALIZATION_DEBUG_TOPIC,
         GlobalLocalizationDebug, VISUAL_LOCALIZATION_TOPIC, VisualLocalizationFrame,
     },
 };
@@ -55,8 +55,8 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await?;
 
-    let localization_cache = node
-        .subscriber::<TimeWrapper<Option<AssociationPoseHint>>>(ASSOCIATION_POSE_HINT_TOPIC)
+    let association_geometry_cache = node
+        .subscriber::<TimeWrapper<AssociationGeometry>>(ASSOCIATION_GEOMETRY_TOPIC)
         .cache(128)
         .with_stamp(|message| message.time)
         .build()
@@ -98,7 +98,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 parameters: &parameters,
                 camera_matrix_cache: &camera_matrix_cache,
                 field_dimensions_cache: &field_dimensions_cache,
-                localization_cache: &localization_cache,
+                association_geometry_cache: &association_geometry_cache,
                 primary_state_cache: &primary_state_cache,
                 associations_publisher: &associations_publisher,
                 global_localization_publisher: &global_localization_publisher,

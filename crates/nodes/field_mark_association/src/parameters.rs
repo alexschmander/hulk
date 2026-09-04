@@ -10,7 +10,7 @@ use crate::global_association::GlobalAssociationConfig as GlobalLocalizerParamet
 pub struct FieldMarkAssociationParameters {
     /// Stateless global-association gates, scoring, and deterministic work limits.
     pub global_localizer: GlobalLocalizerParameters,
-    /// Maximum node-side timestamp difference for a symmetry-selection pose hint.
+    /// Maximum node-side timestamp difference for association geometry.
     ///
     /// Direct API calls receive an untimestamped hint and therefore do not apply this limit.
     pub max_pose_hint_age: Duration,

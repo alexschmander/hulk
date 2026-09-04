@@ -1,13 +1,14 @@
 use booster::ImuState;
 use color_eyre::{Result, eyre::eyre};
-use coordinate_systems::{Camera, Field, Ground, Head, Robot};
+use coordinate_systems::{Camera, Field, Ground, Head, Local, Robot};
 use field_mark_association::{
     DetectedVisualFeatures, FieldMarkAssociationParameters, GlobalVisualLocalizer,
 };
-use linear_algebra::{Framed, IntoTransform, Isometry3 as FramedIsometry3};
+use linear_algebra::{
+    Framed, IntoTransform, Isometry2 as FramedIsometry2, Isometry3 as FramedIsometry3,
+};
 use localization_3d::{
     GlobalVisualLock, SolveDiagnostics, SynchronousLocalization, SynchronousLocalizationOutput,
-    initial_robot_to_field_from_field_dimensions,
 };
 use nalgebra::{Isometry3, Point2, Translation3, UnitQuaternion, Vector3};
 use projection::camera_matrix::CameraMatrix;
@@ -22,8 +23,9 @@ use types::{
 use crate::{
     config::{
         AssociationMode, FIELD_MARK_INTERVAL, SOLVE_INTERVAL, SimulationConfig, TICK_INTERVAL,
-        production_association_parameters, production_localization_parameters,
+        VisualOdometryMode, production_association_parameters, production_localization_parameters,
     },
+    production_vo::{ProductionVisualOdometry, ProductionVoDiagnostics},
     sensors::SyntheticSensors,
     trajectory::{Scenario, fixed_robot_to_camera, robot_to_field_from_camera_to_field},
 };
@@ -82,6 +84,8 @@ pub struct SimulationHistorySample {
     pub noisy_cumulative_camera_to_visual_odometer: Isometry3<f32>,
     /// Noisy VO transition passed to the frontend at this tick.
     pub visual_odometry_delta: Option<VisualOdometryDelta>,
+    /// Diagnostics from production stereo VO, when enabled.
+    pub production_vo_diagnostics: Option<ProductionVoDiagnostics>,
 }
 
 /// Deterministic synchronous runner that retains every fixed-tick result.
@@ -98,7 +102,9 @@ pub struct LocalizationSimulation {
     previous_camera_matrix: Option<CameraMatrix>,
     latest_backend_output: Option<SynchronousLocalizationOutput>,
     latest_live_robot_to_field: Option<FramedIsometry3<Robot, Field>>,
-    latest_pose_hint: FramedIsometry3<Robot, Field>,
+    truth_local_to_field: FramedIsometry2<Local, Field>,
+    latest_alignment_hint: Option<FramedIsometry2<Local, Field>>,
+    production_visual_odometry: Option<ProductionVisualOdometry>,
 }
 
 impl LocalizationSimulation {
@@ -109,17 +115,30 @@ impl LocalizationSimulation {
         let initial_camera_to_field = scenario.sample_camera_to_field(0.0);
         let truth_robot_to_field = robot_to_field_from_camera_to_field(&initial_camera_to_field);
         let initial_camera_matrix = camera_matrix(&truth_robot_to_field);
-        let initial_robot_to_field =
-            initial_robot_to_field_from_field_dimensions(&field_dimensions);
+        let initial_robot_to_field: FramedIsometry3<Robot, Field> =
+            truth_robot_to_field.framed_transform();
+        let (roll, pitch, _) = truth_robot_to_field.rotation.euler_angles();
+        let initial_robot_to_local: FramedIsometry3<Robot, Local> = Isometry3::from_parts(
+            Translation3::new(0.0, 0.0, truth_robot_to_field.translation.z),
+            UnitQuaternion::from_euler_angles(roll, pitch, 0.0),
+        )
+        .framed_transform();
+        let truth_local_to_field = local_to_field(initial_robot_to_field, initial_robot_to_local);
         let localization_parameters =
             production_localization_parameters().map_err(|message| eyre!(message))?;
         let association_parameters =
             production_association_parameters().map_err(|message| eyre!(message))?;
+        let production_visual_odometry = matches!(
+            config.visual_odometry_mode,
+            VisualOdometryMode::ProductionStereo
+        )
+        .then(ProductionVisualOdometry::new)
+        .transpose()?;
         let localization = SynchronousLocalization::new(
             &localization_parameters,
             &field_dimensions,
             &initial_camera_matrix,
-            initial_robot_to_field,
+            initial_robot_to_local,
         )?;
         Ok(Self {
             scenario,
@@ -134,7 +153,9 @@ impl LocalizationSimulation {
             previous_camera_matrix: None,
             latest_backend_output: None,
             latest_live_robot_to_field: None,
-            latest_pose_hint: initial_robot_to_field,
+            truth_local_to_field,
+            latest_alignment_hint: None,
+            production_visual_odometry,
         })
     }
 
@@ -186,7 +207,41 @@ impl LocalizationSimulation {
         let imu = imu_state(&self.scenario, elapsed, &robot_to_field, &camera_to_field);
         self.localization.ingest_imu(time, imu)?;
 
-        let visual_odometry = self.sensors.measure_visual_odometry(time, &camera_to_field);
+        let visual_odometry = match self.config.visual_odometry_mode {
+            VisualOdometryMode::SyntheticDelta => {
+                self.sensors.measure_visual_odometry(time, &camera_to_field)
+            }
+            VisualOdometryMode::ProductionStereo => {
+                let delay =
+                    std::time::Duration::from_secs_f32(self.config.right_camera_delay_ms / 1_000.0);
+                let right_time = Time::from_nanos(
+                    time.as_nanos()
+                        .saturating_add(i64::try_from(delay.as_nanos()).unwrap_or(i64::MAX)),
+                );
+                let delayed_left_camera_to_field = self
+                    .scenario
+                    .sample_camera_to_field(elapsed + delay.as_secs_f32());
+                let right_camera_to_field = delayed_left_camera_to_field
+                    * Isometry3::translation(crate::stereo_render::BASELINE, 0.0, 0.0);
+                let reported_right_time = if self.config.assume_synchronized_stereo_timestamps {
+                    time
+                } else {
+                    right_time
+                };
+                self.production_visual_odometry
+                    .as_mut()
+                    .expect("production VO is initialized for production stereo mode")
+                    .measure(
+                        time,
+                        reported_right_time,
+                        &camera_to_field,
+                        &right_camera_to_field,
+                    )?
+            }
+        };
+        let robot_to_camera = framed_robot_to_camera();
+        let robot_to_local = lift_local_to_field(self.truth_local_to_field).inverse()
+            * robot_to_field.framed_transform();
         if let (Some(delta), Some(previous_camera_matrix)) = (
             visual_odometry.delta.clone(),
             self.previous_camera_matrix.as_ref(),
@@ -212,24 +267,36 @@ impl LocalizationSimulation {
             let frame = match self.config.association_mode {
                 AssociationMode::KnownCorrespondences => {
                     association_count = observations.true_associations.len();
-                    VisualLocalizationFrame {
-                        robot_to_camera: framed_robot_to_camera(),
+                    Some(VisualLocalizationFrame {
+                        epoch: self.localization.epoch(),
+                        robot_to_camera,
+                        local_to_field: local_to_field(
+                            robot_to_field.framed_transform(),
+                            robot_to_local,
+                        ),
                         associations: observations.true_associations,
-                    }
+                    })
                 }
                 AssociationMode::ProductionAssociation => {
                     let result = self.association_solver.localize(
                         &observations.detections,
-                        &current_camera_matrix,
+                        robot_to_camera,
+                        robot_to_local,
+                        current_camera_matrix.intrinsics,
                         &self.field_dimensions,
-                        Some(self.latest_pose_hint),
+                        self.latest_alignment_hint,
                         &self.association_parameters.global_localizer,
                     );
                     association_count = result.associations.len();
-                    VisualLocalizationFrame {
-                        robot_to_camera: framed_robot_to_camera(),
-                        associations: result.associations,
-                    }
+                    result.local_to_field.map(|local_to_field| {
+                        self.latest_alignment_hint = Some(local_to_field);
+                        VisualLocalizationFrame {
+                            epoch: self.localization.epoch(),
+                            robot_to_camera,
+                            local_to_field,
+                            associations: result.associations,
+                        }
+                    })
                 }
             };
             landmark_frame = Some(LandmarkFrameCounts {
@@ -237,10 +304,14 @@ impl LocalizationSimulation {
                 emitted_detections,
                 associated: association_count,
                 detections: flatten_detections(&observations.detections),
-                associations: frame.associations.clone(),
+                associations: frame
+                    .as_ref()
+                    .map_or_else(Vec::new, |frame| frame.associations.clone()),
             });
-            self.localization
-                .ingest_visual_localization_frame(TimeWrapper { time, inner: frame })?;
+            if let Some(frame) = frame {
+                self.localization
+                    .ingest_visual_localization_frame(TimeWrapper { time, inner: frame })?;
+            }
         }
 
         if self
@@ -267,9 +338,14 @@ impl LocalizationSimulation {
             )?
             .map(|field_to_robot| field_to_robot.inverse());
         if let Some(live_pose) = self.latest_live_robot_to_field {
-            self.latest_pose_hint = live_pose;
-        } else if let Some(backend_pose) = self.latest_backend_output.as_ref() {
-            self.latest_pose_hint = backend_pose.backend_field_to_robot.inverse();
+            self.latest_alignment_hint = Some(local_to_field(live_pose, robot_to_local));
+        } else if let Some(backend_pose) = self
+            .latest_backend_output
+            .as_ref()
+            .and_then(|output| output.backend_field_to_robot)
+        {
+            self.latest_alignment_hint =
+                Some(local_to_field(backend_pose.inverse(), robot_to_local));
         }
 
         let sample = SimulationHistorySample {
@@ -279,7 +355,7 @@ impl LocalizationSimulation {
             raw_backend_robot_to_field: self
                 .latest_backend_output
                 .as_ref()
-                .map(|output| output.raw_backend_robot_to_field),
+                .and_then(|output| output.raw_backend_robot_to_field),
             live_robot_to_field: self.latest_live_robot_to_field,
             global_visual_lock: self.localization.global_visual_lock(),
             diagnostics: self
@@ -291,6 +367,7 @@ impl LocalizationSimulation {
                 .odometer
                 .current_left_camera_to_visual_odometer,
             visual_odometry_delta: visual_odometry.delta,
+            production_vo_diagnostics: visual_odometry.production_diagnostics,
         };
         self.previous_camera_matrix = Some(current_camera_matrix);
         self.step_index += 1;
@@ -327,6 +404,35 @@ fn interval_steps(interval: std::time::Duration) -> usize {
 
 fn framed_robot_to_camera() -> FramedIsometry3<Robot, Camera> {
     fixed_robot_to_camera().framed_transform()
+}
+
+fn local_to_field(
+    robot_to_field: FramedIsometry3<Robot, Field>,
+    robot_to_local: FramedIsometry3<Robot, Local>,
+) -> FramedIsometry2<Local, Field> {
+    let (_, _, field_yaw) = robot_to_field.inner.rotation.euler_angles();
+    let (_, _, local_yaw) = robot_to_local.inner.rotation.euler_angles();
+    let robot_to_field_2: FramedIsometry2<Robot, Field> =
+        nalgebra::Isometry2::new(robot_to_field.inner.translation.vector.xy(), field_yaw)
+            .framed_transform();
+    let robot_to_local_2: FramedIsometry2<Robot, Local> =
+        nalgebra::Isometry2::new(robot_to_local.inner.translation.vector.xy(), local_yaw)
+            .framed_transform();
+    robot_to_field_2 * robot_to_local_2.inverse()
+}
+
+fn lift_local_to_field(
+    local_to_field: FramedIsometry2<Local, Field>,
+) -> FramedIsometry3<Local, Field> {
+    Isometry3::from_parts(
+        Translation3::new(
+            local_to_field.inner.translation.x,
+            local_to_field.inner.translation.y,
+            0.0,
+        ),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, local_to_field.inner.rotation.angle()),
+    )
+    .framed_transform()
 }
 
 pub(crate) fn camera_matrix(robot_to_field: &Isometry3<f32>) -> CameraMatrix {
@@ -504,6 +610,28 @@ mod tests {
     }
 
     #[test]
+    fn failed_production_association_preserves_counts_and_alignment_hint() {
+        let mut simulation = LocalizationSimulation::new(
+            Scenario::stationary(),
+            SimulationConfig {
+                association_mode: AssociationMode::ProductionAssociation,
+                landmark_dropout_probability: 1.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        simulation.step().unwrap();
+
+        let counts = simulation.history[0].landmark_frame.as_ref().unwrap();
+        assert!(counts.ideal_visible > 0);
+        assert_eq!(counts.emitted_detections, 0);
+        assert_eq!(counts.associated, 0);
+        assert!(counts.associations.is_empty());
+        assert!(simulation.latest_alignment_hint.is_none());
+    }
+
+    #[test]
     fn noisy_production_associations_match_sensor_correspondences() {
         let field = FieldDimensions::SPL_2025;
         let scenario = Scenario::stationary();
@@ -525,9 +653,11 @@ mod tests {
             let observations = sensors.observe_landmarks(&camera_to_field, &camera_matrix);
             let result = localizer.localize(
                 &observations.detections,
-                &camera_matrix,
+                framed_robot_to_camera(),
+                robot_to_field.framed_transform(),
+                camera_matrix.intrinsics,
                 &field,
-                Some(robot_to_field.framed_transform()),
+                Some(FramedIsometry2::identity()),
                 &parameters.global_localizer,
             );
             if result.associations.is_empty() {
@@ -652,6 +782,7 @@ mod tests {
         let mut simulation = LocalizationSimulation::new(
             Scenario::field_figure_eight_twice(),
             SimulationConfig {
+                association_mode: AssociationMode::ProductionAssociation,
                 landmark_pixel_sigma: 0.0,
                 vo_translation_sigma_m: 0.0,
                 vo_rotation_sigma_rad: 0.0,
@@ -668,10 +799,9 @@ mod tests {
             let [previous, current, next] = samples else {
                 unreachable!("windows have length three")
             };
-            let estimate = current
-                .live_robot_to_field
-                .expect("known correspondences establish live localization")
-                .inner;
+            let Some(estimate) = current.live_robot_to_field.map(|pose| pose.inner) else {
+                continue;
+            };
             let truth = current.truth_robot_to_field.inner;
             let error = estimate.translation.vector - truth.translation.vector;
             let direction = (next.truth_robot_to_field.inner.translation.vector
@@ -681,6 +811,7 @@ mod tests {
             along_track_errors += error.dot(&direction);
             sample_count += 1;
         }
+        assert!(sample_count > 0, "production association never localized");
         let translation_rms = (squared_errors / sample_count as f32).sqrt();
         let mean_along_track_error = along_track_errors / sample_count as f32;
 

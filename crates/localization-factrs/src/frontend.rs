@@ -1,13 +1,13 @@
 use std::time::SystemTime;
 
 use booster::ImuState;
-use coordinate_systems::{Camera, Robot};
+use coordinate_systems::{Camera, Field, Local, Robot};
 use factrs::{
     core::{SE3, SO3},
     traits::Variable,
     variables::{MatrixLieGroup, SE23},
 };
-use linear_algebra::{Isometry3, Point3};
+use linear_algebra::{IntoTransform, Isometry2, Isometry3, Point3};
 use thiserror::Error;
 use tokio::sync::{mpsc::UnboundedSender, watch};
 
@@ -18,8 +18,8 @@ use crate::factors::{
     foot_above_ground::FootHeightMeasurement, visual_odometry::VisualOdometryMeasurement,
 };
 use crate::measurements::{
-    ImuMeasurement, ResetMeasurement, SensorMeasurement, VisualReprojectionAssociation,
-    VisualReprojectionMeasurement,
+    ImuMeasurement, ResetMeasurement, SensorMeasurement, VisualFrameMeasurement,
+    VisualReprojectionAssociation, VisualReprojectionMeasurement,
 };
 
 pub struct VinsFrontend {
@@ -30,11 +30,16 @@ pub struct VinsFrontend {
 #[derive(Debug, Clone)]
 pub struct OptimizationResult {
     pub time: SystemTime,
-    pub transform: nalgebra::Isometry3<f64>,
+    pub generation: u64,
+    pub robot_to_local: Isometry3<Robot, Local, f64>,
+    pub local_to_field: Option<Isometry2<Local, Field, f64>>,
+    pub robot_to_field: Option<Isometry3<Robot, Field, f64>>,
+    pub robot_to_field_covariance: Option<nalgebra::SMatrix<f64, 6, 6>>,
     pub velocity: nalgebra::Vector3<f64>,
     pub camera_intrinsics: CameraIntrinsics<f64>,
     pub latest_visual_measurement_time: Option<SystemTime>,
-    pub latest_visual_transform: Option<nalgebra::Isometry3<f64>>,
+    pub latest_visual_robot_to_local: Option<Isometry3<Robot, Local, f64>>,
+    pub latest_visual_robot_to_field: Option<Isometry3<Robot, Field, f64>>,
     pub optimizer_status: crate::backend::BackendOptimizerStatus,
 }
 
@@ -88,10 +93,12 @@ impl VinsFrontend {
     pub fn reset(
         &mut self,
         time: SystemTime,
+        generation: u64,
         initial_state: InitialState,
     ) -> Result<(), VinsFrontendError> {
         let measurement = ResetMeasurement {
             time,
+            generation,
             initial_state,
         };
 
@@ -106,6 +113,7 @@ impl VinsFrontend {
         time: SystemTime,
         associations: impl IntoIterator<Item = VisualReprojectionAssociation>,
         robot_to_camera: Isometry3<Robot, Camera>,
+        local_to_field_candidate: Isometry2<Local, Field>,
     ) -> Result<(), VinsFrontendError> {
         let robot_to_camera = isometry3_to_se3(robot_to_camera.inner);
         let measurements = associations
@@ -118,7 +126,7 @@ impl VinsFrontend {
             })
             .collect();
 
-        self.send_visual_measurements(measurements)
+        self.send_visual_measurements(measurements, local_to_field_candidate)
     }
 
     /// Adds a frame-to-frame visual odometry delta to the optimization pipeline.
@@ -165,13 +173,19 @@ impl VinsFrontend {
     fn send_visual_measurements(
         &mut self,
         measurements: Vec<VisualReprojectionMeasurement>,
+        local_to_field_candidate: Isometry2<Local, Field>,
     ) -> Result<(), VinsFrontendError> {
         if measurements.is_empty() {
             return Ok(());
         }
 
         self.measurement_sender
-            .send(SensorMeasurement::Visual(measurements))
+            .send(SensorMeasurement::Visual(VisualFrameMeasurement {
+                local_to_field_candidate: crate::conversions::local_to_field_to_se2(
+                    local_to_field_candidate,
+                ),
+                measurements,
+            }))
             .map_err(|_| VinsFrontendError::BackendDisconnected)
     }
 }
@@ -199,19 +213,56 @@ fn isometry3_f64_to_se3(isometry: nalgebra::Isometry3<f64>) -> SE3 {
 fn optimization_result_from_backend_result(
     backend_result: &BackendOptimizationResult,
 ) -> OptimizationResult {
-    let (transform, velocity) = se23_to_isometry3_and_velocity(&backend_result.latest_pose);
+    let (robot_to_local, velocity) =
+        se23_to_isometry3_and_velocity(&backend_result.latest_robot_to_local);
+    let robot_to_local = robot_to_local.framed_transform();
+    let local_to_field = backend_result
+        .local_to_field
+        .as_ref()
+        .map(crate::conversions::se2_to_local_to_field);
+    let robot_to_field = local_to_field
+        .as_ref()
+        .map(|alignment| compose_robot_to_field(&robot_to_local, alignment));
+    let latest_visual_robot_to_local = backend_result
+        .latest_visual_robot_to_local
+        .as_ref()
+        .map(|pose| se23_to_isometry3_and_velocity(pose).0.framed_transform());
+    let latest_visual_robot_to_field = latest_visual_robot_to_local
+        .as_ref()
+        .zip(local_to_field.as_ref())
+        .map(|(pose, alignment)| compose_robot_to_field(pose, alignment));
     OptimizationResult {
         time: backend_result.time,
-        transform,
+        generation: backend_result.generation,
+        robot_to_local,
+        local_to_field,
+        robot_to_field,
+        robot_to_field_covariance: backend_result.robot_to_field_covariance,
         velocity,
         camera_intrinsics: backend_result.camera_intrinsics.clone(),
         latest_visual_measurement_time: backend_result.latest_visual_measurement_time,
-        latest_visual_transform: backend_result
-            .latest_visual_pose
-            .as_ref()
-            .map(|pose| se23_to_isometry3_and_velocity(pose).0),
+        latest_visual_robot_to_local,
+        latest_visual_robot_to_field,
         optimizer_status: backend_result.optimizer_status,
     }
+}
+
+fn compose_robot_to_field(
+    robot_to_local: &Isometry3<Robot, Local, f64>,
+    local_to_field: &Isometry2<Local, Field, f64>,
+) -> Isometry3<Robot, Field, f64> {
+    let alignment = nalgebra::Isometry3::from_parts(
+        nalgebra::Translation3::new(
+            local_to_field.inner.translation.x,
+            local_to_field.inner.translation.y,
+            0.0,
+        ),
+        nalgebra::UnitQuaternion::from_axis_angle(
+            &nalgebra::Vector3::z_axis(),
+            local_to_field.inner.rotation.angle(),
+        ),
+    );
+    (alignment * robot_to_local.inner).framed_transform()
 }
 
 pub(crate) fn se23_to_isometry3_and_velocity(
@@ -273,5 +324,24 @@ mod tests {
         assert_eq!(measurement.previous_time, previous_time);
         assert_eq!(measurement.current_time, current_time);
         assert!((measurement.robot_delta.xyz().x - 1.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn reset_sends_generation() {
+        let (measurement_sender, mut measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_result_sender, result_receiver) = tokio::sync::watch::channel(None);
+        let mut frontend = VinsFrontend::new(measurement_sender, result_receiver);
+
+        frontend
+            .reset(SystemTime::UNIX_EPOCH, 7, InitialState::default())
+            .expect("reset should send");
+
+        let SensorMeasurement::Reset(reset) = measurement_receiver
+            .try_recv()
+            .expect("reset should be queued")
+        else {
+            panic!("expected reset measurement");
+        };
+        assert_eq!(reset.generation, 7);
     }
 }

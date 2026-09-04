@@ -56,7 +56,10 @@ impl BevyWidget {
 
 impl Widget for &mut BevyWidget {
     fn ui(self, ui: &mut eframe::egui::Ui) -> eframe::egui::Response {
-        let response = ui.allocate_response(ui.available_size(), Sense::all());
+        let response = ui.allocate_response(
+            ui.available_size(),
+            Sense::all().difference(Sense::focusable_noninteractive()),
+        );
         process_egui_input(self.bevy_app.world_mut(), ui, &response);
 
         let mut render_target = self.bevy_app.world_mut().resource_mut::<BevyRenderTarget>();
@@ -242,12 +245,12 @@ fn setup_camera(
         },
         RenderTarget::TextureView(BevyRenderTarget::TEXTURE_HANDLE),
         Transform::from_xyz(1.0, 1.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
-        PanOrbitCamera::default(),
+        PanOrbitCamera::default().with_initial_anchor_depth(Vec3::ONE.length() as f64),
     ));
 }
 
 fn update_camera_render_target(
-    mut camera: Single<&mut Camera>,
+    mut camera: Single<&mut Camera, With<PanOrbitCamera>>,
     target: Res<BevyRenderTarget>,
     mut manual_texture_view: ResMut<ManualTextureViews>,
 ) {
@@ -256,7 +259,7 @@ fn update_camera_render_target(
         BevyRenderTarget::TEXTURE_HANDLE,
         ManualTextureView::with_default_format(
             texture.create_view(&wgpu::TextureViewDescriptor::default()),
-            UVec2::new(target.texture.size().width, target.texture.size().width),
+            UVec2::new(target.texture.size().width, target.texture.size().height),
         ),
     );
     camera.viewport = Some(Viewport {

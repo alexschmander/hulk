@@ -40,6 +40,16 @@ pub enum AssociationMode {
     ProductionAssociation,
 }
 
+/// Selects the visual-odometry input path exercised by the simulation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum VisualOdometryMode {
+    /// Use deterministic synthetic camera-to-camera deltas.
+    #[default]
+    SyntheticDelta,
+    /// Exercise the production stereo visual-odometry path.
+    ProductionStereo,
+}
+
 /// A deterministic perturbation applied once to the indexed VO transition.
 /// Transition zero is the transition from the first frame to the second frame.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -61,6 +71,12 @@ pub struct SimulationConfig {
     pub seed: u64,
     /// Field-mark association path exercised by the simulation.
     pub association_mode: AssociationMode,
+    /// Visual-odometry path exercised by the simulation.
+    pub visual_odometry_mode: VisualOdometryMode,
+    /// Delay of the right camera relative to the left camera in milliseconds.
+    pub right_camera_delay_ms: f32,
+    /// Whether production stereo should treat left and right timestamps as synchronized.
+    pub assume_synchronized_stereo_timestamps: bool,
     /// Standard deviation of pixel noise.
     pub landmark_pixel_sigma: f32,
     /// Independent probability of dropping each visible landmark.
@@ -82,6 +98,12 @@ pub struct SimulationConfig {
 struct SimulationConfigDto {
     seed: u64,
     association_mode: AssociationMode,
+    #[serde(default)]
+    visual_odometry_mode: VisualOdometryMode,
+    #[serde(default)]
+    right_camera_delay_ms: f32,
+    #[serde(default = "default_true")]
+    assume_synchronized_stereo_timestamps: bool,
     landmark_pixel_sigma: f32,
     landmark_dropout_probability: f32,
     vo_translation_sigma_m: f32,
@@ -100,6 +122,9 @@ impl<'de> Deserialize<'de> for SimulationConfig {
         let config = Self {
             seed: dto.seed,
             association_mode: dto.association_mode,
+            visual_odometry_mode: dto.visual_odometry_mode,
+            right_camera_delay_ms: dto.right_camera_delay_ms,
+            assume_synchronized_stereo_timestamps: dto.assume_synchronized_stereo_timestamps,
             landmark_pixel_sigma: dto.landmark_pixel_sigma,
             landmark_dropout_probability: dto.landmark_dropout_probability,
             vo_translation_sigma_m: dto.vo_translation_sigma_m,
@@ -118,6 +143,9 @@ impl Default for SimulationConfig {
         Self {
             seed: 0,
             association_mode: AssociationMode::KnownCorrespondences,
+            visual_odometry_mode: VisualOdometryMode::SyntheticDelta,
+            right_camera_delay_ms: 0.0,
+            assume_synchronized_stereo_timestamps: true,
             landmark_pixel_sigma: 0.5,
             landmark_dropout_probability: 0.0,
             vo_translation_sigma_m: 0.001,
@@ -141,6 +169,11 @@ impl SimulationConfig {
 
     /// Validates finite noise, bias, dropout, and outlier values.
     pub fn validate(&self) -> Result<(), String> {
+        if !self.right_camera_delay_ms.is_finite()
+            || !(0.0..=20.0).contains(&self.right_camera_delay_ms)
+        {
+            return Err("right_camera_delay_ms must be finite and in [0, 20]".to_string());
+        }
         validate_non_negative(self.landmark_pixel_sigma, "landmark_pixel_sigma")?;
         if !self.landmark_dropout_probability.is_finite()
             || !(0.0..=1.0).contains(&self.landmark_dropout_probability)
@@ -163,6 +196,10 @@ impl SimulationConfig {
         }
         Ok(())
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn validate_non_negative(value: f32, name: &str) -> Result<(), String> {
@@ -201,5 +238,52 @@ mod tests {
         }"#;
 
         assert!(json5::from_str::<SimulationConfig>(input).is_err());
+    }
+
+    #[test]
+    fn legacy_configuration_uses_visual_odometry_defaults() {
+        let input = r#"{
+            seed: 0,
+            association_mode: "KnownCorrespondences",
+            landmark_pixel_sigma: 0.0,
+            landmark_dropout_probability: 0.0,
+            vo_translation_sigma_m: 0.0,
+            vo_rotation_sigma_rad: 0.0,
+            vo_translation_bias_per_step: [0.0, 0.0, 0.0],
+            vo_rotation_bias_per_step: [0.0, 0.0, 0.0],
+            vo_outlier: null,
+        }"#;
+
+        let config = json5::from_str::<SimulationConfig>(input).unwrap();
+        assert_eq!(
+            config.visual_odometry_mode,
+            VisualOdometryMode::SyntheticDelta
+        );
+        assert_eq!(config.right_camera_delay_ms, 0.0);
+        assert!(config.assume_synchronized_stereo_timestamps);
+    }
+
+    #[test]
+    fn right_camera_delay_must_be_finite_and_in_range() {
+        for delay in [f32::NAN, f32::INFINITY, -0.1, 20.1] {
+            assert!(
+                SimulationConfig {
+                    right_camera_delay_ms: delay,
+                    ..Default::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for delay in [0.0, 20.0] {
+            assert!(
+                SimulationConfig {
+                    right_camera_delay_ms: delay,
+                    ..Default::default()
+                }
+                .validate()
+                .is_ok()
+            );
+        }
     }
 }

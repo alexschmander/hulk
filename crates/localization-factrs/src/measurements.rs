@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use booster::ImuState;
 use coordinate_systems::{Field, Pixel};
-use factrs::core::SE3;
+use factrs::{core::SE3, variables::SE2};
 use linear_algebra::{Point2 as FramedPoint2, Point3 as FramedPoint3};
 use nalgebra::{Point2, Point3};
 
@@ -15,7 +15,7 @@ use crate::initial_state::InitialState;
 pub enum SensorMeasurement {
     Reset(ResetMeasurement),
     Imu(ImuMeasurement),
-    Visual(Vec<VisualReprojectionMeasurement>),
+    Visual(VisualFrameMeasurement),
     VisualOdometry(VisualOdometryMeasurement),
     FootHeights(FootHeightMeasurement),
 }
@@ -27,6 +27,7 @@ impl SensorMeasurement {
             SensorMeasurement::Imu(imu) => imu.time,
             SensorMeasurement::Visual(visual) => {
                 visual
+                    .measurements
                     .first()
                     .expect("visual frames must contain at least one measurement")
                     .time
@@ -38,8 +39,15 @@ impl SensorMeasurement {
 }
 
 #[derive(Debug, Clone)]
+pub struct VisualFrameMeasurement {
+    pub local_to_field_candidate: SE2<f64>,
+    pub measurements: Vec<VisualReprojectionMeasurement>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResetMeasurement {
     pub time: SystemTime,
+    pub generation: u64,
     pub initial_state: InitialState,
 }
 
