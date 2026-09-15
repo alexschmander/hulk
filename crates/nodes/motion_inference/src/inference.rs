@@ -99,6 +99,39 @@ pub struct Inference {
 }
 
 impl Inference {
+    /// Switch tuning at a request boundary, preserving gait phase and history. Model
+    /// changes load a complete replacement before replacing any existing network.
+    pub(crate) fn update_parameters(&mut self, parameters: Arc<Parameters>) -> Result<()> {
+        parameters.validate()?;
+        let reload = self.parameters.neural_networks_folder != parameters.neural_networks_folder
+            || self.parameters.inference_threads != parameters.inference_threads
+            || self
+                .networks
+                .keys()
+                .any(|policy| policy.file(&self.parameters) != policy.file(&parameters));
+        if reload {
+            let networks = self
+                .networks
+                .keys()
+                .map(|&policy| {
+                    Network::load(&parameters.neural_networks_folder, policy, &parameters)
+                        .map(|network| (policy, network))
+                })
+                .collect::<Result<HashMap<_, _>>>()?;
+            self.networks = networks;
+        }
+        if let Some(active) = &mut self.active {
+            match &mut active.state {
+                State::Locomotion(state) => state.parameters = parameters.clone(),
+                State::SlowGetUp(state) | State::FastGetUp(state) => {
+                    state.update_parameters(parameters.clone())
+                }
+            }
+        }
+        self.parameters = parameters;
+        Ok(())
+    }
+
     pub fn new(root: &Path, policies: &[Policy], parameters: Arc<Parameters>) -> Result<Self> {
         parameters.validate()?;
         ensure!(!policies.is_empty(), "no policies requested");
@@ -362,4 +395,88 @@ pub fn joints_are_finite(joints: Joints<MotorCommand>) -> bool {
             ]
         })
         .all(f32::is_finite)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ros_z::prelude::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tuning_updates_active_policies_without_resetting_gait_or_time() {
+        let context = ContextBuilder::default()
+            .with_mode("peer")
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(std::iter::empty::<&str>())
+            .with_parameter_layer(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../etc/parameters/base"),
+            )
+            .build()
+            .await
+            .unwrap();
+        let node = context
+            .create_node("inference_tuning_test")
+            .build()
+            .await
+            .unwrap();
+        let binding = node
+            .bind_parameter_as::<Parameters>("motion_inference")
+            .unwrap();
+        let original = binding.snapshot().typed.clone();
+        let sensor = SensorFrame {
+            timestamp: Time::zero(),
+            position: Joints::fill(0.0),
+            velocity: Joints::fill(0.0),
+            orientation: nalgebra::Quaternion::identity(),
+            gyro: linear_algebra::Vector3::zeros(),
+            last_commanded_position: Joints::fill(0.0),
+        };
+        let limits = JointLimits {
+            position: Joints::fill([-3.0, 3.0]),
+            maximum_torque: Joints::fill(100.0),
+        };
+        for policy in Policy::ALL {
+            let mut inference = Inference {
+                parameters: original.clone(),
+                networks: HashMap::new(),
+                active: Some(Execution::new(
+                    policy,
+                    &sensor,
+                    Time::zero(),
+                    original.clone(),
+                    &limits,
+                )),
+                velocity: VelocityEstimator::default(),
+                previous_update: Some(Time::from_nanos(1_000_000_000)),
+            };
+            if let State::Locomotion(state) = &mut inference.active.as_mut().unwrap().state {
+                state.phase = 0.37;
+            }
+            let mut tuned = (*original).clone();
+            tuned.policies.get_mut(&policy).unwrap().kp = Joints::fill(31.0);
+            tuned.policies.get_mut(&policy).unwrap().kd = Joints::fill(2.0);
+            inference
+                .update_parameters(Arc::new(tuned.clone()))
+                .unwrap();
+            let active = inference.active.as_mut().unwrap();
+            if let State::Locomotion(state) = &active.state {
+                assert_eq!(state.phase, 0.37);
+            }
+            let command = active.decode(&sensor, &[0.0; 22], &limits);
+            assert_eq!(command.left_leg.hip_pitch.kp, 31.0);
+            assert_eq!(command.left_leg.hip_pitch.kd, 2.0);
+            assert_eq!(
+                inference.previous_update,
+                Some(Time::from_nanos(1_000_000_000))
+            );
+            tuned.policies.get_mut(&policy).unwrap().kp = Joints::fill(-1.0);
+            assert!(inference.update_parameters(Arc::new(tuned)).is_err());
+            assert_eq!(
+                inference.parameters.policies[&policy].kp.left_leg.hip_pitch,
+                31.0
+            );
+        }
+        context.shutdown().unwrap();
+    }
 }
