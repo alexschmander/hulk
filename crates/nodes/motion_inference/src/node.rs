@@ -88,8 +88,21 @@ pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> +
 async fn run(ctx: Arc<Context>) -> Result<()> {
     let node = ctx.create_node("motion_inference").build().await?;
     let parameters = node.bind_parameter_as::<Parameters>("motion_inference")?;
+    let snapshot = Arc::new(parameters.snapshot().typed().clone());
+    snapshot
+        .validate()
+        .map_err(|error| color_eyre::eyre::eyre!("{error:#}"))?;
     parameters.add_validation_hook(|candidate| {
-        candidate.validate().map_err(|error| format!("{error:#}"))
+        candidate.validate().map_err(|error| format!("{error:#}"))?;
+        for policy in Policy::ALL {
+            let path = candidate
+                .neural_networks_folder
+                .join(policy.file(candidate));
+            if !path.is_file() {
+                return Err(format!("Model file does not exist: {}", path.display()));
+            }
+        }
+        Ok(())
     })?;
     let mut runtime = InferenceNode::new(parameters);
     runtime.start_initialization();
@@ -152,6 +165,7 @@ enum Job {
 enum Completion {
     Initialized,
     Inference(InferenceOutput),
+    ParameterUpdateRejected(String),
 }
 
 struct Worker {
@@ -168,6 +182,7 @@ struct InferenceNode {
     worker: Option<Worker>,
     pending: VecDeque<QueuedRequest>,
     first_fault: Option<InferenceError>,
+    parameter_fault: Option<String>,
     sensor: Option<SensorFrame>,
     last_inferred_position: Option<Joints<f32>>,
     velocity: VelocityEstimator,
@@ -182,6 +197,7 @@ impl InferenceNode {
             worker: None,
             pending: VecDeque::with_capacity(REQUEST_QUEUE_CAPACITY),
             first_fault: None,
+            parameter_fault: None,
             sensor: None,
             last_inferred_position: None,
             velocity: VelocityEstimator::default(),
@@ -213,6 +229,7 @@ impl InferenceNode {
     }
 
     async fn run(&mut self, node: Node) -> Result<()> {
+        let mut parameters = self.parameters.subscribe();
         let latest = QosProfile {
             history: QosHistory::from_depth(1),
             ..Default::default()
@@ -271,7 +288,13 @@ impl InferenceNode {
             .await?;
 
         loop {
-            if let Some(error) = self.first_fault.clone() {
+            if let Some(error) = self.first_fault.clone().or_else(|| {
+                self.parameter_fault
+                    .as_ref()
+                    .map(|reason| InferenceError::InferenceFailed {
+                        source: Arc::new(Report::msg(reason.clone())),
+                    })
+            }) {
                 if let Some(worker) = &mut self.worker
                     && !worker.response_sent
                 {
@@ -283,6 +306,13 @@ impl InferenceNode {
                 self.reject_pending(&error).await;
             }
             tokio::select! {
+                changed = parameters.changed() => {
+                    changed?;
+                    parameters.borrow_and_update();
+                    if self.parameter_fault.take().is_some() {
+                        statuses.publish(&Status { time: node.clock().now(), state: State::Initialized }).await?;
+                    }
+                }
                 completed = async { (&mut self.worker.as_mut().expect("worker exists").handle).await }, if self.worker.is_some() => {
                     let mut worker = self.worker.take().expect("worker completed");
                     let (controller, result) = match completed {
@@ -305,7 +335,17 @@ impl InferenceNode {
                             self.velocity = VelocityEstimator::default();
                             statuses.publish(&Status { time: node.clock().now(), state: State::Initialized }).await?;
                         }
+                        Ok(Completion::ParameterUpdateRejected(reason)) => {
+                            if self.parameter_fault.as_ref() != Some(&reason) {
+                                statuses.publish(&Status { time: node.clock().now(), state: State::Fault { reason: reason.clone() } }).await?;
+                            }
+                            self.parameter_fault = Some(reason.clone());
+                            if let Some(request) = worker.request.take() { request.deny(InferenceError::InferenceFailed { source: Arc::new(Report::msg(reason)) }).await; }
+                        }
                         Ok(Completion::Inference(output)) => {
+                            if self.parameter_fault.take().is_some() {
+                                statuses.publish(&Status { time: node.clock().now(), state: State::Initialized }).await?;
+                            }
                             self.last_inferred_position = Some(output.joints.as_ref().into_iter().map(|joint| joint.position).collect());
                             worker.request.take().expect("active request has a reply").respond(Ok(output.joints)).await;
                         }
@@ -375,8 +415,10 @@ impl InferenceNode {
                     let mut controller = self.controller.take().expect("idle controller exists");
                     let clock = node.clock().clone();
                     let handle = tokio::task::spawn_blocking(move || {
-                        let result = controller.execute(clock.now(), &sensor, request, velocity, &joints, parameters)
-                            .map(Completion::Inference);
+                        let result = match controller.update_parameters(parameters.clone()) {
+                            Ok(()) => controller.execute(clock.now(), &sensor, request, velocity, &joints, parameters).map(Completion::Inference),
+                            Err(error) => Ok(Completion::ParameterUpdateRejected(format!("Cannot apply inference parameters: {error:#}"))),
+                        };
                         (controller, result)
                     });
                     self.worker = Some(Worker { handle, job: Job::Inference, request: Some(queued), response_sent: false });
@@ -388,6 +430,12 @@ impl InferenceNode {
     async fn enqueue(&mut self, request: QueuedRequest) {
         if let Some(error) = &self.first_fault {
             request.deny(error.clone()).await;
+        } else if let Some(reason) = &self.parameter_fault {
+            request
+                .deny(InferenceError::InferenceFailed {
+                    source: Arc::new(Report::msg(reason.clone())),
+                })
+                .await;
         } else if !self.initialized() {
             request.deny(InferenceError::Initializing).await;
         } else if let Some(oldest) = enqueue_request(&mut self.pending, request) {
@@ -528,14 +576,23 @@ fn sensor_frame(low_state: &LowState, timestamp: Time) -> Result<observation::Se
 }
 
 struct Controller {
-    startup_parameters: Arc<Parameters>,
+    parameters: Arc<Parameters>,
     inference: Option<Inference>,
 }
 
 impl Controller {
+    fn update_parameters(&mut self, parameters: Arc<Parameters>) -> Result<()> {
+        if self.parameters.as_ref() != parameters.as_ref() {
+            if let Some(inference) = &mut self.inference {
+                inference.update_parameters(parameters.clone())?;
+            }
+            self.parameters = parameters;
+        }
+        Ok(())
+    }
     fn new(parameters: Arc<Parameters>) -> Self {
         Self {
-            startup_parameters: parameters,
+            parameters,
             inference: None,
         }
     }
@@ -546,9 +603,9 @@ impl Controller {
 
     fn initialize(&mut self) -> Result<()> {
         self.inference = Some(Inference::new(
-            &self.startup_parameters.neural_networks_folder,
+            &self.parameters.neural_networks_folder,
             &Policy::ALL,
-            self.startup_parameters.clone(),
+            self.parameters.clone(),
         )?);
         Ok(())
     }

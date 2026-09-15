@@ -16,6 +16,7 @@ pub struct GetUp {
     parameters: std::sync::Arc<Parameters>,
     start: Time,
     reference_duration_seconds: f32,
+    front: bool,
     previous_action: Joints<f32>,
 }
 
@@ -23,6 +24,7 @@ impl GetUp {
     pub fn new(sensor: &SensorFrame, now: Time, parameters: std::sync::Arc<Parameters>) -> Self {
         let front = sensor.rotation().euler_angles().1 > 0.0;
         Self {
+            front,
             reference_duration_seconds: if front {
                 parameters.get_up.front_duration_seconds
             } else {
@@ -35,6 +37,11 @@ impl GetUp {
     }
 
     pub(crate) fn update_parameters(&mut self, parameters: std::sync::Arc<Parameters>) {
+        self.reference_duration_seconds = if self.front {
+            parameters.get_up.front_duration_seconds
+        } else {
+            parameters.get_up.back_duration_seconds
+        };
         self.parameters = parameters;
     }
 
