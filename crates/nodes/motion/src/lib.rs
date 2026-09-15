@@ -13,7 +13,11 @@ use types::{
 
 use crate::inference_service::{InferenceRequest, InferenceService, KickRequest};
 
+mod head_only;
 mod inference_service;
+
+// Temporary simulator entry point while body coordination is being implemented.
+pub use head_only::run_boxed as run_head_only_boxed;
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(run(ctx))
