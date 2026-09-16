@@ -135,10 +135,6 @@ impl Parameters {
     }
 }
 
-mod simulator;
-
-pub use simulator::run_boxed as run_simulator_boxed;
-
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(node::run(ctx, false))
 }
