@@ -72,10 +72,6 @@ struct Parameters {
     head_motion_timeout: Duration,
 }
 
-mod simulator;
-
-pub use simulator::run_boxed as run_simulator_boxed;
-
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(run(ctx))
 }
