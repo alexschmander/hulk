@@ -6907,7 +6907,6 @@ dependencies = [
 name = "motion_inference"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "booster",
  "color-eyre",
  "coordinate_systems",
@@ -6918,6 +6917,7 @@ dependencies = [
  "ros-z",
  "ros-z-schema",
  "serde",
+ "thiserror 2.0.18",
  "tokio",
  "types",
 ]
