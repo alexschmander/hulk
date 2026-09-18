@@ -177,6 +177,11 @@ async fn cycle(
     if let Ok(request) = &request
         && matches!(request.received.message, MotionCommand::Damping)
     {
+        if safety.has_actuated
+            && let Err(error) = inputs.frame(now, p)
+        {
+            safety.fail(error);
+        }
         if safety.fault.is_some() {
             safety.rearm(&request.received);
         }
