@@ -10,7 +10,6 @@ use head_motion::node::{HEAD_MOTION_SERVICE_TOPIC, HeadMotionService};
 use kinematics::joints::{
     Joints,
     body::{BodyJoints, LowerBodyJoints, UpperBodyJoints},
-    leg::LegJoints,
 };
 use linear_algebra::vector;
 use motion_inference::{
@@ -41,6 +40,7 @@ use crate::{
     walking::{WalkingParameters, step_from_walk_command},
 };
 
+mod arms;
 pub mod command;
 mod inputs;
 mod node;
@@ -308,117 +308,5 @@ impl MotionState {
         }
         self.last_policy = Some(output.execution);
         Ok(robot_command)
-    }
-
-    fn generate_walking_arm_joints(
-        &self,
-        legs: &LowerBodyJoints<MotorCommand>,
-        clock: &Clock,
-        parameters: &ArmParameters,
-        joint_limits: &JointLimits,
-    ) -> Result<UpperBodyJoints<MotorCommand>> {
-        let elapsed = clock.now().duration_since(self.last_arms.time);
-
-        let legs: LowerBodyJoints = LowerBodyJoints {
-            left_leg: LegJoints {
-                hip_pitch: legs.left_leg.hip_pitch.position.clamp(
-                    joint_limits.position.left_leg.hip_pitch[0],
-                    joint_limits.position.left_leg.hip_pitch[1],
-                ),
-                hip_roll: legs.left_leg.hip_roll.position.clamp(
-                    joint_limits.position.left_leg.hip_roll[0],
-                    joint_limits.position.left_leg.hip_roll[1],
-                ),
-                hip_yaw: legs.left_leg.hip_yaw.position.clamp(
-                    joint_limits.position.left_leg.hip_yaw[0],
-                    joint_limits.position.left_leg.hip_yaw[1],
-                ),
-                knee: legs.left_leg.knee.position.clamp(
-                    joint_limits.position.left_leg.knee[0],
-                    joint_limits.position.left_leg.knee[1],
-                ),
-                ankle_up: legs.left_leg.ankle_up.position.clamp(
-                    joint_limits.position.left_leg.ankle_up[0],
-                    joint_limits.position.left_leg.ankle_up[1],
-                ),
-                ankle_down: legs.left_leg.ankle_down.position.clamp(
-                    joint_limits.position.left_leg.ankle_down[0],
-                    joint_limits.position.left_leg.ankle_down[1],
-                ),
-            },
-            right_leg: LegJoints {
-                hip_pitch: legs.right_leg.hip_pitch.position.clamp(
-                    joint_limits.position.right_leg.hip_pitch[0],
-                    joint_limits.position.right_leg.hip_pitch[1],
-                ),
-                hip_roll: legs.right_leg.hip_roll.position.clamp(
-                    joint_limits.position.right_leg.hip_roll[0],
-                    joint_limits.position.right_leg.hip_roll[1],
-                ),
-                hip_yaw: legs.right_leg.hip_yaw.position.clamp(
-                    joint_limits.position.right_leg.hip_yaw[0],
-                    joint_limits.position.right_leg.hip_yaw[1],
-                ),
-                knee: legs.right_leg.knee.position.clamp(
-                    joint_limits.position.right_leg.knee[0],
-                    joint_limits.position.right_leg.knee[1],
-                ),
-                ankle_up: legs.right_leg.ankle_up.position.clamp(
-                    joint_limits.position.right_leg.ankle_up[0],
-                    joint_limits.position.right_leg.ankle_up[1],
-                ),
-                ankle_down: legs.right_leg.ankle_down.position.clamp(
-                    joint_limits.position.right_leg.ankle_down[0],
-                    joint_limits.position.right_leg.ankle_down[1],
-                ),
-            },
-        };
-
-        let ratio =
-            (elapsed.as_secs_f32() / parameters.arm_blend_duration.as_secs_f32()).clamp(0.0, 1.0);
-        let mut target = Joints::fill(0.0);
-        for (left, arm, leg_angles, initial, sign) in [
-            (
-                true,
-                &mut target.left_arm,
-                &legs.left_leg,
-                self.last_arms.inner.left_arm,
-                1.0,
-            ),
-            (
-                false,
-                &mut target.right_arm,
-                &legs.right_leg,
-                self.last_arms.inner.right_arm,
-                -1.0,
-            ),
-        ] {
-            let (sole, knee) = leg(leg_angles, left);
-            arm.shoulder_pitch = sole.x() * parameters.shoulder_pitch_scale;
-            arm.shoulder_roll = sign
-                * (parameters.shoulder_roll_degrees.to_radians()
-                    + (sign * knee.y() - parameters.knee_lateral_offset).max(0.0)
-                        * parameters.shoulder_roll_scale);
-            arm.shoulder_yaw = 0.0;
-            arm.elbow = sign
-                * (parameters.elbow_degrees.to_radians()
-                    + sole.x() * parameters.shoulder_pitch_scale * parameters.elbow_scale);
-            *arm = initial * (1.0 - ratio) + *arm * ratio;
-        }
-        // let joints = position_targets(target, parameters.kp, parameters.kd);
-        let joints = target.map(|position| MotorCommand {
-            position,
-            kp: parameters.kp,
-            kd: parameters.kd,
-            ..MotorCommand::zeros()
-        });
-        ensure!(
-            joints_are_finite(&joints),
-            "non-finite generated arm joints"
-        );
-        Ok(UpperBodyJoints {
-            left_arm: joints.left_arm,
-            right_arm: joints.right_arm,
-        })
     }
 }
