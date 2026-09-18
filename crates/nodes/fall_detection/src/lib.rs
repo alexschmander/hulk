@@ -141,6 +141,12 @@ impl Detector {
                 self.invalidate();
             }
         }
+        self.update_readiness(observation, p);
+        self.update_posture(observation, p);
+        self.last = Some(observation);
+    }
+
+    fn update_readiness(&mut self, observation: Observation, p: &Parameters) {
         let ready = observation.tilt < p.upright_tilt
             && observation.angular_speed < p.maximum_ready_angular_speed
             && observation.leg_speed < p.maximum_ready_joint_speed
@@ -152,6 +158,9 @@ impl Detector {
         } else {
             self.ready_since = None;
         }
+    }
+
+    fn update_posture(&mut self, observation: Observation, p: &Parameters) {
         let next = if observation.tilt >= p.fallen_tilt
             && observation.angular_speed < p.maximum_recovery_angular_speed
         {
@@ -182,7 +191,6 @@ impl Detector {
         } else {
             self.candidate = None;
         }
-        self.last = Some(observation);
     }
 
     pub fn status(&mut self, now: Time, p: &Parameters) -> FallDetection {
