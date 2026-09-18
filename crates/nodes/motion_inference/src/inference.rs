@@ -51,10 +51,27 @@ pub enum InferenceCommand {
     GetUp(GetUpCommand),
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Message)]
+pub struct InferenceRequest {
+    pub generation: u64,
+    pub requested_at: Time,
+    pub valid_until: Time,
+    pub command: InferenceCommand,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Message)]
+pub struct PolicyExecution {
+    pub policy: Policy,
+    pub started_at: Time,
+    pub progress: Option<f32>,
+    pub sensor_time: Time,
+}
+
 #[derive(Clone, Serialize, Deserialize, Message)]
 pub struct InferenceOutput {
     pub joints: Box<Joints<MotorCommand>>,
     pub mode: Mode,
+    pub execution: PolicyExecution,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Message)]
@@ -127,6 +144,12 @@ impl Inference {
             velocity: VelocityEstimator::default(),
             previous_update: None,
         })
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.active = None;
+        self.previous_update = None;
+        self.velocity = VelocityEstimator::default();
     }
 
     pub(crate) fn execute_request(
@@ -241,6 +264,15 @@ impl Inference {
         ensure!(joints_are_finite(&joints), "non-finite decoded joints");
         Ok(InferenceOutput {
             joints: Box::new(joints),
+            execution: PolicyExecution {
+                policy,
+                started_at: active.started_at,
+                progress: match &active.state {
+                    State::SlowGetUp(state) => Some(state.progress(now)),
+                    _ => None,
+                },
+                sensor_time: sensor.timestamp,
+            },
             mode: if policy.is_locomotion() {
                 Mode::Body
             } else {
@@ -257,6 +289,7 @@ enum State {
 }
 
 struct Execution {
+    started_at: Time,
     policy: Policy,
     state: State,
 }
@@ -276,7 +309,11 @@ impl Execution {
             Policy::SlowGetUp => State::SlowGetUp(GetUp::new(sensor, now, parameters)),
             Policy::FastGetUp => State::FastGetUp(GetUp::new(sensor, now, parameters)),
         };
-        Self { policy, state }
+        Self {
+            started_at: now,
+            policy,
+            state,
+        }
     }
 
     fn advance(&mut self, seconds: f32, standing: bool) {
