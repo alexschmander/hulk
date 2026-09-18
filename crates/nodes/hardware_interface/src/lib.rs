@@ -146,7 +146,11 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             .wrap_err("failed to bind hardware_interface parameters")?,
     );
 
-    parameters.add_validation_hook(|p| {
+    let output_period = parameters.snapshot().typed().joint_control_message_interval;
+    parameters.add_validation_hook(move |p| {
+        if p.joint_control_message_interval != output_period {
+            return Err("changing the actuator output period requires a restart".into());
+        }
         if [
             p.joint_control_message_interval,
             p.rotate_head_message_interval,
