@@ -2,13 +2,13 @@ use types::{motion_type::MotionType, primary_state::PrimaryState};
 
 use crate::{
     action,
-    actions::{damping, injected_motion_command, prepare, remote_control, stand, stand_up},
+    actions::{damping, injected_motion_command, prepare, remote_control, safety_motion, stand},
     behavior_tree::Node,
     condition,
     conditions::{
         has_ball_position, is_ball_interception_candidate, is_close_to_ball, is_closest_to_ball,
-        is_fallen, is_falling, is_goalkeeper, is_last_hulk_standing, is_primary_state,
-        is_remote_controlled, is_remote_kick_mode, is_simple,
+        is_goalkeeper, is_last_hulk_standing, is_primary_state, is_remote_controlled,
+        is_remote_kick_mode, is_simple,
     },
     goalkeeper::goalkeeper_subtree,
     head::{look_around, look_at_ball_subtree, look_straight_ahead, search_for_lost_ball_subtree},
@@ -36,14 +36,9 @@ pub fn create_tree() -> Node<Blackboard> {
         ),
         sequence!(
             condition!(is_primary_state, PrimaryState::Prepare),
-            switch_motion_type(
-                MotionType::Prepare,
-                action!(prepare),
-                sequence!(action!(look_straight_ahead), action!(stand))
-            )
+            action!(prepare)
         ),
-        sequence!(condition!(is_falling), action!(damping)),
-        sequence!(condition!(is_fallen), action!(stand_up)),
+        action!(safety_motion),
         sequence!(
             condition!(is_primary_state, PrimaryState::Stop),
             action!(stand)
