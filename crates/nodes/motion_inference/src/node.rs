@@ -272,7 +272,18 @@ impl Runtime {
                 return;
             }
         };
-        if s.validate_at(self.clock.now(), &self.parameters).is_err()
+        if let Err(error) = s.validate(&self.parameters) {
+            self.sensor = None;
+            self.fault = Some(Arc::new(error));
+            return;
+        }
+        let now = self.clock.now();
+        if s.timestamp > now {
+            self.sensor = None;
+            self.fault = Some(Arc::new(Report::msg("sensor timestamp is in the future")));
+            return;
+        }
+        if now.duration_since(s.timestamp) > self.parameters.timing.maximum_sensor_age
             || self
                 .sensor
                 .as_ref()
