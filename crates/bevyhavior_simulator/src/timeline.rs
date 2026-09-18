@@ -18,7 +18,7 @@ use voronoi::VoronoiGrid;
 
 use crate::behavior_tree_simulator::{
     InvariantViolation, RobotSnapshot, SimulatedBall, SimulatorBall, SimulatorBehaviorTickOutput,
-    SimulatorClock, SimulatorCurrentInvariantViolations, SimulatorFallDownState,
+    SimulatorClock, SimulatorCurrentInvariantViolations, SimulatorFallDetection,
     SimulatorGameState, SimulatorGroundToWorld, SimulatorHeadYaw, SimulatorObstacle,
     SimulatorPrimaryState, SimulatorRobot, SimulatorRobotId, SimulatorScenarioObstacles,
 };
@@ -134,7 +134,7 @@ pub fn record_timeline_frame(
         &SimulatorGroundToWorld,
         &SimulatorHeadYaw,
         &SimulatorPrimaryState,
-        &SimulatorFallDownState,
+        &SimulatorFallDetection,
     )>,
 ) {
     timeline.frames.push(TimelineFrame {
@@ -158,11 +158,11 @@ pub fn robot_snapshots_from_query(
         &SimulatorGroundToWorld,
         &SimulatorHeadYaw,
         &SimulatorPrimaryState,
-        &SimulatorFallDownState,
+        &SimulatorFallDetection,
     )>,
 ) -> BTreeMap<SimulatorRobotId, RobotSnapshot> {
     let mut snapshots = BTreeMap::new();
-    for (robot, ground_to_world, head_yaw, primary_state, fall_down_state) in robots.iter() {
+    for (robot, ground_to_world, head_yaw, primary_state, fall_detection) in robots.iter() {
         let robot_id = robot.id();
         snapshots.insert(
             robot_id,
@@ -172,7 +172,7 @@ pub fn robot_snapshots_from_query(
                 ground_to_world: ground_to_world.ground_to_world,
                 head_yaw: head_yaw.yaw,
                 primary_state: primary_state.primary_state,
-                fall_down_state: fall_down_state.fall_down_state,
+                fall_detection: fall_detection.fall_detection,
             },
         );
     }
