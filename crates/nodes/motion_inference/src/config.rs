@@ -84,6 +84,7 @@ pub struct PolicyParameters {
 pub struct TimingParameters {
     pub policy_period: Duration,
     pub sensor_period: Duration,
+    pub maximum_sensor_age: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ros_z::Message)]
@@ -163,7 +164,7 @@ impl Parameters {
         }
         let t = &self.timing;
         ensure!(
-            [t.policy_period, t.sensor_period]
+            [t.policy_period, t.sensor_period, t.maximum_sensor_age]
                 .into_iter()
                 .all(|value| !value.is_zero() && value.as_secs_f32().is_finite()),
             "invalid inference timing"
