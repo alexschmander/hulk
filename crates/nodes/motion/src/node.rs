@@ -232,7 +232,7 @@ async fn cycle(
     }
     match infer_and_validate(node, inputs, motion, &frame, p).await {
         Ok(command) => {
-            safety.has_actuated = true;
+            safety.has_actuated |= matches!(command, RobotCommand::Custom { .. });
             command
         }
         Err(error) => {
