@@ -11,15 +11,22 @@ use types::{
     motor_command::MotorCommand,
 };
 
+#[derive(Clone, Copy)]
+struct ModeRequest {
+    mode: ControlMode,
+    sequence: u64,
+}
+
 struct ModeWorker {
-    commands: watch::Sender<Option<RetryCommand<RobotMode>>>,
-    acknowledged: watch::Receiver<Option<RobotMode>>,
+    sequence: u64,
+    commands: watch::Sender<Option<RetryCommand<ModeRequest>>>,
+    acknowledged: watch::Receiver<Option<ModeRequest>>,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl ModeWorker {
     fn new(client: Arc<loco_client::LocoClient>, diagnostics: Arc<RpcDiagnostics>) -> Self {
-        let (commands, receiver) = watch::channel(None::<RetryCommand<RobotMode>>);
+        let (commands, receiver) = watch::channel(None::<RetryCommand<ModeRequest>>);
         let (acknowledgements, acknowledged) = watch::channel(None);
         let task = tokio::spawn(run_retrying_rpc_worker(receiver, move |command| {
             let client = client.clone();
@@ -28,8 +35,8 @@ impl ModeWorker {
             async move {
                 let attempt = diagnostics.begin(RpcActionKind::ChangeMode);
                 retryable_rpc_call(
-                    client.change_mode(command.target, command.timeout),
-                    format!("request mode {:?}", command.target),
+                    client.change_mode(sdk_mode(command.target.mode), command.timeout),
+                    format!("request mode {:?}", command.target.mode),
                     attempt,
                 )
                 .await?;
@@ -38,25 +45,32 @@ impl ModeWorker {
             }
         }));
         Self {
+            sequence: 0,
             commands,
             acknowledged,
             task,
         }
     }
-    fn request(&self, mode: ControlMode, timeout: Duration) -> Result<()> {
+    fn request(&mut self, mode: ControlMode, timeout: Duration) -> Result<()> {
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| eyre!("mode generation exhausted"))?;
         self.commands.send(Some(RetryCommand {
-            target: sdk_mode(mode),
+            target: ModeRequest {
+                mode,
+                sequence: self.sequence,
+            },
             timeout,
         }))?;
         Ok(())
     }
     fn acknowledged(&self) -> Option<ControlMode> {
-        match *self.acknowledged.borrow() {
-            Some(RobotMode::Damping) => Some(ControlMode::Damping),
-            Some(RobotMode::Prepare) => Some(ControlMode::Prepare),
-            Some(RobotMode::Custom) => Some(ControlMode::Custom),
-            _ => None,
-        }
+        self.acknowledged
+            .borrow()
+            .as_ref()
+            .filter(|ack| ack.sequence == self.sequence)
+            .map(|ack| ack.mode)
     }
 }
 impl Drop for ModeWorker {
@@ -171,7 +185,7 @@ impl Actuator {
         &mut self,
         node: &Node,
         p: &Parameters,
-        modes: &ModeWorker,
+        modes: &mut ModeWorker,
         publisher: &JointControlPublisher,
         statuses: &Publisher<HardwareStatus>,
     ) -> Result<()> {
@@ -194,6 +208,7 @@ impl Actuator {
             self.desired = desired;
             self.mode_since = now;
         }
+        let acknowledged = modes.acknowledged();
         // Protective targets are streamed immediately, including while an older mode RPC is in flight.
         if desired == ControlMode::Custom
             && acknowledged == Some(ControlMode::Custom)
@@ -247,7 +262,7 @@ pub(super) async fn run(
         .await?;
     let publisher = JointControlPublisher::new(ctx.session()).await?;
     let client = Arc::new(loco_client::LocoClient::new(ctx.session()).await?);
-    let modes = ModeWorker::new(client, diagnostics);
+    let mut modes = ModeWorker::new(client, diagnostics);
     let p = parameters.snapshot();
     modes.request(ControlMode::Damping, p.typed().sdk_request_timeout)?;
     let mut actuator = Actuator::new(node.clock().now());
@@ -262,7 +277,7 @@ pub(super) async fn run(
                 let limits=received?;
                 match limits.validate() {Ok(())=>actuator.limits=Some(limits),Err(reason)=>{actuator.limits=None;actuator.fail(reason);}}
             }
-            _=timer.tick()=>actuator.tick(&node,parameters.snapshot().typed(),&modes,&publisher,&statuses).await?,
+            _=timer.tick()=>actuator.tick(&node,parameters.snapshot().typed(),&mut modes,&publisher,&statuses).await?,
         }
     }
 }
