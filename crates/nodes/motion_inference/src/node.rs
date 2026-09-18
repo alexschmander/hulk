@@ -379,7 +379,13 @@ impl Runtime {
             && now < p.request.valid_until
             && now >= sensor_time
             && now.duration_since(sensor_time) <= self.parameters.timing.maximum_sensor_age;
-        let result = if !valid {
+        let result = if let Some(source) = &self.fault {
+            c.reset();
+            self.last_position = None;
+            Err(InferenceError::Fault {
+                source: source.clone(),
+            })
+        } else if !valid {
             c.reset();
             self.last_position = None;
             Err(InferenceError::Expired)
