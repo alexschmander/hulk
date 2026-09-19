@@ -19,7 +19,7 @@ use ros_z::{
     time::Time,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use zenoh::sample::Sample;
 
 type ChannelId = u16;
@@ -42,10 +42,24 @@ pub fn run_boxed(
     ctx: Arc<Context>,
     log_path: Option<PathBuf>,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-    Box::pin(run(ctx, log_path))
+    Box::pin(run(ctx, log_path, None))
 }
 
-async fn run(ctx: Arc<Context>, log_path: Option<PathBuf>) -> Result<()> {
+/// Waits for all subscriptions before signalling readiness; finalizes the MCAP on stop.
+pub async fn run_controlled(
+    ctx: Arc<Context>,
+    log_path: PathBuf,
+    ready: oneshot::Sender<()>,
+    stop: oneshot::Receiver<()>,
+) -> Result<()> {
+    run(ctx, Some(log_path), Some((ready, stop))).await
+}
+
+async fn run(
+    ctx: Arc<Context>,
+    log_path: Option<PathBuf>,
+    control: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+) -> Result<()> {
     let Some(log_path) = log_path else {
         return Ok(());
     };
@@ -80,40 +94,49 @@ async fn run(ctx: Arc<Context>, log_path: Option<PathBuf>) -> Result<()> {
     );
 
     let mut recorders = RecorderTasks::new();
-    for topic in &parameters.topics {
-        subscribe_topic(
-            &node,
-            &mut recorders,
-            parameters.queue_depth,
-            parameters.schema_discovery_timeout,
-            topic,
-        )
-        .await?;
-    }
+    let recorder_result = async {
+        for topic in &parameters.topics {
+            subscribe_topic(
+                &node,
+                &mut recorders,
+                parameters.queue_depth,
+                parameters.schema_discovery_timeout,
+                topic,
+            )
+            .await?;
+        }
 
-    if parameters.include_raw_images {
-        subscribe_topic(
-            &node,
-            &mut recorders,
-            parameters.queue_depth,
-            parameters.schema_discovery_timeout,
-            RAW_IMAGE_TOPIC,
-        )
-        .await?;
-    }
+        if parameters.include_raw_images {
+            subscribe_topic(
+                &node,
+                &mut recorders,
+                parameters.queue_depth,
+                parameters.schema_discovery_timeout,
+                RAW_IMAGE_TOPIC,
+            )
+            .await?;
+        }
 
-    tracing::info!(
-        path = %mcap_path.display(),
-        include_raw_images = parameters.include_raw_images,
-        raw_image_min_interval = ?parameters.raw_image_min_interval,
-        queue_depth = parameters.queue_depth,
-        topics = parameters.topics.len(),
-        compression = "lz4",
-        "localization recording started"
-    );
+        tracing::info!(
+            path = %mcap_path.display(),
+            include_raw_images = parameters.include_raw_images,
+            raw_image_min_interval = ?parameters.raw_image_min_interval,
+            queue_depth = parameters.queue_depth,
+            topics = parameters.topics.len(),
+            compression = "lz4",
+            "localization recording started"
+        );
 
-    let recorder_result =
-        record_samples(&mut recorders, parameters.max_duration, &write_sender).await;
+        if let Some((ready, stop)) = control {
+            let _ = ready.send(());
+            tokio::select! {
+                result = record_samples(&mut recorders, parameters.max_duration, &write_sender) => result,
+                _ = stop => Ok(()),
+            }
+        } else {
+            record_samples(&mut recorders, parameters.max_duration, &write_sender).await
+        }
+    }.await;
     drop(write_sender);
 
     let writer_result = writer_task

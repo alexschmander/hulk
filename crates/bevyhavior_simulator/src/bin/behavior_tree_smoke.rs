@@ -116,5 +116,6 @@ fn motion_name(motion_command: &MotionCommand) -> &str {
         MotionCommand::Kick { .. } => "kick",
         MotionCommand::Walk { .. } => "walk",
         MotionCommand::WalkWithVelocity { .. } => "walk_with_velocity",
+        MotionCommand::HeadOnly { .. } => "head_only",
     }
 }

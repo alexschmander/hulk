@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+kit=$(dirname "$(readlink -f "$0")")
+pattern=${1:-zero}
+seconds=${2:-10}
+yaw=${3:-0}
+pitch=${4:-0.7}
+[[ "$pattern" =~ ^(zero|scan|look-around|hold)$ ]] || exit 1
+[[ "$seconds" =~ ^[0-9]+$ ]] && ((10#$seconds >= 1 && 10#$seconds <= 600)) || exit 1
+for angle in "$yaw" "$pitch"; do [[ "$angle" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || exit 1; done
+cd "$kit"
+sha256sum --status -c SHA256SUMS
+exec 9>/home/booster/hulk/.head-only-test.lock
+flock -n 9 || { echo 'Another head-only test is running' >&2; exit 1; }
+sudo systemctl stop hulk
+sudo systemctl is-active --quiet hulk-runtime
+podman=/usr/local/bin/podman
+if sudo "$podman" exec hulk pgrep -x hulk_ros_z >/dev/null; then
+    echo 'A HULK process is still running; refusing concurrent control' >&2
+    exit 1
+fi
+mkdir -p "$kit/logs"
+log="$kit/logs/$(date -u +%Y%m%dT%H%M%S)-$pattern"
+pid_file="$log.pid"
+stop_file="$log.stop"
+child=
+stop() {
+    trap '' INT TERM HUP
+    touch "$stop_file"
+    sudo "$podman" exec hulk sh -c 'if [ -f "$1" ]; then kill -TERM "$(cat "$1")"; fi' sh "$pid_file" || true
+    if [[ -n "$child" ]]; then wait "$child" || true; fi
+}
+trap stop INT TERM HUP
+echo "Robot must be seated and supported. Starting $pattern for $seconds seconds; Ctrl-C stops."
+sudo "$podman" exec --user "$(id -u booster)" --workdir "$kit" \
+    --env RUST_LOG=info --env RUST_BACKTRACE=1 hulk \
+    sh -c 'echo $$ > "$1.tmp"; mv "$1.tmp" "$1"; [ ! -e "$2" ] || exit 130; shift 2; exec "$@"' sh "$pid_file" "$stop_file" \
+    "$kit/bin/hulk_ros_z" --location default_location --parameter-root etc/parameters \
+    --router tcp/127.0.0.1:7447 --log-path "$log" \
+    --head-only-test "$pattern" --head-test-seconds "$seconds" \
+    --head-test-yaw "$yaw" --head-test-pitch "$pitch" \
+    > >(tee "$log.out") 2> >(tee "$log.err" >&2) &
+child=$!
+status=0
+wait "$child" || status=$?
+trap - INT TERM HUP
+rm -f "$pid_file" "$stop_file"
+if [[ -d "$log" ]]; then cp BUILD.txt SHA256SUMS "$log/"; fi
+echo "Recording: $log. The normal HULK service remains stopped."
+exit "$status"

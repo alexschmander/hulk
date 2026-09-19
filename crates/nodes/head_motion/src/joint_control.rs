@@ -22,7 +22,7 @@ mod trajectory;
 
 const JOINTS: [HeadJoint; 2] = [HeadJoint::Yaw, HeadJoint::Pitch];
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, ros_z::Message)]
 pub struct HeadObservation {
     pub positions: HeadJoints<f32>,
     pub velocities: HeadJoints<f32>,
@@ -66,7 +66,7 @@ pub enum JointTarget {
     Damping,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, ros_z::Message)]
 pub struct MotionProgress {
     /// Identifies the request that produced this feedback, before position clipping.
     pub requested_target: HeadJoints<f32>,

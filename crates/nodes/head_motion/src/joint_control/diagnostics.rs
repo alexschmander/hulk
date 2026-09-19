@@ -7,7 +7,9 @@ use super::{
     trajectory::{AxisStep, Limits},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ros_z::Message,
+)]
 pub enum Constraint {
     Position,
     Velocity,
@@ -15,7 +17,9 @@ pub enum Constraint {
     Jerk,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ros_z::Message,
+)]
 pub enum ConstraintCause {
     TargetClipped,
     MeasuredOutsideBounds,
@@ -24,7 +28,7 @@ pub enum ConstraintCause {
     PositionRecovery,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, ros_z::Message)]
 pub struct ConstraintDiagnostic {
     pub joint: HeadJoint,
     pub constraint: Constraint,

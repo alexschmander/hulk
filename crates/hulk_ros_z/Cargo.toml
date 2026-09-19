@@ -57,6 +57,8 @@ stereo_visual_odometry = { workspace = true, features = ["ort-dynamic"] }
 support_foot_estimator = { workspace = true }
 team_ball_receiver = { workspace = true }
 time_to_reach_kick_position = { workspace = true }
+serde_json = { workspace = true }
+types = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 trigger = { workspace = true }
@@ -65,3 +67,11 @@ whistle_detection = { workspace = true }
 whistle_filter = { workspace = true }
 world_state_composer = { workspace = true }
 world_to_field_provider = { workspace = true }
+
+[dev-dependencies]
+booster = { workspace = true }
+cdr = { workspace = true }
+kinematics = { workspace = true }
+mcap = { workspace = true }
+ros2 = { workspace = true }
+tempfile = { workspace = true }

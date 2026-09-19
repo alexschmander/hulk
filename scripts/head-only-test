@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+
+kit=target/head-only-kit
+usage() {
+    cat <<'EOF'
+Usage:
+  scripts/head-only-test prepare
+  scripts/head-only-test run ROBOT_IP [zero|scan|look-around|hold] [SECONDS] [YAW] [PITCH]
+  scripts/head-only-test stop ROBOT_IP
+  scripts/head-only-test fetch ROBOT_IP
+
+prepare builds an ARM64 release and packages it locally; it does not contact a robot.
+run uploads the prepared kit, stops the normal HULK service, and runs a timed test.
+Default: zero angles for 10 seconds. Hold angles are radians (default 0, 0.7).
+The robot must already be seated and supported: body damping does not hold a pose.
+Ctrl-C requests damping. The regular HULK service stays stopped after every test.
+Uses SSH as booster and sudo on the robot, like the normal deployment tooling.
+EOF
+}
+
+action=${1:-help}
+case "$action" in
+    prepare)
+        ./pepsi upload --prepare --release --env "${HEAD_TEST_BUILD_ENV:-podman:localhost/k1sdk:1.3.0}"
+        binary=target/container/aarch64-unknown-linux-gnu/release/hulk_ros_z
+        file "$binary" | rg -q 'ARM aarch64' || { echo 'Expected an ARM64 binary' >&2; exit 1; }
+        mkdir -p "$kit/bin" "$kit/etc"
+        cp "$binary" "$kit/bin/"
+        # Only this test kit is replaced, never the regular deployment.
+        rm -rf "$kit/etc/parameters"
+        cp -a etc/parameters "$kit/etc/"
+        cp scripts/run-head-only-on-robot "$kit/run"
+        git rev-parse HEAD > "$kit/BUILD.txt"
+        git diff --stat >> "$kit/BUILD.txt"
+        date -u +%Y%m%dT%H%M%S > "$kit/build-id"
+        (cd "$kit" && find bin etc -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+        echo "Prepared $kit. Run scripts/head-only-test run ROBOT_IP zero 10 tomorrow."
+        ;;
+    run|fetch|stop)
+        robot=${2:?Specify the robot IP or hostname}
+        [[ "$robot" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { echo 'Invalid robot address' >&2; exit 1; }
+        if [[ "$action" == stop ]]; then
+            ssh -t "booster@$robot" "sudo /usr/local/bin/podman exec hulk pkill -TERM -f '[h]ulk_ros_z.*--head-only-test'"
+            exit
+        fi
+        [[ -f "$kit/build-id" ]] || { echo 'Run scripts/head-only-test prepare first' >&2; exit 1; }
+        build_id=$(cat "$kit/build-id")
+        [[ "$build_id" =~ ^[0-9]{8}T[0-9]{6}$ ]] || exit 1
+        remote="/home/booster/hulk/head-only-tests/$build_id"
+        if [[ "$action" == run ]]; then
+            pattern=${3:-zero}
+            seconds=${4:-10}
+            yaw=${5:-0}
+            pitch=${6:-0.7}
+            [[ "$pattern" =~ ^(zero|scan|look-around|hold)$ ]] || { usage; exit 1; }
+            [[ "$seconds" =~ ^[0-9]+$ ]] && ((10#$seconds >= 1 && 10#$seconds <= 600)) || { echo 'Seconds must be 1..600' >&2; exit 1; }
+            for angle in "$yaw" "$pitch"; do
+                [[ "$angle" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || { echo 'Angles must be decimal radians' >&2; exit 1; }
+            done
+            (cd "$kit" && sha256sum --status -c SHA256SUMS)
+            ssh "booster@$robot" "mkdir -p '$remote'"
+            rsync -az "$kit/" "booster@$robot:$remote/"
+            status=0
+            ssh -tt "booster@$robot" "'$remote/run' '$pattern' '$seconds' '$yaw' '$pitch'" || status=$?
+            echo "Test exited with status $status. Fetch with: scripts/head-only-test fetch $robot"
+            exit "$status"
+        fi
+        destination="logs/head-only/$robot/$build_id"
+        mkdir -p "$destination"
+        rsync -az "booster@$robot:$remote/logs/" "$destination/"
+        cp "$kit/BUILD.txt" "$kit/SHA256SUMS" "$destination/"
+        echo "Recordings: $destination"
+        ;;
+    help|--help|-h) usage ;;
+    *) usage; exit 1 ;;
+esac

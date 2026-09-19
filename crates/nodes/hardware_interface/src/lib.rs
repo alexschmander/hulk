@@ -51,6 +51,19 @@ pub struct Parameters {
     pub mode_transition_timeout: Duration,
 }
 
+/// Host publish times; these do not imply acknowledgement by the motor controller.
+#[derive(Debug, Clone, Serialize, Deserialize, Message)]
+pub struct CommandTiming {
+    pub sequence: u64,
+    pub command_source_time: Option<ros_z::time::Time>,
+    pub command_received_at: Option<ros_z::time::Time>,
+    pub publish_started_at: ros_z::time::Time,
+    pub publish_completed_at: ros_z::time::Time,
+    pub error: Option<String>,
+}
+
+pub const COMMAND_TIMING_TOPIC: &str = "hardware_interface/command_timing";
+
 #[derive(Debug, Clone, Copy)]
 enum RpcActionKind {
     ChangeMode,
@@ -132,6 +145,11 @@ enum DesiredLed {
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(run(ctx))
+}
+
+/// Sends protective targets and explicitly requests firmware damping on test shutdown.
+pub async fn request_damping(ctx: &Context) -> Result<()> {
+    actuator::protect(ctx.session(), Duration::from_secs(2)).await
 }
 
 async fn run(ctx: Arc<Context>) -> Result<()> {

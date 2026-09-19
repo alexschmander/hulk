@@ -115,7 +115,12 @@ impl Parameters {
 }
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-    Box::pin(node::run(ctx))
+    Box::pin(node::run(ctx, false))
+}
+
+/// Bench runtime. Accepts only HeadOnly and Damping; never starts body inference or recovery.
+pub fn run_head_only_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+    Box::pin(node::run(ctx, true))
 }
 
 struct MotionState {
@@ -130,6 +135,9 @@ struct MotionState {
 }
 
 enum MotionPlan {
+    HeadOnly {
+        head: HeadMotion,
+    },
     Damping,
     Prepare,
     GetUp {
@@ -151,6 +159,7 @@ impl MotionPlan {
         parameters: &WalkingParameters,
     ) -> Result<Self> {
         Ok(match motion_command {
+            MotionCommand::HeadOnly { head } => Self::HeadOnly { head: *head },
             MotionCommand::Damping => Self::Damping,
             MotionCommand::Prepare => Self::Prepare,
             MotionCommand::Stand { head } => Self::Walk {
@@ -242,6 +251,20 @@ impl MotionState {
         joint_limits: &JointLimits,
     ) -> Result<RobotCommand> {
         match motion_plan {
+            MotionPlan::HeadOnly { head } => {
+                let head = self
+                    .head_motion_client
+                    .call_with_timeout_async(&head, parameters.head_motion_timeout)
+                    .await?;
+                self.last_policy = None;
+                return RobotCommand::Custom {
+                    joints_command: Joints::from_head_and_body(
+                        head,
+                        BodyJoints::fill(types::motor_command::MotorCommand::damping()),
+                    ),
+                }
+                .clamp(joint_limits);
+            }
             MotionPlan::Damping => {
                 self.deactivate();
                 return Ok(RobotCommand::Damping);
@@ -346,7 +369,9 @@ impl MotionState {
                 );
                 Ok((*output.joints, output.execution))
             }
-            MotionPlan::Damping | MotionPlan::Prepare => Err(eyre!("inference requires a policy")),
+            MotionPlan::HeadOnly { .. } | MotionPlan::Damping | MotionPlan::Prepare => {
+                Err(eyre!("inference requires a body policy"))
+            }
         }
     }
 

@@ -95,6 +95,7 @@ struct Actuator {
     initialized: bool,
     fault: Option<String>,
     saw_damping: bool,
+    dispatch_sequence: u64,
 }
 impl Actuator {
     fn new(now: Time) -> Self {
@@ -106,6 +107,7 @@ impl Actuator {
             initialized: false,
             fault: None,
             saw_damping: false,
+            dispatch_sequence: 0,
         }
     }
     fn fail(&mut self, reason: impl Into<String>) {
@@ -187,8 +189,7 @@ impl Actuator {
         p: &Parameters,
         modes: &mut ModeWorker,
         publisher: &JointControlPublisher,
-        statuses: &Publisher<HardwareStatus>,
-        sent_commands: &Publisher<LowCommand>,
+        diagnostics: &OutputPublishers,
     ) -> Result<()> {
         let now = node.clock().now();
         let acknowledged = modes.acknowledged();
@@ -219,9 +220,25 @@ impl Actuator {
         } else {
             protective_command()
         };
-        publisher.publish(&command).await?;
-        sent_commands.publish(&command).await?;
-        statuses
+        self.dispatch_sequence += 1;
+        let publish_started_at = node.clock().now();
+        let result = publisher.publish(&command).await;
+        let publish_completed_at = node.clock().now();
+        diagnostics
+            .timing
+            .publish(&CommandTiming {
+                sequence: self.dispatch_sequence,
+                command_source_time: self.command.as_ref().map(|c| c.0),
+                command_received_at: self.command.as_ref().map(|c| c.1),
+                publish_started_at,
+                publish_completed_at,
+                error: result.as_ref().err().map(|e| format!("{e:#}")),
+            })
+            .await?;
+        result?;
+        diagnostics.sent_commands.publish(&command).await?;
+        diagnostics
+            .statuses
             .publish(&HardwareStatus {
                 time: now,
                 desired,
@@ -232,6 +249,12 @@ impl Actuator {
             .await?;
         Ok(())
     }
+}
+
+struct OutputPublishers {
+    statuses: Publisher<HardwareStatus>,
+    sent_commands: Publisher<LowCommand>,
+    timing: Publisher<CommandTiming>,
 }
 
 pub(super) async fn run(
@@ -268,6 +291,15 @@ pub(super) async fn run(
         .qos(qos)
         .build()
         .await?;
+    let output_publishers = OutputPublishers {
+        statuses,
+        sent_commands,
+        timing: node
+            .publisher::<CommandTiming>(COMMAND_TIMING_TOPIC)
+            .qos(qos)
+            .build()
+            .await?,
+    };
     let publisher = JointControlPublisher::new(ctx.session()).await?;
     let client = Arc::new(loco_client::LocoClient::new(ctx.session()).await?);
     let mut modes = ModeWorker::new(client, diagnostics);
@@ -285,7 +317,7 @@ pub(super) async fn run(
                 let limits=received?;
                 match limits.validate() {Ok(())=>actuator.limits=Some(limits),Err(reason)=>{actuator.limits=None;actuator.fail(reason);}}
             }
-            _=timer.tick()=>actuator.tick(&node,parameters.snapshot().typed(),&mut modes,&publisher,&statuses,&sent_commands).await?,
+            _=timer.tick()=>actuator.tick(&node,parameters.snapshot().typed(),&mut modes,&publisher,&output_publishers).await?,
         }
     }
 }

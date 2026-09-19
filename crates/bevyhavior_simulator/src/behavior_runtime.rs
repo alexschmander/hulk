@@ -94,6 +94,7 @@ impl SimulatorRobotBehavior {
             MotionCommand::Stand { .. } => Some(types::motion_type::MotionType::Stand),
             MotionCommand::StandUp { .. } => Some(types::motion_type::MotionType::StandUp),
             MotionCommand::Prepare => Some(types::motion_type::MotionType::Prepare),
+            MotionCommand::HeadOnly { .. } => None,
             MotionCommand::Damping => Some(types::motion_type::MotionType::Damping),
             _ => None,
         };

@@ -10,7 +10,7 @@ use ros_z::{
     Result as RosResult,
     prelude::*,
     pubsub::Received,
-    qos::{QosDurability, QosHistory},
+    qos::{QosDurability, QosHistory, QosReliability},
     time::Time,
 };
 use ros_z_schema::{ServiceDef, compute_hash};
@@ -94,12 +94,24 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await?;
 
+    let diagnostics = node
+        .publisher::<crate::diagnostics::Diagnostics>(crate::diagnostics::TOPIC)
+        .qos(QosProfile {
+            history: QosHistory::from_depth(1),
+            reliability: QosReliability::BestEffort,
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let mut evaluation = 0;
+    let mut observation_received_at = None;
     let mut controller = HeadController::default();
     let mut logger = NodeLogger::default();
 
     loop {
         tokio::select! {
             received = low_state_sub.recv_with_metadata() => {
+                observation_received_at = Some(node.clock().now());
                 receive_observation(
                     received, &mut controller, &mut logger,
                     parameters.snapshot().typed().joint_control.warning_interval,
@@ -107,6 +119,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 );
             }
             received = head_motion_service.take_request_async() => {
+                let received_at = node.clock().now();
                 let snapshot = parameters.snapshot();
                 let parameters = snapshot.typed();
                 let (request, reply) = match received {
@@ -120,6 +133,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 // This loop is the subscriber's only consumer. A ready sample can be
                 // taken immediately, including when both select branches were ready.
                 if low_state_sub.is_ready() {
+                    observation_received_at = Some(node.clock().now());
                     receive_observation(
                         low_state_sub.recv_with_metadata().await,
                         &mut controller, &mut logger,
@@ -143,21 +157,37 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                     field_side: game.as_deref().map(|game| game.global_field_side),
                 };
                 let now = node.clock().now();
+                evaluation += 1;
+                let observation = controller.observation_snapshot();
+                let mut diagnostic = crate::diagnostics::Diagnostics {
+                    evaluation, request_sequence: reply.id().sequence_number, request,
+                    received_at, evaluated_at: now, completed_at: now,
+                    observation_time: observation.map(|(_, time)| time),
+                    observation_received_at: observation.and(observation_received_at),
+                    observation: observation.map(|(value, _)| value), output: None, error: None,
+                };
                 let output = match controller.evaluate(&request, &context, parameters, now) {
                     Ok(output) => output,
                     Err(error) => {
                         logger.log_error(FailureKind::Request, Some(&request), &error,
                             parameters.joint_control.warning_interval, now);
+                        diagnostic.completed_at = node.clock().now();
+                        diagnostic.error = Some(format!("{error:#}"));
+                        diagnostics.publish(&diagnostic).await?;
                         // The response contract contains commands only. Dropping the
                         // reply lets central motion's timed call fail without commands.
                         continue;
                     }
                 };
+                diagnostic.completed_at = node.clock().now();
+                diagnostic.output = Some(crate::diagnostics::Output::capture(&controller, &output, parameters));
                 logger.log_output(&request, &output, &parameters.joint_control, now);
                 if let Err(error) = reply.reply_async(&output.joint_control.commands).await {
+                    diagnostic.error = Some(format!("reply failed: {error}"));
                     logger.log_error(FailureKind::Response, Some(&request), &error.into(),
                         parameters.joint_control.warning_interval, now);
                 }
+                diagnostics.publish(&diagnostic).await?;
             }
         }
     }

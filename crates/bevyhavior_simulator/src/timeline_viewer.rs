@@ -1106,6 +1106,7 @@ fn frame_duration_seconds(current: &TimelineFrame, next: &TimelineFrame) -> f64 
 
 fn motion_name(motion_command: &MotionCommand) -> &'static str {
     match motion_command {
+        MotionCommand::HeadOnly { .. } => "head_only",
         MotionCommand::Damping => "damping",
         MotionCommand::Prepare => "prepare",
         MotionCommand::Stand { .. } => "stand",

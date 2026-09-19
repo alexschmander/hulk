@@ -12,7 +12,9 @@ use rsruckig::{
 
 use super::JOINTS;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize, ros_z::Message,
+)]
 pub struct KinematicState {
     pub position: f64,
     pub velocity: f64,

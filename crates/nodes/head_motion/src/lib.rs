@@ -1,3 +1,4 @@
+pub mod diagnostics;
 pub mod head;
 pub mod joint_control;
 pub mod logging;

@@ -398,6 +398,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         blackboard.last_motion_command = motion_command.clone();
 
         let motion_type = match &motion_command {
+            MotionCommand::HeadOnly { .. } => None,
             MotionCommand::Damping => Some(MotionType::Damping),
             MotionCommand::Kick { .. } => Some(MotionType::Kick),
             MotionCommand::Walk { .. } | MotionCommand::WalkWithVelocity { .. } => {

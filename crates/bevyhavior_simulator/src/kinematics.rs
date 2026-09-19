@@ -162,7 +162,10 @@ pub fn move_robots(
                 )
             }
             MotionCommand::StandUp { .. } => fall_down_state.fall_down_state = None,
-            MotionCommand::Damping | MotionCommand::Prepare | MotionCommand::Stand { .. } => {}
+            MotionCommand::HeadOnly { .. }
+            | MotionCommand::Damping
+            | MotionCommand::Prepare
+            | MotionCommand::Stand { .. } => {}
         }
 
         head_yaw.yaw = apply_head_motion(

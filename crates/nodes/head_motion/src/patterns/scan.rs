@@ -12,13 +12,17 @@ use crate::{
     parameters::{Parameters, ScanParameters},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ros_z::Message,
+)]
 pub enum ScanKind {
     LookAround,
     SearchForLostBall,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ros_z::Message,
+)]
 pub enum ScanWaypoint {
     Center { next_side: Side },
     Side(Side),
@@ -81,7 +85,31 @@ pub struct ScanState {
     active: Option<ActiveScan>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ros_z::Message)]
+pub struct ScanStatus {
+    pub kind: ScanKind,
+    pub waypoint: ScanWaypoint,
+    pub target: HeadJoints<f32>,
+    pub started_at: Time,
+    pub dwell_since: Option<Time>,
+    pub ever_reached: bool,
+}
+
 impl ScanState {
+    pub fn status(&self) -> Option<ScanStatus> {
+        self.active.as_ref().map(|s| ScanStatus {
+            kind: s.kind,
+            waypoint: s.waypoint,
+            target: s.position,
+            started_at: s.started,
+            dwell_since: match s.phase {
+                ScanPhase::Moving => None,
+                ScanPhase::Dwelling { since } => Some(since),
+            },
+            ever_reached: s.ever_reached,
+        })
+    }
+
     /// Call only when a scan output is requested. Progress is from the preceding
     /// joint-control output; its requested target must match the active waypoint.
     /// Initial side is chosen by the coordinator from field side (left if unknown).

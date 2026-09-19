@@ -4,4 +4,4 @@ mod glance;
 mod scan;
 
 pub use glance::{GlanceState, GlanceTarget, GlanceTimeout};
-pub use scan::{ScanKind, ScanOutput, ScanState, ScanTimeout, ScanWaypoint};
+pub use scan::{ScanKind, ScanOutput, ScanState, ScanStatus, ScanTimeout, ScanWaypoint};

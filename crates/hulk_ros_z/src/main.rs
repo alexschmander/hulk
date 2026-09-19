@@ -10,6 +10,8 @@ use ros_z::prelude::*;
 use tokio::task::JoinSet;
 use tracing_subscriber::EnvFilter;
 
+mod head_only_test;
+
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Parser)]
@@ -22,6 +24,8 @@ struct Args {
     router: Option<String>,
     #[arg(long)]
     log_path: Option<PathBuf>,
+    #[command(flatten)]
+    head_only: head_only_test::Args,
 }
 
 struct RunningStack {
@@ -63,8 +67,19 @@ async fn run() -> Result<()> {
     let robot_number = load_robot_number(&hardware_id).await?;
     let namespace = derive_namespace(&robot_number.to_string());
 
-    let parameter_layers =
+    let mut parameter_layers =
         derive_parameter_layers(&args.parameter_root, &args.location, &hardware_id);
+    if args.head_only.head_only_test.is_some() {
+        parameter_layers = head_only_test::prepare(
+            &args.head_only,
+            args.log_path
+                .as_deref()
+                .wrap_err("--head-only-test requires --log-path")?,
+            &parameter_layers,
+            &hardware_id,
+            &namespace,
+        )?;
+    }
 
     let mut builder = ContextBuilder::default()
         .with_namespace(&namespace)
@@ -80,6 +95,17 @@ async fn run() -> Result<()> {
     };
 
     let ctx = Arc::new(builder.build().await?);
+    if args.head_only.head_only_test.is_some() {
+        let result = head_only_test::run(
+            ctx.clone(),
+            &args.head_only,
+            args.log_path.unwrap(),
+            &namespace,
+        )
+        .await;
+        ctx.shutdown()?;
+        return result;
+    }
     let mut running = spawn_all(ctx.clone(), args.log_path).await?;
 
     let result = tokio::select! {

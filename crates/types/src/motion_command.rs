@@ -57,12 +57,18 @@ pub enum MotionCommand {
         velocity: Vector2<Ground>,
         angular_velocity: f32,
     },
+    /// Explicit bench command: active head and damping on every body joint.
+    /// Accepted only by the dedicated head-only Motion runtime.
+    HeadOnly {
+        head: HeadMotion,
+    },
 }
 
 impl MotionCommand {
     pub fn head_motion(&self) -> Option<HeadMotion> {
         match self {
-            MotionCommand::Stand { head, .. }
+            MotionCommand::HeadOnly { head }
+            | MotionCommand::Stand { head, .. }
             | MotionCommand::Walk { head, .. }
             | MotionCommand::WalkWithVelocity { head, .. }
             | MotionCommand::Kick { head, .. } => Some(*head),

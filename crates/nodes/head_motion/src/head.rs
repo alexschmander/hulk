@@ -81,6 +81,14 @@ pub struct HeadController {
 }
 
 impl HeadController {
+    pub fn observation_snapshot(&self) -> Option<(HeadObservation, Time)> {
+        self.observation.as_ref().map(|o| (o.value, o.time))
+    }
+
+    pub fn scan_status(&self) -> Option<crate::patterns::ScanStatus> {
+        self.scan.status()
+    }
+
     /// Discard measurements when the input adapter cannot decode a LowState sample.
     pub fn invalidate_observation(&mut self) {
         self.observation = None;

@@ -8,7 +8,10 @@ use ros_z::{
 };
 use std::time::Instant;
 use tracing::{error, warn};
-use types::hardware_status::{ControlMode, HARDWARE_STATUS_TOPIC, HardwareStatus};
+use types::{
+    hardware_status::{ControlMode, HARDWARE_STATUS_TOPIC, HardwareStatus},
+    motion_execution::{MOTION_EXECUTION_TOPIC, MotionExecution, MotionPhase},
+};
 
 struct Inputs {
     commands: Latest<MotionCommand>,
@@ -84,7 +87,7 @@ fn body_position(sensor: &LowState) -> Result<Joints<f32>> {
     Ok(position)
 }
 
-pub(super) async fn run(ctx: Arc<Context>) -> Result<()> {
+pub(super) async fn run(ctx: Arc<Context>, head_only: bool) -> Result<()> {
     let node = ctx.create_node("motion").build().await?;
     let parameters = node.bind_parameter_as::<Parameters>("motion")?;
     parameters.add_validation_hook(Parameters::validate)?;
@@ -96,6 +99,11 @@ pub(super) async fn run(ctx: Arc<Context>) -> Result<()> {
     let inputs = Inputs::new(&node, qos).await?;
     let outputs = node
         .publisher::<RobotCommand>(ROBOT_COMMAND_TOPIC)
+        .qos(qos)
+        .build()
+        .await?;
+    let statuses = node
+        .publisher::<MotionExecution>(MOTION_EXECUTION_TOPIC)
         .qos(qos)
         .build()
         .await?;
@@ -132,8 +140,15 @@ pub(super) async fn run(ctx: Arc<Context>) -> Result<()> {
     loop {
         timer.tick().await;
         let p = parameters.snapshot();
-        let command = cycle(&node, &inputs, &mut motion, &mut safety, p.typed()).await;
+        let command = if head_only {
+            cycle_head_only(&node, &inputs, &mut motion, &mut safety, p.typed()).await
+        } else {
+            cycle(&node, &inputs, &mut motion, &mut safety, p.typed()).await
+        };
         outputs.publish(&command).await?;
+        statuses
+            .publish(&safety.status(&command, &motion, node.clock().now()))
+            .await?;
     }
 }
 
@@ -142,9 +157,36 @@ struct ControlSafety {
     fault: Option<String>,
     saw_damping: bool,
     has_actuated: bool,
+    head_only: bool,
     last_input_warning: Option<Instant>,
 }
 impl ControlSafety {
+    fn stop(&mut self, motion: &mut MotionState) {
+        motion.deactivate();
+        self.head_only = false;
+    }
+    fn status(&self, command: &RobotCommand, motion: &MotionState, now: Time) -> MotionExecution {
+        let phase = if self.fault.is_some() {
+            MotionPhase::Fault
+        } else if self.head_only {
+            MotionPhase::HeadOnly
+        } else {
+            match command {
+                RobotCommand::Damping => MotionPhase::Damping,
+                RobotCommand::Prepare => MotionPhase::Preparing,
+                _ => MotionPhase::Normal,
+            }
+        };
+        MotionExecution {
+            time: now,
+            generation: motion.generation,
+            phase,
+            recovery_started_at: None,
+            recovery_progress: None,
+            fault: self.fault.clone(),
+        }
+    }
+
     fn fail(&mut self, error: impl std::fmt::Display) {
         if self.fault.is_none() {
             error!("motion safety fault: {error:#}");
@@ -223,6 +265,14 @@ async fn cycle(
         motion.deactivate();
         return RobotCommand::Damping;
     }
+    if matches!(
+        frame.command.received.message,
+        MotionCommand::HeadOnly { .. }
+    ) {
+        safety.fail("HeadOnly requires the dedicated head-only test runtime");
+        motion.deactivate();
+        return RobotCommand::Damping;
+    }
     let initialized = inputs
         .inference
         .latest()
@@ -260,6 +310,104 @@ async fn cycle(
     }
 }
 
+/// No posture/readiness or body-policy dependency: the operator supplies the support.
+/// The normal runtime cannot enter this path, and this runtime cannot activate a body policy.
+async fn cycle_head_only(
+    node: &Node,
+    inputs: &Inputs,
+    motion: &mut MotionState,
+    safety: &mut ControlSafety,
+    p: &Parameters,
+) -> RobotCommand {
+    let result = head_only_output(node, inputs, motion, safety, p).await;
+    match result {
+        Ok(command) => {
+            safety.has_actuated |= matches!(command, RobotCommand::Custom { .. });
+            safety.head_only = matches!(command, RobotCommand::Custom { .. });
+            command
+        }
+        Err(error) => {
+            safety.fail(error);
+            safety.stop(motion);
+            RobotCommand::Damping
+        }
+    }
+}
+
+async fn head_only_output(
+    node: &Node,
+    inputs: &Inputs,
+    motion: &mut MotionState,
+    safety: &mut ControlSafety,
+    p: &Parameters,
+) -> Result<RobotCommand> {
+    let request = match inputs.commands.fresh(node.clock(), p.maximum_command_age) {
+        Ok(request) => request,
+        Err(error) if !safety.has_actuated => {
+            safety.reject_input(error);
+            return Ok(RobotCommand::Damping);
+        }
+        Err(error) => return Err(error),
+    };
+    if matches!(request.received.message, MotionCommand::Damping) || safety.fault.is_some() {
+        if safety.has_actuated && safety.fault.is_none() {
+            inputs.frame(node.clock(), p)?;
+        }
+        safety.stop(motion);
+        return Ok(RobotCommand::Damping);
+    }
+    let MotionCommand::HeadOnly { head } = request.received.message else {
+        return Err(eyre!("head-only runtime accepts only HeadOnly and Damping"));
+    };
+    let frame = match inputs.frame(node.clock(), p) {
+        Ok(frame) => frame,
+        Err(error) if !safety.has_actuated => {
+            safety.reject_input(error);
+            return Ok(RobotCommand::Damping);
+        }
+        Err(error) => return Err(error),
+    };
+    ensure!(
+        frame.hardware.received.fault.is_none(),
+        "hardware fault: {:?}",
+        frame.hardware.received.fault
+    );
+    if frame.hardware.received.acknowledged != Some(ControlMode::Custom)
+        || frame.hardware.received.desired != ControlMode::Custom
+    {
+        ensure!(
+            !motion.active,
+            "lost Custom mode acknowledgement during head-only test"
+        );
+        return Ok(RobotCommand::EnableCustom);
+    }
+    let command = motion
+        .infer(
+            MotionPlan::HeadOnly { head },
+            node.clock(),
+            p,
+            &frame.limits.received,
+        )
+        .await?;
+    let fresh = inputs.frame(node.clock(), p)?;
+    // A stop or a new target supersedes a reply that was in flight.
+    if fresh.command.received.message != (MotionCommand::HeadOnly { head }) {
+        safety.stop(motion);
+        return Ok(RobotCommand::Damping);
+    }
+    ensure!(
+        fresh.hardware.received.fault.is_none()
+            && fresh.hardware.received.desired == ControlMode::Custom
+            && fresh.hardware.received.acknowledged == Some(ControlMode::Custom),
+        "hardware no longer authorizes Custom"
+    );
+    if !motion.active {
+        motion.generation = motion.generation.saturating_add(1);
+        motion.active = true;
+    }
+    command.clamp(&fresh.limits.received)
+}
+
 async fn infer_and_validate(
     node: &Node,
     inputs: &Inputs,
@@ -293,3 +441,6 @@ async fn infer_and_validate(
     );
     command.clamp(&fresh.limits.received)
 }
+
+#[cfg(test)]
+mod tests;
