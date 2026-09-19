@@ -69,7 +69,7 @@ impl VinsBackend {
             // its own factor to avoid downweighting unrelated residuals.
             for measurement in group.measurements {
                 let residual = VisualOdometryFactor::new(
-                    vec![measurement.delta],
+                    measurement.delta,
                     self.config.visual_odometry_noise,
                     self.config.knot_spacing.as_secs_f64(),
                 );
@@ -102,7 +102,7 @@ impl VinsBackend {
             // its own factor to avoid downweighting unrelated residuals.
             for measurement in group.measurements {
                 let residual = AdjacentVisualOdometryFactor::new(
-                    vec![measurement.delta],
+                    measurement.delta,
                     self.config.visual_odometry_noise,
                     self.config.knot_spacing.as_secs_f64(),
                 );
@@ -181,18 +181,14 @@ impl VinsBackend {
         &self,
         measurement: &VisualOdometryMeasurement,
     ) -> Option<VisualOdometryIntervals> {
-        let previous_start_time = self
-            .interval_assigner
-            .current_or_initialize_interval_start_time(measurement.previous_time)?;
         let previous_index = self
             .interval_assigner
-            .assign_or_initialize_interval(previous_start_time)?;
-        let current_start_time = self
-            .interval_assigner
-            .current_or_initialize_interval_start_time(measurement.current_time)?;
+            .assign_or_initialize_interval(measurement.previous_time)?;
+        let previous_start_time = self.interval_assigner.interval_start_time(previous_index)?;
         let current_index = self
             .interval_assigner
-            .assign_or_initialize_interval(current_start_time)?;
+            .assign_or_initialize_interval(measurement.current_time)?;
+        let current_start_time = self.interval_assigner.interval_start_time(current_index)?;
         let spanned_intervals = current_index.checked_sub(previous_index)?;
 
         Some(VisualOdometryIntervals {

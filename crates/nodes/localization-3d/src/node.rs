@@ -18,9 +18,9 @@ use ros_z::{
     cache::Cache,
     context::Context,
     parameter::NodeParametersExt,
-    qos::{QosDurability, QosProfile},
+    qos::{QosDurability, QosProfile, QosReliability},
 };
-use tokio::select;
+use tokio::{select, task::JoinSet};
 use types::{
     field_dimensions::FieldDimensions,
     localization::{LOCALIZATION_STATE_3D_TOPIC, LocalizationState3D},
@@ -35,9 +35,12 @@ use types::{
 
 use crate::{
     backend_task::spawn_backend_task,
+    camera::{fresh_camera_matrix, intrinsic_from_camera_intrinsics},
     diagnostics::SolveDiagnostics,
     event_handlers::{
-        handle_optimization_result, handle_visual_odometer, handle_visual_odometry, lose_track,
+        AcceptanceWindow, accept_backend_result, handle_odometer_discontinuity,
+        handle_visual_odometer, handle_visual_odometry, lose_track,
+        tracking_deadline as next_tracking_deadline,
     },
     ingest::ingest_foot_heights,
     live_odometry::LiveVisualOdometryLocalization,
@@ -51,6 +54,13 @@ use crate::{
 
 const VISUAL_ODOMETER_TOPIC: &str = "visual_odometry/current_left_camera_to_visual_odometer";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IngestionPhase {
+    Damping,
+    AwaitingInitialImu,
+    Running,
+}
+
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(run(ctx))
 }
@@ -59,6 +69,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let node = ctx.create_node("localization3d").build().await?;
     let parameters = node.bind_parameter_as::<Localization3dParameters>("localization3d")?;
     parameters.add_validation_hook(Localization3dParameters::validate)?;
+    let mut parameter_updates = parameters.subscribe();
     let imu_subscriber = node
         .subscriber::<ImuState>("inputs/imu_state")
         .build()
@@ -104,6 +115,14 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         )
         .build()
         .await?;
+    let robot_kinematics_cache = node
+        .subscriber::<TimeWrapper<kinematics::robot_kinematics::RobotKinematics>>(
+            "robot_kinematics",
+        )
+        .cache(128)
+        .with_stamp(|message| message.time)
+        .build()
+        .await?;
     let primary_state_subscriber = node
         .subscriber::<PrimaryState>("primary_state")
         .qos(QosProfile {
@@ -123,6 +142,10 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .await?;
     let state_3d_publisher = node
         .publisher::<LocalizationState3D>(LOCALIZATION_STATE_3D_TOPIC)
+        .qos(QosProfile {
+            durability: QosDurability::TransientLocal,
+            ..Default::default()
+        })
         .build()
         .await?;
     let association_geometry_publisher = node
@@ -135,160 +158,220 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .await?;
     let solve_diagnostics_publisher = node
         .publisher::<TimeWrapper<SolveDiagnostics>>("debug/solve_diagnostics")
+        .qos(QosProfile {
+            reliability: QosReliability::BestEffort,
+            ..Default::default()
+        })
         .build()
         .await?;
 
     let field_dimensions = wait_for_field_dimensions(&field_dimensions_cache).await;
-    let camera_matrix = wait_for_camera_matrix(&camera_matrix_cache).await;
-    let first_imu = imu_subscriber.recv_with_metadata().await?;
+    let (first_imu, initial_state, initial_robot_to_local) = loop {
+        let imu = imu_subscriber.recv_with_metadata().await?;
+        if let Some((initial_state, pose)) = prepare_initial_state(
+            imu.source_time,
+            &imu.message,
+            &camera_matrix_cache,
+            &robot_kinematics_cache,
+        ) {
+            break (imu, initial_state, pose);
+        }
+    };
     let first_imu_time = first_imu.source_time;
-    let initial_state =
-        initial_state_from_camera_matrix_and_imu(&camera_matrix.inner, &first_imu.message);
-    let initial_robot_to_local = initial_robot_to_local_from_imu(&first_imu.message);
-    let localization_parameters = parameters.snapshot().typed().clone();
-    let tracking_timeout = localization_parameters.tracking_timeout;
+    let parameter_snapshot = parameter_updates.borrow_and_update().clone();
+    let localization_parameters = parameter_snapshot.typed();
+    let mut tracking_timeout = localization_parameters.tracking_timeout;
+    let mut visual_tracking_timeout = localization_parameters.visual_tracking_timeout;
     let (mut frontend, backend) = initialize(
         backend_configuration_from_parameters_and_field_dimensions(
-            &localization_parameters,
+            localization_parameters,
             &field_dimensions,
         ),
         initial_state,
     );
     frontend.ingest_imu(first_imu_time.to_wallclock(), first_imu.message)?;
-    let mut backend_handle =
-        std::pin::pin!(spawn_backend_task(backend, solve_diagnostics_publisher));
+    // Dropping ingestion closes mailbox senders; idle publishing workers then exit.
+    let mut output_tasks = JoinSet::new();
+    let mut backend_handle = std::pin::pin!(spawn_backend_task(
+        backend,
+        solve_diagnostics_publisher,
+        &mut output_tasks,
+    ));
     let mut live = LiveVisualOdometryLocalization::default();
-    live.set_initial(initial_robot_to_local);
+    live.set_initial(first_imu_time, initial_robot_to_local);
     let mut visual_lock = GlobalVisualLockTracker::default();
+    visual_lock.invalidate(first_imu_time);
     let mut epoch = 0_u64;
     let mut epoch_start = first_imu_time;
     let mut tracking_state = LocalizationState3D::Startup;
     let mut tracking_deadline = None;
-    let mut damping = true;
-    let mut reset_after_damping = true;
+    let mut phase = IngestionPhase::Damping;
     let publishers = LocalizationPublishers::new(
-        &localization_publisher,
-        &pose_3d_publisher,
-        &state_3d_publisher,
-        &association_geometry_publisher,
-    );
-    publishers
-        .publish_outputs(
-            first_imu_time,
-            epoch,
-            initial_robot_to_local,
-            None,
-            None,
-            tracking_state,
-            types::visual_localization::AssociationPoseHintSource::StartupPrior,
-        )
-        .await?;
+        localization_publisher,
+        pose_3d_publisher,
+        state_3d_publisher,
+        association_geometry_publisher,
+        calibrated_intrinsics_publisher,
+    )
+    .spawn(&mut output_tasks);
+    if let Some(geometry) = live.association_geometry(tracking_state, epoch) {
+        publishers.publish_outputs(geometry);
+    }
 
     loop {
         select! {
-            biased;
+            changed = parameter_updates.changed() => {
+                changed.wrap_err("localization parameter subscription closed")?;
+                let snapshot = parameter_updates.borrow_and_update().clone();
+                let updated = snapshot.typed();
+                frontend.update_configuration(backend_configuration_from_parameters_and_field_dimensions(
+                    updated, &field_dimensions,
+                ))?;
+                tracking_timeout = updated.tracking_timeout;
+                visual_tracking_timeout = updated.visual_tracking_timeout;
+                tracking_deadline = next_tracking_deadline(
+                    tracking_state, &visual_lock, tracking_timeout, visual_tracking_timeout,
+                );
+            }
             _ = async {
                 match tracking_deadline {
                     Some(deadline) => node.clock().sleep_until(deadline).await,
                     None => pending().await,
                 }
             } => {
-                let deadline = tracking_deadline.take().expect("deadline branch requires a deadline");
-                tracking_state = lose_track(tracking_state);
-                if let Some((robot_to_local, local_to_field)) = live.latest() {
-                    publishers.publish_outputs(
-                        deadline, epoch, robot_to_local, local_to_field, None, tracking_state,
-                        types::visual_localization::AssociationPoseHintSource::LiveVisualOdometry,
-                    ).await?;
+                tracking_deadline = None;
+                tracking_state = lose_track(tracking_state, &mut visual_lock, node.clock().now());
+                if let Some(geometry) = live.association_geometry(tracking_state, epoch) {
+                    publishers.publish_outputs(geometry);
                 }
             }
             primary_state = primary_state_subscriber.recv() => {
                 let now_damping = primary_state? == PrimaryState::Damping;
-                if now_damping && !damping {
-                    let last_pose = live.latest();
-                    damping = true;
-                    reset_after_damping = true;
+                if now_damping && phase != IngestionPhase::Damping {
+                    phase = IngestionPhase::Damping;
                     tracking_deadline = None;
                     tracking_state = LocalizationState3D::Startup;
-                    live.clear();
-                    visual_lock.reset_for_damping();
-                    if let Some((robot_to_local, local_to_field)) = last_pose {
-                        publishers.publish_outputs(
-                            node.clock().now(), epoch, robot_to_local, local_to_field, None, tracking_state,
-                            types::visual_localization::AssociationPoseHintSource::LiveVisualOdometry,
-                        ).await?;
+                    visual_lock.invalidate(node.clock().now());
+                    if let Some(mut geometry) = live.association_geometry(tracking_state, epoch) {
+                        geometry.inner.local_to_field = None;
+                        publishers.publish_outputs(geometry);
                     }
-                } else if !now_damping && damping {
-                    damping = false;
+                    live.clear();
+                } else if !now_damping && phase == IngestionPhase::Damping {
+                    phase = IngestionPhase::AwaitingInitialImu;
+                    epoch_start = node.clock().now();
                 }
             }
             imu = imu_subscriber.recv_with_metadata() => {
                 let imu = imu?;
-                if damping { continue; }
-                if reset_after_damping {
-                    let Some(camera) = camera_matrix_cache.get_latest() else { continue };
+                if phase == IngestionPhase::Damping { continue; }
+                if imu.source_time < epoch_start || imu.source_time > node.clock().now() { continue; }
+                if phase == IngestionPhase::AwaitingInitialImu {
                     let time = imu.source_time;
-                    let robot_to_local = initial_robot_to_local_from_imu(&imu.message);
+                    let Some((initial_state, robot_to_local)) = prepare_initial_state(
+                        time, &imu.message, &camera_matrix_cache, &robot_kinematics_cache,
+                    ) else { continue };
                     epoch = epoch.wrapping_add(1);
-                    frontend.reset(time.to_wallclock(), epoch, initial_state_from_camera_matrix_and_imu(&camera.inner, &imu.message))?;
+                    frontend.reset(time.to_wallclock(), epoch, initial_state)?;
                     frontend.ingest_imu(time.to_wallclock(), imu.message)?;
                     epoch_start = time;
-                    live.set_initial(robot_to_local);
-                    visual_lock.reset_for_damping();
+                    live.set_initial(time, robot_to_local);
+                    visual_lock.invalidate(time);
                     tracking_state = LocalizationState3D::Startup;
-                    reset_after_damping = false;
-                    publishers.publish_outputs(
-                        time, epoch, robot_to_local, None, None, tracking_state,
-                        types::visual_localization::AssociationPoseHintSource::StartupPrior,
-                    ).await?;
+                    phase = IngestionPhase::Running;
+                    if let Some(geometry) = live.association_geometry(tracking_state, epoch) {
+                        publishers.publish_outputs(geometry);
+                    }
                 } else {
                     frontend.ingest_imu(imu.source_time.to_wallclock(), imu.message)?;
                 }
             }
             frame = visual_localization_subscriber.recv() => {
-                if damping || reset_after_damping { continue; }
-                handle_visual_localization_frame(&mut frontend, &mut visual_lock, epoch, frame?)?;
+                if phase != IngestionPhase::Running { continue; }
+                let frame = frame?;
+                let now = node.clock().now();
+                handle_visual_localization_frame(&mut frontend, &mut visual_lock, epoch, tracking_state, now, visual_tracking_timeout, frame)?;
             }
             odometry = visual_odometry_subscriber.recv() => {
-                if damping || reset_after_damping { continue; }
-                handle_visual_odometry(&mut frontend, odometry?, &camera_matrix_cache)?;
+                if phase != IngestionPhase::Running { continue; }
+                let odometry = odometry?;
+                if odometry.previous_time < epoch_start || odometry.current_time > node.clock().now() { continue; }
+                handle_visual_odometry(&mut frontend, odometry, &camera_matrix_cache)?;
             }
             odometer = visual_odometer_subscriber.recv() => {
-                if damping || reset_after_damping { continue; }
-                handle_visual_odometer(&mut live, tracking_state, epoch, odometer?, &visual_odometer_cache, &camera_matrix_cache, publishers).await?;
+                if phase != IngestionPhase::Running { continue; }
+                let odometer = odometer?;
+                if odometer.time < epoch_start || odometer.time > node.clock().now() { continue; }
+                handle_odometer_discontinuity(&live, &mut tracking_state, &mut visual_lock, &odometer, node.clock().now());
+                handle_visual_odometer(&mut live, tracking_state, epoch, odometer, &visual_odometer_cache, &camera_matrix_cache, &publishers);
+                tracking_deadline = next_tracking_deadline(
+                    tracking_state, &visual_lock, tracking_timeout, visual_tracking_timeout,
+                );
             }
             kinematics = robot_kinematics_subscriber.recv() => {
-                if damping || reset_after_damping { continue; }
-                ingest_foot_heights(&mut frontend, kinematics?)?;
+                if phase != IngestionPhase::Running { continue; }
+                let kinematics = kinematics?;
+                if kinematics.time < epoch_start || kinematics.time > node.clock().now() { continue; }
+                ingest_foot_heights(&mut frontend, kinematics)?;
             }
             result = &mut backend_handle => {
                 result.wrap_err("failed to join")?.wrap_err("solver failed")?;
                 bail!("solver stopped unexpectedly")
             }
+            result = output_tasks.join_next() => {
+                result.expect("output workers remain running").wrap_err("failed to join output worker")??;
+                bail!("output worker stopped unexpectedly")
+            }
             result = frontend.wait_for_optimization_result() => {
                 result?;
-                if damping || reset_after_damping { let _ = frontend.last_optimization_result(); continue; }
-                if let Some(time) = handle_optimization_result(
-                    &mut frontend, &mut live, &mut visual_lock, epoch, epoch_start,
-                    node.clock().now(), tracking_timeout, &mut tracking_state,
-                    &visual_odometer_cache, &camera_matrix_cache, publishers, &calibrated_intrinsics_publisher,
-                ).await? {
-                    tracking_deadline = Some(time.saturating_add(tracking_timeout));
+                if phase != IngestionPhase::Running { let _ = frontend.last_optimization_result(); continue; }
+                let window = AcceptanceWindow {
+                    epoch, epoch_start, now: node.clock().now(),
+                    tracking_timeout, visual_tracking_timeout,
+                };
+                if let Some(result) = frontend.last_optimization_result()
+                    && let Some(acceptance) = accept_backend_result(
+                        &result, tracking_state, &mut visual_lock, window,
+                    )
+                {
+                    publishers.publish_intrinsics(intrinsic_from_camera_intrinsics(&result.camera_intrinsics));
+                    let changed_state = acceptance.state != tracking_state;
+                    tracking_state = acceptance.state;
+                    if let Some(correction) = acceptance.correction {
+                        live.reset(correction, &visual_odometer_cache, &camera_matrix_cache);
+                    }
+                    if (changed_state || acceptance.correction.is_some())
+                        && let Some(geometry) = live.association_geometry(tracking_state, epoch)
+                    {
+                        publishers.publish_outputs(geometry);
+                    }
                 }
+                tracking_deadline = next_tracking_deadline(
+                    tracking_state, &visual_lock, tracking_timeout, visual_tracking_timeout,
+                );
             }
         }
     }
 }
 
-async fn wait_for_camera_matrix(
-    cache: &Cache<TimeWrapper<CameraMatrix>>,
-) -> Arc<TimeWrapper<CameraMatrix>> {
-    loop {
-        if let Some(value) = cache.get_latest() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+fn prepare_initial_state(
+    time: ros_z::time::Time,
+    imu: &ImuState,
+    cameras: &Cache<TimeWrapper<CameraMatrix>>,
+    kinematics: &Cache<TimeWrapper<kinematics::robot_kinematics::RobotKinematics>>,
+) -> Option<(
+    localization_factrs::InitialState,
+    Isometry3<Robot, coordinate_systems::Local>,
+)> {
+    let camera = fresh_camera_matrix(cameras, time)?;
+    let kinematics = kinematics.get_nearest(time)?;
+    if time.abs_diff(kinematics.time) > Duration::from_millis(100) {
+        return None;
     }
+    Some((
+        initial_state_from_camera_matrix_and_imu(&camera.inner, imu, &kinematics.inner),
+        initial_robot_to_local_from_imu(imu, &kinematics.inner),
+    ))
 }
 
 async fn wait_for_field_dimensions(cache: &Cache<FieldDimensions>) -> FieldDimensions {

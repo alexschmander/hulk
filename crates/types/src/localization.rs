@@ -1,10 +1,10 @@
-use nalgebra::{Matrix3, SMatrix, vector};
+use nalgebra::SMatrix;
 use ros_z::time::Time;
 use ros_z::{Message, MessageSchema, SchemaBuilder, SerdeCdrCodec};
 use serde::{Deserialize, Serialize};
 
 use coordinate_systems::{Field, Ground, Robot};
-use linear_algebra::{Isometry2, Isometry3, Point2, Pose2};
+use linear_algebra::{Isometry2, Isometry3};
 
 use crate::multivariate_normal_distribution::MultivariateNormalDistribution;
 
@@ -53,36 +53,10 @@ pub enum LocalizationState3D {
     },
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, ros_z::Message)]
-pub struct Update {
-    pub ground_to_field: Isometry2<Ground, Field>,
-    pub line_center_point: Point2<Field>,
-    pub fit_error: f32,
-    pub number_of_measurements_weight: f32,
-    pub line_distance_to_robot: f32,
-    pub line_length_weight: f32,
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Message)]
 pub struct ScoredPose {
     pub state: MultivariateNormalDistribution<3>,
     pub score: f32,
-}
-
-impl ScoredPose {
-    pub fn from_isometry(pose: Pose2<Field>, covariance: Matrix3<f32>, score: f32) -> Self {
-        Self {
-            state: MultivariateNormalDistribution {
-                mean: vector![
-                    pose.position().x(),
-                    pose.position().y(),
-                    pose.orientation().angle(),
-                ],
-                covariance,
-            },
-            score,
-        }
-    }
 }
 
 pub fn ground_to_field_from_field_to_robot(

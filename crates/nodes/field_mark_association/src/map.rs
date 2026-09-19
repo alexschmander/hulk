@@ -3,7 +3,7 @@ use types::field_dimensions::{FieldDimensions, Half, Side};
 
 use coordinate_systems::Field;
 
-use super::{FEATURE_CLASSES, VisualFeatureClass};
+use crate::features::{FEATURE_CLASSES, VisualFeatureClass};
 
 const SYMMETRY_EPSILON: f32 = 1.0e-4;
 const FIELD_HALVES: usize = 2;
@@ -54,26 +54,15 @@ impl LandmarkMap {
     }
 
     pub fn symmetric_id(&self, landmark_id: usize) -> usize {
-        self.landmarks
-            .get(landmark_id)
-            .map_or(landmark_id, |landmark| landmark.symmetric_id)
-    }
-
-    pub fn has_class(&self, class: VisualFeatureClass) -> bool {
-        !self.landmarks_for_class(class).is_empty()
+        self.landmarks[landmark_id].symmetric_id
     }
 
     pub fn landmarks_for_class(&self, class: VisualFeatureClass) -> &[usize] {
-        self.landmarks_by_class
-            .get(class.index())
-            .map_or(&[], Vec::as_slice)
+        &self.landmarks_by_class[class.index()]
     }
 
     pub fn rarity_weight(&self, class: VisualFeatureClass) -> f32 {
-        self.class_rarity_weight
-            .get(class.index())
-            .copied()
-            .unwrap_or(0.0)
+        self.class_rarity_weight[class.index()]
     }
 }
 

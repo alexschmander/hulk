@@ -47,7 +47,7 @@ fn imu_on_spline() {
 
     let start = SystemTime::UNIX_EPOCH;
     let duration = Duration::from_secs(5);
-    let ground_truth_spline = SE23Spline::new(start_pose, end_pose, duration.as_secs_f64());
+    let ground_truth_spline = SE23Spline::new(&start_pose, &end_pose, duration.as_secs_f64());
 
     let imu_dt = Duration::from_millis(2);
     let n_samples = duration.div_duration_f32(imu_dt).floor() as u32;

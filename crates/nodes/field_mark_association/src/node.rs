@@ -1,13 +1,12 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
 
 use color_eyre::Result;
 use projection::camera_matrix::CameraMatrix;
 use ros_z::{
     context::Context,
     parameter::NodeParametersExt,
-    qos::{QosDurability, QosProfile},
+    qos::{QosDurability, QosHistory, QosProfile},
 };
-use ros_z_streams::CreateFutureMapBuilder;
 use types::{
     field_dimensions::FieldDimensions,
     object_detection::{Object, RobocupObjectLabel},
@@ -20,12 +19,11 @@ use types::{
 };
 
 use crate::{
-    GlobalVisualLocalizer,
-    frame_processing::{DetectionProcessingContext, process_detected_objects},
+    frame_processing::{
+        DetectionProcessingContext, keep_latest_detection, process_detected_objects,
+    },
     parameters::FieldMarkAssociationParameters,
 };
-
-const DETECTED_OBJECTS_SAFETY_LAG: Duration = Duration::from_millis(50);
 
 /// Starts the field-mark association node and erases the concrete future type for node runners.
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
@@ -61,6 +59,12 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .with_stamp(|message| message.time)
         .build()
         .await?;
+    // Lifecycle publications can carry older geometry; order authority by publication, not pose time.
+    let latest_association_geometry = node
+        .subscriber::<TimeWrapper<AssociationGeometry>>(ASSOCIATION_GEOMETRY_TOPIC)
+        .cache(1)
+        .build()
+        .await?;
 
     let primary_state_cache = node
         .subscriber::<PrimaryState>("primary_state")
@@ -72,14 +76,15 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await?;
 
-    let mut detected_objects = node
-        .create_future_map_builder()
-        .create_future_subscriber::<TimeWrapper<Vec<Object<RobocupObjectLabel>>>>(
-            "detected_objects",
-            DETECTED_OBJECTS_SAFETY_LAG,
-        )
-        .await?
-        .build();
+    // Consume only payloads, without joining the announcement protocol or its KeepAll queue.
+    let detected_objects = node
+        .subscriber::<TimeWrapper<Vec<Object<RobocupObjectLabel>>>>("detected_objects")
+        .qos(QosProfile {
+            history: QosHistory::KeepLast(NonZeroUsize::MIN),
+            ..Default::default()
+        })
+        .build()
+        .await?;
 
     let associations_publisher = node
         .publisher::<TimeWrapper<VisualLocalizationFrame>>(VISUAL_LOCALIZATION_TOPIC)
@@ -89,21 +94,45 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .publisher::<Option<GlobalLocalizationDebug>>(GLOBAL_LOCALIZATION_DEBUG_TOPIC)
         .build()
         .await?;
-    let mut association_solver = GlobalVisualLocalizer::default();
+    let processing_context = DetectionProcessingContext {
+        parameters: &parameters,
+        camera_matrix_cache: &camera_matrix_cache,
+        field_dimensions_cache: &field_dimensions_cache,
+        association_geometry_cache: &association_geometry_cache,
+        latest_association_geometry: &latest_association_geometry,
+        primary_state_cache: &primary_state_cache,
+        associations_publisher: Arc::new(associations_publisher),
+        global_localization_publisher: Arc::new(global_localization_publisher),
+        clock: node.clock(),
+    };
+    let mut pending_frame = None;
     loop {
-        process_detected_objects(
-            detected_objects.recv().await?,
-            DetectionProcessingContext {
-                association_solver: &mut association_solver,
-                parameters: &parameters,
-                camera_matrix_cache: &camera_matrix_cache,
-                field_dimensions_cache: &field_dimensions_cache,
-                association_geometry_cache: &association_geometry_cache,
-                primary_state_cache: &primary_state_cache,
-                associations_publisher: &associations_publisher,
-                global_localization_publisher: &global_localization_publisher,
-            },
-        )
-        .await?;
+        // A completion may win select while a newer payload is already in the subscriber queue.
+        // This loop is the sole receiver, so a ready queue cannot be drained by another task.
+        if pending_frame.is_some() && detected_objects.is_ready() {
+            keep_latest_detection(&mut pending_frame, detected_objects.recv().await?);
+        }
+        let objects = match pending_frame.take() {
+            Some(frame) => frame,
+            None => detected_objects.recv().await?,
+        };
+        let image_time = objects.time;
+        let processing = process_detected_objects(objects, &processing_context);
+        tokio::pin!(processing);
+        // Keep receiving even while the solver or either publisher is waiting.
+        loop {
+            tokio::select! {
+                result = &mut processing => {
+                    result?;
+                    break;
+                }
+                objects = detected_objects.recv() => {
+                    let objects = objects?;
+                    if objects.time > image_time {
+                        keep_latest_detection(&mut pending_frame, objects);
+                    }
+                }
+            }
+        }
     }
 }

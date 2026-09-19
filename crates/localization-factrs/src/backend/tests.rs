@@ -43,7 +43,7 @@ impl OptObserver for StatePresenceObserver {
     }
 }
 
-fn backend_configuration() -> BackendConfiguration {
+pub(crate) fn backend_configuration() -> BackendConfiguration {
     BackendConfiguration {
         knot_spacing: Duration::from_millis(200),
         max_optimization_window: Duration::from_secs(3),
@@ -60,6 +60,142 @@ fn backend_configuration() -> BackendConfiguration {
         field_containment: FieldContainmentConfiguration::default(),
         gravity: Vector3::new(0.0, 0.0, 9.81),
     }
+}
+
+#[test]
+fn live_configuration_changes_new_factors_without_resetting_or_solving() {
+    let config = backend_configuration();
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (result_sender, result_receiver) = tokio::sync::watch::channel(None);
+    let mut frontend = crate::VinsFrontend::new(sender.clone(), result_receiver.clone(), &config);
+    let mut backend = VinsBackend::new(
+        config.clone(),
+        InitialState::default(),
+        receiver,
+        result_sender,
+    );
+    let time = SystemTime::UNIX_EPOCH;
+    let frame = || {
+        visual_frame(
+            time,
+            vec![visual_reprojection_measurement(1.0)],
+            Some(SE2::identity()),
+        )
+    };
+    let delta = || visual_odometry(time, time + Duration::from_millis(50), 0.1);
+    backend
+        .ingest_sensor_measurements([frame(), delta(), foot_heights(time)])
+        .unwrap();
+    let errors = |backend: &VinsBackend| {
+        let graph = backend.optimizer.graph();
+        (0..graph.len())
+            .filter_map(|index| {
+                let factor = graph.at(index);
+                (factor.is_residual::<VisualReprojectionFactor>()
+                    || factor.is_residual::<VisualOdometryFactor>())
+                .then(|| factor.try_error(backend.values()).unwrap())
+            })
+            .collect::<Vec<_>>()
+    };
+    let old_errors = errors(&backend);
+    assert_eq!(old_errors.len(), 2);
+    assert!(old_errors.iter().all(|error| *error > 0.0));
+    let factor_count = backend.optimizer.graph().len();
+    let value_count = backend.values.len();
+    let last_time = backend.last_knot_time;
+    let mut updated = config;
+    updated.visual_feature_noise *= 4.0;
+    updated.visual_odometry_noise *= 4.0;
+    updated.foot_ground_sigma *= 2.0;
+
+    // The worker is not running: enqueueing must neither wait for it nor touch its graph.
+    frontend.update_configuration(updated.clone()).unwrap();
+    assert_ne!(
+        backend.config.visual_feature_noise,
+        updated.visual_feature_noise
+    );
+    assert!(backend.solve_next_blocking().unwrap().is_none());
+    assert_eq!(
+        backend.config.visual_feature_noise,
+        updated.visual_feature_noise
+    );
+    assert_eq!(backend.optimizer.graph().len(), factor_count);
+    assert_eq!(backend.values.len(), value_count);
+    assert_eq!(backend.last_knot_time, last_time);
+    assert_eq!(backend.generation, 0);
+    assert_eq!(backend.last_optimizer_status, None);
+    assert!(!result_receiver.has_changed().unwrap());
+    assert_eq!(errors(&backend), old_errors);
+
+    sender.send(frame()).unwrap();
+    sender.send(delta()).unwrap();
+    sender
+        .send(foot_heights(time + Duration::from_millis(50)))
+        .unwrap();
+    sender
+        .send(foot_heights(time + Duration::from_millis(250)))
+        .unwrap();
+    backend.ingest_until_empty().unwrap();
+    let new_errors = errors(&backend);
+    assert_eq!(&new_errors[..2], &old_errors);
+    for (old, new) in old_errors.iter().zip(&new_errors[2..]) {
+        assert!((old - new * 4.0).abs() < 1.0e-12);
+    }
+    // Extending an existing interval keeps its sigma; a new interval uses the new sigma.
+    let foot_errors: Vec<_> = (0..backend.optimizer.graph().len())
+        .filter_map(|index| {
+            let factor = backend.optimizer.graph().at(index);
+            factor
+                .is_residual::<IntervalFootAboveGroundFactor>()
+                .then(|| factor.try_error(backend.values()).unwrap())
+        })
+        .collect();
+    assert_eq!(foot_errors.len(), 2);
+    assert!((foot_errors[0] - foot_errors[1] * 8.0).abs() < 1.0e-9);
+
+    // Last queued update wins for the whole batch, including factors created by reset.
+    let mut latest = updated.clone();
+    latest.visual_feature_noise *= 4.0;
+    frontend.update_configuration(updated).unwrap();
+    frontend.reset(time, 7, InitialState::default()).unwrap();
+    sender.send(frame()).unwrap();
+    frontend.update_configuration(latest.clone()).unwrap();
+    backend.ingest_until_empty().unwrap();
+    assert_eq!(backend.generation, 7);
+    assert_eq!(
+        backend.config.visual_feature_noise,
+        latest.visual_feature_noise
+    );
+    assert_eq!(visual_odometry_factor_count(&mut backend, State(0)), 0);
+    let reset_errors = errors(&backend);
+    assert_eq!(reset_errors.len(), 1);
+    assert!((reset_errors[0] * 16.0 - old_errors[0]).abs() < 1.0e-12);
+    frontend.reset(time, 8, InitialState::default()).unwrap();
+    backend.ingest_until_empty().unwrap();
+    assert_eq!(
+        backend.config.visual_feature_noise,
+        latest.visual_feature_noise
+    );
+}
+
+#[test]
+fn configuration_only_nonblocking_solve_does_not_publish() {
+    let (mut frontend, mut backend) =
+        crate::initialize(backend_configuration(), InitialState::default());
+    frontend
+        .reset(SystemTime::UNIX_EPOCH, 1, InitialState::default())
+        .unwrap();
+    backend.solve_once().unwrap().unwrap();
+    let result = frontend.last_optimization_result().unwrap();
+    frontend
+        .update_configuration(backend_configuration())
+        .unwrap();
+    assert!(backend.solve_once().unwrap().is_none());
+    assert_eq!(
+        frontend.peek_last_optimization_result().unwrap().time,
+        result.time
+    );
+    assert_eq!(backend.generation, 1);
 }
 
 #[test]
@@ -118,30 +254,29 @@ fn reset(time: SystemTime, generation: u64, initial_state: InitialState) -> Sens
     })
 }
 
-fn visual_reprojection_measurement(
-    time: SystemTime,
-    detection_x: f64,
-) -> VisualReprojectionMeasurement {
+fn visual_reprojection_measurement(detection_x: f64) -> VisualReprojectionMeasurement {
     VisualReprojectionMeasurement {
-        time,
         detection: nalgebra::point![detection_x, 0.0],
         field_point: nalgebra::point![0.0, 0.0, 2.0],
-        robot_to_camera: SE3::identity(),
     }
 }
 
 fn visual_reprojection(time: SystemTime) -> SensorMeasurement {
     visual_frame(
-        vec![visual_reprojection_measurement(time, 0.0)],
-        SE2::identity(),
+        time,
+        vec![visual_reprojection_measurement(0.0)],
+        Some(SE2::identity()),
     )
 }
 
 fn visual_frame(
+    time: SystemTime,
     measurements: Vec<VisualReprojectionMeasurement>,
-    local_to_field_candidate: SE2,
+    local_to_field_candidate: Option<SE2>,
 ) -> SensorMeasurement {
     SensorMeasurement::Visual(VisualFrameMeasurement {
+        time,
+        robot_to_camera: SE3::identity(),
         local_to_field_candidate,
         measurements,
     })
@@ -427,6 +562,71 @@ fn visual_reprojection_measurements_create_interval_factor() {
 }
 
 #[test]
+fn unseeded_visual_frames_require_alignment_and_do_not_replace_it() {
+    let (_measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
+    let mut backend = VinsBackend::new(
+        backend_configuration(),
+        InitialState::default(),
+        measurement_receiver,
+        result_sender,
+    );
+    let start = SystemTime::UNIX_EPOCH;
+    let initial_factor_count = backend.optimizer.graph().len();
+    backend
+        .ingest_sensor_measurements([visual_frame(
+            start,
+            vec![visual_reprojection_measurement(0.0)],
+            None,
+        )])
+        .unwrap();
+    assert!(backend.values().get(LocalToField(0)).is_none());
+    assert_eq!(backend.optimizer.graph().len(), initial_factor_count);
+    assert_eq!(backend.latest_visual_measurement_time, None);
+    assert_eq!(backend.last_knot_time, None);
+
+    // A seed later in the same interval must work, without reviving the unseeded prefix.
+    let first_tracking = start + Duration::from_millis(30);
+    backend
+        .ingest_sensor_measurements([
+            visual_frame(
+                start + Duration::from_millis(10),
+                vec![visual_reprojection_measurement(0.0)],
+                None,
+            ),
+            visual_frame(
+                start + Duration::from_millis(20),
+                vec![visual_reprojection_measurement(0.0)],
+                Some(SE2::new(0.2, 1.0, 2.0)),
+            ),
+            visual_frame(
+                first_tracking,
+                vec![visual_reprojection_measurement(0.0)],
+                None,
+            ),
+        ])
+        .unwrap();
+    assert_eq!(visual_reprojection_factor_count(&mut backend, State(0)), 2);
+    assert_eq!(backend.latest_visual_measurement_time, Some(first_tracking));
+
+    let next_tracking = start + Duration::from_millis(40);
+    backend
+        .ingest_sensor_measurements([visual_frame(
+            next_tracking,
+            vec![visual_reprojection_measurement(0.0)],
+            None,
+        )])
+        .unwrap();
+    assert_eq!(visual_reprojection_factor_count(&mut backend, State(0)), 3);
+    assert_eq!(backend.latest_visual_measurement_time, Some(next_tracking));
+    let alignment = backend.values().get(LocalToField(0)).unwrap();
+    assert!((alignment.theta() - 0.2).abs() < 1.0e-12);
+    assert!((alignment.x() - 1.0).abs() < 1.0e-12);
+    assert!((alignment.y() - 2.0).abs() < 1.0e-12);
+    assert_eq!(field_containment_factor_count(&backend, State(0)), 1);
+}
+
+#[test]
 fn first_visual_batch_measurement_is_ingested() {
     let (_measurement_sender, measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (result_sender, _result_receiver) = tokio::sync::watch::channel(None);
@@ -461,11 +661,12 @@ fn visual_reprojection_huber_is_per_measurement_residual_block() {
 
     backend
         .ingest_sensor_measurements([visual_frame(
+            start,
             vec![
-                visual_reprojection_measurement(start, 0.0),
-                visual_reprojection_measurement(start, 1.0),
+                visual_reprojection_measurement(0.0),
+                visual_reprojection_measurement(1.0),
             ],
-            SE2::identity(),
+            Some(SE2::identity()),
         )])
         .expect("visual measurements should ingest");
 
@@ -871,15 +1072,14 @@ fn local_to_field_is_initialized_once_and_retained_by_marginalization() {
     backend
         .ingest_sensor_measurements([
             visual_frame(
-                vec![visual_reprojection_measurement(start, 0.0)],
-                SE2::new(0.2, 1.0, 2.0),
+                start,
+                vec![visual_reprojection_measurement(0.0)],
+                Some(SE2::new(0.2, 1.0, 2.0)),
             ),
             visual_frame(
-                vec![visual_reprojection_measurement(
-                    start + Duration::from_millis(50),
-                    0.0,
-                )],
-                SE2::new(-0.4, 9.0, 8.0),
+                start + Duration::from_millis(50),
+                vec![visual_reprojection_measurement(0.0)],
+                Some(SE2::new(-0.4, 9.0, 8.0)),
             ),
         ])
         .expect("visual frames should ingest");
@@ -894,10 +1094,15 @@ fn local_to_field_is_initialized_once_and_retained_by_marginalization() {
     backend
         .ingest_sensor_measurements([stationary_imu(start + Duration::from_secs(2))])
         .expect("later IMU should ingest");
-    let _ = backend.optimize();
+    let result = backend.optimize().unwrap();
 
     assert!(backend.values().get(State(0)).is_none());
     assert!(backend.values().get(LocalToField(0)).is_some());
+    assert_eq!(
+        result.latest_visual_measurement_time,
+        Some(start + Duration::from_millis(50))
+    );
+    assert!(result.latest_visual_robot_to_local.is_none());
 }
 
 #[test]

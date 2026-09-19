@@ -4,7 +4,6 @@ use color_eyre::{Result, eyre::Context as _};
 use nalgebra::Isometry3;
 use ros_z::time::Time;
 use ros2::{
-    builtin_interfaces::time::Time as RosTime,
     sensor_msgs::{camera_info::CameraInfo, image::Image},
     std_msgs::header::Header,
 };
@@ -90,7 +89,7 @@ impl ProductionVisualOdometry {
         right_reported_time: Time,
         left_camera_to_field: &Isometry3<f32>,
         right_camera_to_field: &Isometry3<f32>,
-    ) -> Result<VisualOdometryMeasurement> {
+    ) -> VisualOdometryMeasurement {
         let rendered = self
             .renderer
             .render(left_camera_to_field, right_camera_to_field);
@@ -104,7 +103,7 @@ impl ProductionVisualOdometry {
             .process(&pair, &self.parameters.pose_estimation_parameters);
         let processing_seconds = started.elapsed().as_secs_f64();
         let odometry_diagnostics = self.pipeline.latest_odometry_diagnostics();
-        let triangulated = self.pipeline.triangulated_features().len();
+        let triangulated = self.pipeline.triangulated_feature_count();
         let estimated_evaluation = estimate
             .as_ref()
             .ok()
@@ -140,7 +139,7 @@ impl ProductionVisualOdometry {
             self.previous_left_camera_to_field = Some(*left_camera_to_field);
         }
 
-        Ok(VisualOdometryMeasurement {
+        VisualOdometryMeasurement {
             delta,
             odometer: VisualOdometer {
                 time,
@@ -157,7 +156,7 @@ impl ProductionVisualOdometry {
                 estimated_evaluation,
                 truth_evaluation,
             )),
-        })
+        }
     }
 }
 
@@ -206,7 +205,7 @@ fn stereo_pair(
 fn image(time: Time, frame_id: &str, rgba: Vec<u8>) -> Image {
     Image {
         header: Header {
-            stamp: ros_time(time),
+            stamp: time.to_wallclock().into(),
             frame_id: frame_id.to_string(),
         },
         height: HEIGHT,
@@ -279,14 +278,6 @@ fn camera_info(tx: f64) -> CameraInfo {
             FX as f64, 0.0, CX as f64, tx, 0.0, FY as f64, CY as f64, 0.0, 0.0, 0.0, 1.0, 0.0,
         ],
         ..Default::default()
-    }
-}
-
-fn ros_time(time: Time) -> RosTime {
-    let nanoseconds = time.as_nanos();
-    RosTime {
-        sec: (nanoseconds / 1_000_000_000) as i32,
-        nanosec: nanoseconds.rem_euclid(1_000_000_000) as u32,
     }
 }
 

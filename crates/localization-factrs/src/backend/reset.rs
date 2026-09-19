@@ -25,7 +25,6 @@ impl VinsBackend {
         let _ = self.interval_assigner.assign_or_initialize_interval(time);
         self.last_knot_time = Some(time);
         self.highest_initialized_interval = None;
-        self.last_imu_attitude_measurement = None;
         self.latest_imu_attitude_measurement = None;
         self.next_imu_attitude_knot_index = 0;
         self.last_imu_knot_orientation = None;

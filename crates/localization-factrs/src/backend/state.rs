@@ -67,18 +67,15 @@ impl VinsBackend {
             .into_iter()
             .chunk_by(|measurement| {
                 self.interval_assigner
-                    .current_or_initialize_interval_start_time(time_of(measurement))
+                    .assign_or_initialize_interval(time_of(measurement))
             })
             .into_iter()
         {
-            let Some(start_time) = key else {
+            let Some(start_index) = key else {
                 log::debug!("dropping measurements before earliest solver time");
                 continue;
             };
-            let Some(start_index) = self
-                .interval_assigner
-                .assign_or_initialize_interval(start_time)
-            else {
+            let Some(start_time) = self.interval_assigner.interval_start_time(start_index) else {
                 log::debug!("dropping measurements before earliest solver time");
                 continue;
             };
@@ -144,17 +141,18 @@ fn init_interval_states(
     let start = State(interval_start_index);
     let end = State(interval_start_index + 1);
 
-    if values.init_if_missing(
+    let inserted_start = init_state_if_missing(
+        values,
         &initial_state.robot_to_local,
         start,
         false,
         config.knot_spacing.as_secs_f64(),
-    ) {
-        if has_local_to_field {
-            add_field_containment_factor(graph, start, config);
-        }
+    );
+    if inserted_start && has_local_to_field {
+        add_field_containment_factor(graph, start, config);
     }
-    if values.init_if_missing(
+    if init_state_if_missing(
+        values,
         &initial_state.robot_to_local,
         end,
         is_empty_bridge_interval,
@@ -183,46 +181,34 @@ fn init_interval_states(
     }
 }
 
-trait InitStateExt {
-    fn init_if_missing(
-        &mut self,
-        initial: &SE23,
-        index: State,
-        reset_velocity: bool,
-        duration: f64,
-    ) -> bool;
-}
-
-impl InitStateExt for Values {
-    fn init_if_missing(
-        &mut self,
-        initial: &SE23,
-        index: State,
-        reset_velocity: bool,
-        duration: f64,
-    ) -> bool {
-        if self.get(index).is_some() {
-            return false;
-        }
-
-        let previous = index
-            .0
-            .checked_sub(1)
-            .and_then(|i| self.get(State(i)))
-            .unwrap_or(initial);
-
-        self.insert(
-            index,
-            if reset_velocity {
-                zero_velocity_pose(previous)
-            } else {
-                SE23::from_rot_vel_trans(
-                    previous.rot().clone(),
-                    previous.uvw().into_owned(),
-                    previous.xyz() + previous.uvw() * duration,
-                )
-            },
-        );
-        true
+fn init_state_if_missing(
+    values: &mut Values,
+    initial: &SE23,
+    index: State,
+    reset_velocity: bool,
+    duration: f64,
+) -> bool {
+    if values.get(index).is_some() {
+        return false;
     }
+
+    let previous = index
+        .0
+        .checked_sub(1)
+        .and_then(|i| values.get(State(i)))
+        .unwrap_or(initial);
+
+    values.insert(
+        index,
+        if reset_velocity {
+            zero_velocity_pose(previous)
+        } else {
+            SE23::from_rot_vel_trans(
+                previous.rot().clone(),
+                previous.uvw().into_owned(),
+                previous.xyz() + previous.uvw() * duration,
+            )
+        },
+    );
+    true
 }

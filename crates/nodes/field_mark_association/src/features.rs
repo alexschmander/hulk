@@ -2,6 +2,41 @@ use coordinate_systems::Pixel;
 use linear_algebra::{Point2, point};
 use types::object_detection::{Object, RobocupObjectLabel};
 
+pub(crate) const FEATURE_CLASSES: [VisualFeatureClass; 5] = [
+    VisualFeatureClass::GoalPost,
+    VisualFeatureClass::LSpot,
+    VisualFeatureClass::TSpot,
+    VisualFeatureClass::XSpot,
+    VisualFeatureClass::PenaltySpot,
+];
+
+/// Field-feature classes supported by association.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum VisualFeatureClass {
+    /// Upright goalpost landmark detected at its field-contact point.
+    GoalPost,
+    /// L-shaped line crossing landmark.
+    LSpot,
+    /// T-shaped line crossing landmark.
+    TSpot,
+    /// X-shaped line crossing landmark.
+    XSpot,
+    /// Penalty marker landmark.
+    PenaltySpot,
+}
+
+impl VisualFeatureClass {
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::GoalPost => 0,
+            Self::LSpot => 1,
+            Self::TSpot => 2,
+            Self::XSpot => 3,
+            Self::PenaltySpot => 4,
+        }
+    }
+}
+
 /// Extracts goalpost image points from object detections.
 pub fn find_detected_goalposts(detections: &[Object<RobocupObjectLabel>]) -> Vec<Point2<Pixel>> {
     find_detected_visual_features(detections)
@@ -52,47 +87,60 @@ impl DetectedVisualFeatures {
     }
 }
 
+/// Iterates class-grouped detections in the same order used by association.
+pub fn raw_detections(
+    features: &DetectedVisualFeatures,
+) -> impl Iterator<Item = (VisualFeatureClass, DetectedVisualFeature)> + '_ {
+    [
+        (VisualFeatureClass::GoalPost, features.goalposts.as_slice()),
+        (VisualFeatureClass::LSpot, features.l_spots.as_slice()),
+        (VisualFeatureClass::TSpot, features.t_spots.as_slice()),
+        (VisualFeatureClass::XSpot, features.x_spots.as_slice()),
+        (
+            VisualFeatureClass::PenaltySpot,
+            features.penalty_spots.as_slice(),
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(class, features)| features.iter().map(move |f| (class, *f)))
+}
+
 /// Extracts all field-feature detections supported by global localization.
 pub fn find_detected_visual_features(
     detections: &[Object<RobocupObjectLabel>],
 ) -> DetectedVisualFeatures {
-    detections
-        .iter()
-        .fold(DetectedVisualFeatures::default(), |mut features, object| {
-            let confidence = object.bounding_box.confidence;
-            match object.label {
-                RobocupObjectLabel::GoalPost => features.goalposts.push(
-                    DetectedVisualFeature::new(pixel_bottom_center(object), confidence),
-                ),
-                RobocupObjectLabel::LSpot => features
-                    .l_spots
-                    .push(DetectedVisualFeature::new(pixel_center(object), confidence)),
-                RobocupObjectLabel::TSpot => features
-                    .t_spots
-                    .push(DetectedVisualFeature::new(pixel_center(object), confidence)),
-                RobocupObjectLabel::PenaltySpot => features
-                    .penalty_spots
-                    .push(DetectedVisualFeature::new(pixel_center(object), confidence)),
-                RobocupObjectLabel::XSpot => features
-                    .x_spots
-                    .push(DetectedVisualFeature::new(pixel_center(object), confidence)),
-                _ => {}
-            }
-            features
-        })
+    let mut features = DetectedVisualFeatures::default();
+    for object in detections {
+        let confidence = object.bounding_box.confidence;
+        match object.label {
+            RobocupObjectLabel::GoalPost => features.goalposts.push(DetectedVisualFeature::new(
+                pixel_bottom_center(object),
+                confidence,
+            )),
+            RobocupObjectLabel::LSpot => features.l_spots.push(DetectedVisualFeature::new(
+                object.bounding_box.area.center(),
+                confidence,
+            )),
+            RobocupObjectLabel::TSpot => features.t_spots.push(DetectedVisualFeature::new(
+                object.bounding_box.area.center(),
+                confidence,
+            )),
+            RobocupObjectLabel::PenaltySpot => features.penalty_spots.push(
+                DetectedVisualFeature::new(object.bounding_box.area.center(), confidence),
+            ),
+            RobocupObjectLabel::XSpot => features.x_spots.push(DetectedVisualFeature::new(
+                object.bounding_box.area.center(),
+                confidence,
+            )),
+            _ => {}
+        }
+    }
+    features
 }
 
 fn pixel_bottom_center(object: &Object<RobocupObjectLabel>) -> Point2<Pixel> {
     let area = object.bounding_box.area;
     point![(area.min.x() + area.max.x()) * 0.5, area.max.y()]
-}
-
-fn pixel_center(object: &Object<RobocupObjectLabel>) -> Point2<Pixel> {
-    let area = object.bounding_box.area;
-    point![
-        (area.min.x() + area.max.x()) * 0.5,
-        (area.min.y() + area.max.y()) * 0.5
-    ]
 }
 
 #[cfg(test)]

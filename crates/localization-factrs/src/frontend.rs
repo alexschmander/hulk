@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use booster::ImuState;
 use coordinate_systems::{Camera, Field, Local, Robot};
@@ -10,8 +10,8 @@ use factrs::{
 use linear_algebra::{IntoTransform, Isometry2, Isometry3, Point3};
 use thiserror::Error;
 use tokio::sync::{mpsc::UnboundedSender, watch};
+use types::visual_localization::FieldMarkAssociation;
 
-use crate::InitialState;
 use crate::backend::OptimizationResult as BackendOptimizationResult;
 use crate::camera_intrinsics::CameraIntrinsics;
 use crate::factors::{
@@ -19,12 +19,14 @@ use crate::factors::{
 };
 use crate::measurements::{
     ImuMeasurement, ResetMeasurement, SensorMeasurement, VisualFrameMeasurement,
-    VisualReprojectionAssociation, VisualReprojectionMeasurement,
+    VisualReprojectionMeasurement,
 };
+use crate::{BackendConfiguration, BackendConfigurationError, InitialState};
 
 pub struct VinsFrontend {
     measurement_sender: UnboundedSender<SensorMeasurement>,
     result_receiver: watch::Receiver<Option<BackendOptimizationResult>>,
+    structural_configuration: (Duration, Duration, usize),
 }
 
 #[derive(Debug, Clone)]
@@ -47,10 +49,16 @@ impl VinsFrontend {
     pub fn new(
         measurement_sender: UnboundedSender<SensorMeasurement>,
         result_receiver: watch::Receiver<Option<BackendOptimizationResult>>,
+        config: &BackendConfiguration,
     ) -> Self {
         Self {
             measurement_sender,
             result_receiver,
+            structural_configuration: (
+                config.knot_spacing,
+                config.max_optimization_window,
+                config.optimizer_max_iterations,
+            ),
         }
     }
 
@@ -66,7 +74,7 @@ impl VinsFrontend {
         self.result_receiver
             .borrow_and_update()
             .as_ref()
-            .map(optimization_result_from_backend_result)
+            .map(OptimizationResult::from)
     }
 
     /// Returns the latest backend result without marking it observed.
@@ -74,7 +82,7 @@ impl VinsFrontend {
         self.result_receiver
             .borrow()
             .as_ref()
-            .map(optimization_result_from_backend_result)
+            .map(OptimizationResult::from)
     }
 
     /// Adds an IMU measurement to the optimization pipeline.
@@ -107,26 +115,70 @@ impl VinsFrontend {
             .map_err(|_| VinsFrontendError::BackendDisconnected)
     }
 
+    /// Enqueues tuning without waiting for the worker or resetting the graph.
+    ///
+    /// The last update in each drained batch applies before constructing factors in that batch,
+    /// regardless of sensor timestamps or resets. Existing factors (including interval factors
+    /// extended with more samples) and marginal priors keep their original weights. Old factors
+    /// age out over the configured window; their marginalized information is not reweighted.
+    /// Configuration-only batches do not solve or publish. Reset preserves the latest tuning.
+    /// Knot spacing, window size, and iteration limit must match initialization.
+    pub fn update_configuration(
+        &mut self,
+        config: BackendConfiguration,
+    ) -> Result<(), VinsFrontendError> {
+        config.validate()?;
+        let (spacing, window, iterations) = self.structural_configuration;
+        for (changed, field) in [
+            (config.knot_spacing != spacing, "knot_spacing"),
+            (
+                config.max_optimization_window != window,
+                "max_optimization_window",
+            ),
+            (
+                config.optimizer_max_iterations != iterations,
+                "optimizer_max_iterations",
+            ),
+        ] {
+            if changed {
+                return Err(BackendConfigurationError::UnsupportedStructuralChange(field).into());
+            }
+        }
+        self.measurement_sender
+            .send(SensorMeasurement::Configuration(Box::new(config)))
+            .map_err(|_| VinsFrontendError::BackendDisconnected)
+    }
+
     /// Adds fixed visual feature associations to the optimization pipeline.
+    /// A candidate is only needed to bootstrap alignment; unseeded frames require an existing one.
     pub fn ingest_visual_reprojection_associations(
         &mut self,
         time: SystemTime,
-        associations: impl IntoIterator<Item = VisualReprojectionAssociation>,
+        associations: impl IntoIterator<Item = FieldMarkAssociation>,
         robot_to_camera: Isometry3<Robot, Camera>,
-        local_to_field_candidate: Isometry2<Local, Field>,
+        local_to_field_candidate: Option<Isometry2<Local, Field>>,
     ) -> Result<(), VinsFrontendError> {
         let robot_to_camera = isometry3_to_se3(robot_to_camera.inner);
-        let measurements = associations
+        let measurements: Vec<_> = associations
             .into_iter()
             .map(|association| VisualReprojectionMeasurement {
-                time,
                 detection: association.detection.inner.cast(),
                 field_point: association.field_point.inner.cast(),
-                robot_to_camera: robot_to_camera.clone(),
             })
             .collect();
 
-        self.send_visual_measurements(measurements, local_to_field_candidate)
+        if measurements.is_empty() {
+            return Ok(());
+        }
+        self.measurement_sender
+            .send(SensorMeasurement::Visual(VisualFrameMeasurement {
+                time,
+                robot_to_camera,
+                local_to_field_candidate: local_to_field_candidate
+                    .map(crate::conversions::local_to_field_to_se2),
+                measurements,
+            }))
+            .map_err(|_| VinsFrontendError::BackendDisconnected)
     }
 
     /// Adds a frame-to-frame visual odometry delta to the optimization pipeline.
@@ -169,29 +221,12 @@ impl VinsFrontend {
             .send(SensorMeasurement::FootHeights(measurement))
             .map_err(|_| VinsFrontendError::BackendDisconnected)
     }
-
-    fn send_visual_measurements(
-        &mut self,
-        measurements: Vec<VisualReprojectionMeasurement>,
-        local_to_field_candidate: Isometry2<Local, Field>,
-    ) -> Result<(), VinsFrontendError> {
-        if measurements.is_empty() {
-            return Ok(());
-        }
-
-        self.measurement_sender
-            .send(SensorMeasurement::Visual(VisualFrameMeasurement {
-                local_to_field_candidate: crate::conversions::local_to_field_to_se2(
-                    local_to_field_candidate,
-                ),
-                measurements,
-            }))
-            .map_err(|_| VinsFrontendError::BackendDisconnected)
-    }
 }
 
 #[derive(Debug, Error)]
 pub enum VinsFrontendError {
+    #[error(transparent)]
+    InvalidConfiguration(#[from] BackendConfigurationError),
     #[error("the localization backend is disconnected")]
     BackendDisconnected,
 }
@@ -210,59 +245,41 @@ fn isometry3_f64_to_se3(isometry: nalgebra::Isometry3<f64>) -> SE3 {
     )
 }
 
-fn optimization_result_from_backend_result(
-    backend_result: &BackendOptimizationResult,
-) -> OptimizationResult {
-    let (robot_to_local, velocity) =
-        se23_to_isometry3_and_velocity(&backend_result.latest_robot_to_local);
-    let robot_to_local = robot_to_local.framed_transform();
-    let local_to_field = backend_result
-        .local_to_field
-        .as_ref()
-        .map(crate::conversions::se2_to_local_to_field);
-    let robot_to_field = local_to_field
-        .as_ref()
-        .map(|alignment| compose_robot_to_field(&robot_to_local, alignment));
-    let latest_visual_robot_to_local = backend_result
-        .latest_visual_robot_to_local
-        .as_ref()
-        .map(|pose| se23_to_isometry3_and_velocity(pose).0.framed_transform());
-    let latest_visual_robot_to_field = latest_visual_robot_to_local
-        .as_ref()
-        .zip(local_to_field.as_ref())
-        .map(|(pose, alignment)| compose_robot_to_field(pose, alignment));
-    OptimizationResult {
-        time: backend_result.time,
-        generation: backend_result.generation,
-        robot_to_local,
-        local_to_field,
-        robot_to_field,
-        robot_to_field_covariance: backend_result.robot_to_field_covariance,
-        velocity,
-        camera_intrinsics: backend_result.camera_intrinsics.clone(),
-        latest_visual_measurement_time: backend_result.latest_visual_measurement_time,
-        latest_visual_robot_to_local,
-        latest_visual_robot_to_field,
-        optimizer_status: backend_result.optimizer_status,
+impl From<&BackendOptimizationResult> for OptimizationResult {
+    fn from(backend_result: &BackendOptimizationResult) -> Self {
+        let (robot_to_local, velocity) =
+            se23_to_isometry3_and_velocity(&backend_result.latest_robot_to_local);
+        let robot_to_local = robot_to_local.framed_transform();
+        let local_to_field = backend_result
+            .local_to_field
+            .as_ref()
+            .map(crate::conversions::se2_to_local_to_field);
+        let robot_to_field = local_to_field
+            .as_ref()
+            .map(|alignment| alignment.to_3d() * robot_to_local);
+        let latest_visual_robot_to_local = backend_result
+            .latest_visual_robot_to_local
+            .as_ref()
+            .map(|pose| se23_to_isometry3_and_velocity(pose).0.framed_transform());
+        let latest_visual_robot_to_field = latest_visual_robot_to_local
+            .as_ref()
+            .zip(local_to_field.as_ref())
+            .map(|(pose, alignment)| alignment.to_3d() * *pose);
+        OptimizationResult {
+            time: backend_result.time,
+            generation: backend_result.generation,
+            robot_to_local,
+            local_to_field,
+            robot_to_field,
+            robot_to_field_covariance: backend_result.robot_to_field_covariance,
+            velocity,
+            camera_intrinsics: backend_result.camera_intrinsics.clone(),
+            latest_visual_measurement_time: backend_result.latest_visual_measurement_time,
+            latest_visual_robot_to_local,
+            latest_visual_robot_to_field,
+            optimizer_status: backend_result.optimizer_status,
+        }
     }
-}
-
-fn compose_robot_to_field(
-    robot_to_local: &Isometry3<Robot, Local, f64>,
-    local_to_field: &Isometry2<Local, Field, f64>,
-) -> Isometry3<Robot, Field, f64> {
-    let alignment = nalgebra::Isometry3::from_parts(
-        nalgebra::Translation3::new(
-            local_to_field.inner.translation.x,
-            local_to_field.inner.translation.y,
-            0.0,
-        ),
-        nalgebra::UnitQuaternion::from_axis_angle(
-            &nalgebra::Vector3::z_axis(),
-            local_to_field.inner.rotation.angle(),
-        ),
-    );
-    (alignment * robot_to_local.inner).framed_transform()
 }
 
 pub(crate) fn se23_to_isometry3_and_velocity(
@@ -297,10 +314,103 @@ mod tests {
     }
 
     #[test]
+    fn configuration_rejects_invalid_tuning_and_structural_changes_before_enqueueing() {
+        use BackendConfigurationError::*;
+        let config = crate::backend::tests::backend_configuration();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_result_sender, result_receiver) = tokio::sync::watch::channel(None);
+        let mut frontend = VinsFrontend::new(sender, result_receiver, &config);
+        type ConfigurationChange = fn(&mut BackendConfiguration);
+        let cases: &[(ConfigurationChange, BackendConfigurationError)] = &[
+            (
+                |c| c.foot_ground_sigma = f64::NAN,
+                InvalidPositiveValue("foot_ground_sigma"),
+            ),
+            (
+                |c| c.field_containment.sigma = f64::INFINITY,
+                InvalidPositiveValue("field_containment.sigma"),
+            ),
+            (
+                |c| c.field_containment.x_limit = -1.0,
+                InvalidPositiveValue("field_containment.x_limit"),
+            ),
+            (
+                |c| c.field_containment.y_limit = 0.0,
+                InvalidPositiveValue("field_containment.y_limit"),
+            ),
+            (
+                |c| c.gyroscope_noise[(0, 0)] = f64::NAN,
+                InvalidCovariance("gyroscope_noise"),
+            ),
+            (
+                |c| c.accelerometer_noise[(0, 0)] = -1.0,
+                InvalidCovariance("accelerometer_noise"),
+            ),
+            (
+                |c| c.gyroscope_process_noise[(0, 0)] = 0.0,
+                InvalidCovariance("gyroscope_process_noise"),
+            ),
+            (
+                |c| c.accelerometer_process_noise[(0, 1)] = 0.1,
+                InvalidCovariance("accelerometer_process_noise"),
+            ),
+            (
+                |c| c.roll_pitch_yaw_noise[(0, 0)] = f64::INFINITY,
+                InvalidCovariance("roll_pitch_yaw_noise"),
+            ),
+            (
+                |c| c.visual_feature_noise.fill(1.0),
+                InvalidCovariance("visual_feature_noise"),
+            ),
+            (
+                |c| c.visual_odometry_noise.fill(0.0),
+                InvalidCovariance("visual_odometry_noise"),
+            ),
+            (|c| c.gravity.fill(0.0), InvalidGravity),
+            (|c| c.gravity.x = f64::NAN, InvalidGravity),
+            (
+                |c| c.knot_spacing *= 2,
+                UnsupportedStructuralChange("knot_spacing"),
+            ),
+            (
+                |c| c.max_optimization_window *= 2,
+                UnsupportedStructuralChange("max_optimization_window"),
+            ),
+            (
+                |c| c.optimizer_max_iterations += 1,
+                UnsupportedStructuralChange("optimizer_max_iterations"),
+            ),
+        ];
+        for (mutate, expected) in cases {
+            let mut invalid = config.clone();
+            mutate(&mut invalid);
+            let Err(VinsFrontendError::InvalidConfiguration(actual)) =
+                frontend.update_configuration(invalid)
+            else {
+                panic!("expected {expected}");
+            };
+            assert_eq!(&actual, expected);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
+        drop(receiver);
+        assert!(matches!(
+            frontend.update_configuration(config),
+            Err(VinsFrontendError::BackendDisconnected)
+        ));
+    }
+
+    #[test]
     fn visual_odometry_delta_uses_endpoint_camera_extrinsics() {
         let (measurement_sender, mut measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (_result_sender, result_receiver) = tokio::sync::watch::channel(None);
-        let mut frontend = VinsFrontend::new(measurement_sender, result_receiver);
+        let mut frontend = VinsFrontend::new(
+            measurement_sender,
+            result_receiver,
+            &crate::backend::tests::backend_configuration(),
+        );
         let previous_time = SystemTime::UNIX_EPOCH;
         let current_time = previous_time + Duration::from_millis(33);
 
@@ -327,10 +437,61 @@ mod tests {
     }
 
     #[test]
+    fn visual_frames_preserve_optional_bootstrap_candidates() {
+        let (measurement_sender, mut measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_result_sender, result_receiver) = tokio::sync::watch::channel(None);
+        let mut frontend = VinsFrontend::new(
+            measurement_sender,
+            result_receiver,
+            &crate::backend::tests::backend_configuration(),
+        );
+        for candidate in [
+            None,
+            Some(nalgebra::Isometry2::translation(1.0, 2.0).framed_transform()),
+        ] {
+            frontend
+                .ingest_visual_reprojection_associations(
+                    SystemTime::UNIX_EPOCH,
+                    [FieldMarkAssociation {
+                        detection: linear_algebra::point![320.0, 240.0],
+                        field_point: linear_algebra::point![1.0, 2.0, 0.0],
+                    }],
+                    Isometry3::identity(),
+                    candidate,
+                )
+                .unwrap();
+            let SensorMeasurement::Visual(frame) = measurement_receiver.try_recv().unwrap() else {
+                panic!("expected visual frame");
+            };
+            assert_eq!(
+                frame
+                    .local_to_field_candidate
+                    .as_ref()
+                    .map(|seed| (seed.x(), seed.y())),
+                candidate.map(|seed| (
+                    seed.inner.translation.x as f64,
+                    seed.inner.translation.y as f64
+                ))
+            );
+            assert_eq!(frame.measurements.len(), 1);
+            assert_eq!(frame.time, SystemTime::UNIX_EPOCH);
+            assert!(frame.robot_to_camera.ominus(&SE3::identity()).norm() < 1.0e-12);
+            assert_eq!(
+                frame.measurements[0].field_point,
+                nalgebra::point![1.0, 2.0, 0.0]
+            );
+        }
+    }
+
+    #[test]
     fn reset_sends_generation() {
         let (measurement_sender, mut measurement_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (_result_sender, result_receiver) = tokio::sync::watch::channel(None);
-        let mut frontend = VinsFrontend::new(measurement_sender, result_receiver);
+        let mut frontend = VinsFrontend::new(
+            measurement_sender,
+            result_receiver,
+            &crate::backend::tests::backend_configuration(),
+        );
 
         frontend
             .reset(SystemTime::UNIX_EPOCH, 7, InitialState::default())

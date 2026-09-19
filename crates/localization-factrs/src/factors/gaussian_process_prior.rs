@@ -20,25 +20,11 @@ impl GaussianProcessPriorFactor {
         gyroscope_process_noise: &Matrix3<f64>,
         accelerometer_process_noise: &Matrix3<f64>,
     ) -> Self {
-        Self::new_with_process_covariance_scale(
-            duration,
-            gyroscope_process_noise,
-            accelerometer_process_noise,
-            DEFAULT_PROCESS_COVARIANCE_SCALE,
-        )
-    }
-
-    pub fn new_with_process_covariance_scale(
-        duration: f64,
-        gyroscope_process_noise: &Matrix3<f64>,
-        accelerometer_process_noise: &Matrix3<f64>,
-        process_covariance_scale: f64,
-    ) -> Self {
         Self::new_with_options(
             duration,
             gyroscope_process_noise,
             accelerometer_process_noise,
-            process_covariance_scale,
+            DEFAULT_PROCESS_COVARIANCE_SCALE,
             true,
         )
     }

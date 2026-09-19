@@ -91,12 +91,13 @@ pub fn marginalize(optimizer: &mut GaussNewton, values: &mut Values, cutoff_stat
         .clone_owned();
 
     let input = DynVarPack::new(boundary_keys.clone()).expect("boundary keys must be unique");
+    let linearization_point = make_linearization_point(values, &boundary_keys);
     let factor = FactorBuilder::new_dyn(
         SchurPriorResidual::new(
-            boundary_keys.clone(),
+            boundary_keys,
             jacobian_matrix,
             target_error_vector,
-            make_linearization_point(values, &boundary_keys),
+            linearization_point,
         ),
         input,
     )

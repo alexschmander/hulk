@@ -7,22 +7,30 @@ use std::{
 
 use coordinate_systems::{Camera, Field, Local, Pixel, Robot};
 use field_mark_association::{
-    DetectedVisualFeature, GlobalLocalizerParameters, find_detected_visual_features,
-    localize_global_visual_features,
+    AssociationInput, DetectedVisualFeature, FieldMarkAssociationParameters,
+    GlobalAssociationInput, GlobalLocalizerParameters, associate_global_visual_features,
+    associate_visual_features, find_detected_visual_features,
 };
 use linear_algebra::{IntoTransform, Isometry3, Point2};
 use mcap::MessageStream;
 use projection::{camera_matrix::CameraMatrix, intrinsic::Intrinsic};
+use ros_z::time::Time;
 use serde::{Deserialize, Serialize};
 use types::{
     field_dimensions::{FieldDimensions, Half, Side},
+    localization::LocalizationState3D,
     object_detection::{Object, RobocupObjectLabel},
+    time_wrapper::TimeWrapper,
+    visual_localization::AssociationGeometry,
 };
 
 #[path = "support/recording_decode.rs"]
 mod recording_decode;
 
-use recording_decode::{decode_recorded_camera_matrix, decode_recorded_message};
+#[path = "support/geometry_oracle.rs"]
+mod geometry_oracle;
+
+use recording_decode::decode_recorded_message;
 
 const FIXTURE_JSON: &str = include_str!("association_fixtures.json");
 const CAMERA_MATRIX_MAX_AGE: Duration = Duration::from_millis(100);
@@ -30,7 +38,7 @@ const DEBUG_MAX_AGE: Duration = Duration::from_millis(100);
 const EXPECTED_PIXEL_GATE: f32 = 80.0;
 const MAX_ACCEPTED_FIXTURES: usize = 6;
 
-fn recording_parameters() -> GlobalLocalizerParameters {
+fn legacy_recording_parameters() -> GlobalLocalizerParameters {
     GlobalLocalizerParameters {
         detection_pixel_sigma: 10.0,
         imu_tilt_sigma: 0.1,
@@ -69,7 +77,41 @@ enum RecordedGlobalLocalizationDebugStatus {
 }
 
 #[test]
-fn real_recording_association_fixtures_match_expected_landmarks() -> Result<(), Box<dyn Error>> {
+fn real_recording_startup_rejects_uncertifiable_chirality() {
+    let fixtures: Vec<AssociationFixture> = serde_json::from_str(FIXTURE_JSON).unwrap();
+    assert!(!fixtures.is_empty());
+    for fixture in fixtures {
+        let features = find_detected_visual_features(&fixture.detections);
+        assert_eq!(features.supported_feature_count(), fixture.expected.len());
+        for config in [
+            GlobalLocalizerParameters::default(),
+            legacy_recording_parameters(),
+        ] {
+            let margins = geometry_oracle::triangle_margins(&fixture, config);
+            assert_eq!(margins.len(), 10);
+            assert!(
+                margins
+                    .iter()
+                    .all(|(area, gate)| area.is_finite() && gate - area.abs() > 0.3)
+            );
+            assert!(
+                associate_global_visual_features(GlobalAssociationInput {
+                    visual_features: &features,
+                    robot_to_local: robot_to_local(&fixture.camera_matrix),
+                    robot_to_camera: robot_to_camera(&fixture.camera_matrix),
+                    camera_intrinsic: fixture.camera_matrix.intrinsics,
+                    field_dimensions: &FieldDimensions::SPL_2025,
+                    parameters: &config,
+                })
+                .associations
+                .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn real_recording_tracking_fixtures_match_all_expected_landmarks() -> Result<(), Box<dyn Error>> {
     let fixtures: Vec<AssociationFixture> = serde_json::from_str(FIXTURE_JSON)?;
     if fixtures.is_empty() {
         return Err("association fixture file is empty".into());
@@ -77,14 +119,44 @@ fn real_recording_association_fixtures_match_expected_landmarks() -> Result<(), 
 
     for fixture in fixtures {
         let features = find_detected_visual_features(&fixture.detections);
-        let localization = localize_global_visual_features(
-            &features,
-            robot_to_camera(&fixture.camera_matrix),
-            robot_to_local(&fixture.camera_matrix),
-            fixture.camera_matrix.intrinsics,
-            &FieldDimensions::SPL_2025,
-            None,
-            &recording_parameters(),
+        let (geometry, metrics) = geometry_oracle::expected_geometry(&fixture);
+        let LocalizationState3D::Tracking { estimate, .. } = geometry.state else {
+            unreachable!("oracle supplies a tracking prior");
+        };
+        let covariance = estimate.covariance;
+        assert!((covariance - covariance.transpose()).norm() < 1.0e-7);
+        assert!(covariance.symmetric_eigen().eigenvalues.min() > -1.0e-7);
+        let rotation = estimate.robot_to_field.inner.rotation.to_rotation_matrix();
+        let field_rotation_covariance =
+            rotation.matrix() * covariance.fixed_view::<3, 3>(0, 0) * rotation.matrix().transpose();
+        let field_translation_covariance =
+            rotation.matrix() * covariance.fixed_view::<3, 3>(3, 3) * rotation.matrix().transpose();
+        // Only planar alignment was fitted: covariance must not invent height or tilt freedom.
+        assert!(field_rotation_covariance[(0, 0)].abs() < 1.0e-8);
+        assert!(field_rotation_covariance[(1, 1)].abs() < 1.0e-8);
+        assert!(field_translation_covariance[(2, 2)].abs() < 1.0e-8);
+        assert!((metrics.camera_height - 0.6314).abs() < 0.001);
+        assert!((metrics.free_height_scale - 1.0242).abs() < 0.001);
+        assert!(metrics.metric_rms < 0.16);
+        assert!(metrics.pixel_rms < 6.0);
+        eprintln!(
+            "{}: camera height {:.4} m, diagnostic scale {:.4}, fixed-height fit {:.4} m / {:.3} px RMS",
+            fixture.name,
+            metrics.camera_height,
+            metrics.free_height_scale,
+            metrics.metric_rms,
+            metrics.pixel_rms
+        );
+        let localization = associate_visual_features(
+            AssociationInput {
+                visual_features: &features,
+                robot_to_camera: robot_to_camera(&fixture.camera_matrix),
+                geometry: &geometry,
+                camera_intrinsic: fixture.camera_matrix.intrinsics,
+                field_dimensions: &FieldDimensions::SPL_2025,
+                time: Time::from_nanos(0),
+            },
+            &FieldMarkAssociationParameters::default(),
         );
         let actual = localization
             .associations
@@ -102,8 +174,8 @@ fn real_recording_association_fixtures_match_expected_landmarks() -> Result<(), 
             .collect::<Vec<_>>();
 
         assert_eq!(
-            canonical_mod_symmetry(actual),
-            canonical_mod_symmetry(expected),
+            sorted_keys(actual),
+            sorted_keys(expected),
             "{}",
             fixture.name
         );
@@ -141,13 +213,13 @@ fn extract_fixtures(path: &Path) -> Result<Vec<AssociationFixture>, Box<dyn Erro
     let mut debugs = Vec::new();
     let mut stats = ExtractionStats::default();
 
-    for (order, message) in MessageStream::new(&bytes)?.enumerate() {
+    for message in MessageStream::new(&bytes)? {
         let message = message?;
         let log_time = system_time_from_nanos(message.log_time);
         match message.channel.topic.as_str() {
             "camera_matrix" => {
                 stats.camera_messages += 1;
-                let camera_matrix = decode_recorded_camera_matrix(&message)?;
+                let camera_matrix: TimeWrapper<CameraMatrix> = decode_recorded_message(&message)?;
                 cameras.push(Timed {
                     log_time,
                     source_time: camera_matrix.time.to_wallclock(),
@@ -173,9 +245,7 @@ fn extract_fixtures(path: &Path) -> Result<Vec<AssociationFixture>, Box<dyn Erro
                     value: debug,
                 });
             }
-            _ => {
-                let _ = order;
-            }
+            _ => {}
         }
     }
 
@@ -205,13 +275,6 @@ fn extract_fixtures(path: &Path) -> Result<Vec<AssociationFixture>, Box<dyn Erro
             stats.empty_debug += 1;
             continue;
         };
-        if !matches!(
-            debug_value.status,
-            RecordedGlobalLocalizationDebugStatus::UniqueModuloSymmetry
-        ) {
-            stats.non_unique_debug += 1;
-        }
-
         let expected =
             expected_associations_from_debug(&detection.value, &camera.value, debug_value);
         if expected.len() != debug_value.inliers {
@@ -281,19 +344,16 @@ fn expected_associations_from_debug(
     }
 
     candidates.sort_by(|left, right| left.residual.total_cmp(&right.residual));
-    let mut used_detections = vec![false; detections.len()];
     let mut used_landmarks = vec![false; landmarks.len()];
     let mut expected = Vec::new();
     for candidate in candidates {
-        if used_detections[candidate.detection_index]
-            || used_landmarks
-                .get(candidate.landmark_id)
-                .copied()
-                .unwrap_or(true)
+        if used_landmarks
+            .get(candidate.landmark_id)
+            .copied()
+            .unwrap_or(true)
         {
             continue;
         }
-        used_detections[candidate.detection_index] = true;
         if let Some(used) = used_landmarks.get_mut(candidate.landmark_id) {
             *used = true;
         }
@@ -313,15 +373,14 @@ fn new_solver_matches(
     expected: &[ExpectedAssociation],
 ) -> bool {
     let features = find_detected_visual_features(objects);
-    let localization = localize_global_visual_features(
-        &features,
-        robot_to_camera(camera_matrix),
-        robot_to_local(camera_matrix),
-        camera_matrix.intrinsics,
-        &FieldDimensions::SPL_2025,
-        None,
-        &recording_parameters(),
-    );
+    let localization = associate_global_visual_features(GlobalAssociationInput {
+        visual_features: &features,
+        robot_to_local: robot_to_local(camera_matrix),
+        robot_to_camera: robot_to_camera(camera_matrix),
+        camera_intrinsic: camera_matrix.intrinsics,
+        field_dimensions: &FieldDimensions::SPL_2025,
+        parameters: &GlobalLocalizerParameters::default(),
+    });
     if localization.associations.is_empty() {
         return false;
     }
@@ -376,7 +435,6 @@ struct ExtractionStats {
     missing_debug: usize,
     stale_debug: usize,
     empty_debug: usize,
-    non_unique_debug: usize,
     expected_count_mismatch: usize,
     too_few_expected: usize,
     solver_mismatch: usize,
@@ -577,6 +635,15 @@ fn robot_to_local(camera_matrix: &CameraMatrix) -> Isometry3<Robot, Local> {
         .inverse()
         .inner
         .framed_transform()
+}
+
+fn fixture_geometry(camera_matrix: &CameraMatrix) -> AssociationGeometry {
+    AssociationGeometry {
+        epoch: 0,
+        state: LocalizationState3D::Startup,
+        robot_to_local: robot_to_local(camera_matrix),
+        local_to_field: None,
+    }
 }
 
 fn fixture_path() -> PathBuf {

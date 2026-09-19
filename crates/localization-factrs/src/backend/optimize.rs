@@ -8,7 +8,7 @@ use factrs::{
     traits::{Optimizer, Variable},
     variables::{SE2, SE23},
 };
-use nalgebra::{DMatrix, DVector, SMatrix, Vector3};
+use nalgebra::{DMatrix, SMatrix, SVector, Vector3};
 
 use crate::{
     factors::{
@@ -86,21 +86,7 @@ impl VinsBackend {
 
         self.last_optimizer_status = Some(optimizer_status);
 
-        let interval_start_time = self
-            .interval_assigner
-            .current_or_initialize_interval_start_time(time)?;
-        let interval_start_index = self
-            .interval_assigner
-            .assign_or_initialize_interval(interval_start_time)?;
-        let start = self.values.get(State(interval_start_index))?.clone();
-        let end = self.values.get(State(interval_start_index + 1))?.clone();
-        let interval_end_time = interval_start_time + self.config.knot_spacing;
-        let latest_robot_to_local = SE23Spline::new(
-            start,
-            end,
-            self.config.knot_spacing.as_secs_f64(),
-        )
-        .evaluate(tau(interval_start_time, interval_end_time, time));
+        let latest_robot_to_local = self.pose_at(time)?;
         let camera_intrinsics = self.values.get(CameraIntrinsics(0))?.clone();
         let local_to_field = self.values.get(LocalToField(0)).cloned();
         let latest_visual_robot_to_local = self
@@ -120,12 +106,10 @@ impl VinsBackend {
     }
 
     fn robot_to_field_covariance_at(&self, time: SystemTime) -> Option<SMatrix<f64, 6, 6>> {
+        let interval_start_index = self.interval_assigner.assign_or_initialize_interval(time)?;
         let interval_start_time = self
             .interval_assigner
-            .current_or_initialize_interval_start_time(time)?;
-        let interval_start_index = self
-            .interval_assigner
-            .assign_or_initialize_interval(interval_start_time)?;
+            .interval_start_time(interval_start_index)?;
         let alignment = self.values.get(LocalToField(0))?;
         self.robot_to_field_covariance(
             State(interval_start_index),
@@ -158,18 +142,16 @@ impl VinsBackend {
             return None;
         }
 
-        let indices: Vec<_> = [
+        // Joint tangent columns: start SE23 (9), end SE23 (9), field SE2 (3).
+        let mut indices = Vec::with_capacity(21);
+        for key in [
             Key::from(start_key),
             Key::from(end_key),
             Key::from(LocalToField(0)),
-        ]
-        .into_iter()
-        .flat_map(|key| {
+        ] {
             let index = order.get(key)?;
-            Some(index.idx..index.idx + index.dim)
-        })
-        .flatten()
-        .collect();
+            indices.extend(index.idx..index.idx + index.dim);
+        }
         if indices.len() != 21 {
             return None;
         }
@@ -203,14 +185,10 @@ impl VinsBackend {
     }
 
     fn pose_at(&self, time: SystemTime) -> Option<SE23<f64>> {
-        let interval_start_time = self
-            .interval_assigner
-            .current_or_initialize_interval_start_time(time)?;
-        let interval_index = self
-            .interval_assigner
-            .assign_or_initialize_interval(interval_start_time)?;
-        let start = self.values.get(State(interval_index))?.clone();
-        let end = self.values.get(State(interval_index + 1))?.clone();
+        let interval_index = self.interval_assigner.assign_or_initialize_interval(time)?;
+        let interval_start_time = self.interval_assigner.interval_start_time(interval_index)?;
+        let start = self.values.get(State(interval_index))?;
+        let end = self.values.get(State(interval_index + 1))?;
         let interval_end_time = interval_start_time + self.config.knot_spacing;
         Some(
             SE23Spline::new(start, end, self.config.knot_spacing.as_secs_f64()).evaluate(tau(
@@ -249,8 +227,7 @@ impl VinsBackend {
     {
         let graph = self.optimizer.graph();
         let mut diagnostics = ResidualDiagnosticsAccumulator::default();
-        for index in 0..graph.len() {
-            let factor = graph.at(index);
+        for factor in graph.iter() {
             if !factor.is_residual::<R>() {
                 continue;
             }
@@ -275,6 +252,7 @@ fn composed_pose_jacobian(
 ) -> Option<SMatrix<f64, 6, 21>> {
     const EPSILON: f64 = 1.0e-6;
     let base = compose_pose(start, end, alignment, tau, dt);
+    // Same start(9), end(9), alignment(3) block order as the covariance selector.
     let mut jacobian = SMatrix::<f64, 6, 21>::zeros();
     for column in 0..21 {
         let (variable, component) = if column < 9 {
@@ -285,21 +263,19 @@ fn composed_pose_jacobian(
             (2, column - 18)
         };
         let dimension = if variable == 2 { 3 } else { 9 };
-        let mut delta = DVector::zeros(dimension);
-        delta[component] = EPSILON;
-        let (plus_start, plus_end, plus_alignment) = match variable {
-            0 => (start.oplus(delta.as_view()), end.clone(), alignment.clone()),
-            1 => (start.clone(), end.oplus(delta.as_view()), alignment.clone()),
-            _ => (start.clone(), end.clone(), alignment.oplus(delta.as_view())),
+        let perturbed = |epsilon| {
+            let mut delta = SVector::<f64, 9>::zeros();
+            delta[component] = epsilon;
+            let delta = delta.rows(0, dimension);
+            match variable {
+                0 => compose_pose(&start.oplus(delta.as_view()), end, alignment, tau, dt),
+                1 => compose_pose(start, &end.oplus(delta.as_view()), alignment, tau, dt),
+                _ => compose_pose(start, end, &alignment.oplus(delta.as_view()), tau, dt),
+            }
+            .ominus(&base)
         };
-        delta[component] = -EPSILON;
-        let (minus_start, minus_end, minus_alignment) = match variable {
-            0 => (start.oplus(delta.as_view()), end.clone(), alignment.clone()),
-            1 => (start.clone(), end.oplus(delta.as_view()), alignment.clone()),
-            _ => (start.clone(), end.clone(), alignment.oplus(delta.as_view())),
-        };
-        let plus = compose_pose(&plus_start, &plus_end, &plus_alignment, tau, dt).ominus(&base);
-        let minus = compose_pose(&minus_start, &minus_end, &minus_alignment, tau, dt).ominus(&base);
+        let plus = perturbed(EPSILON);
+        let minus = perturbed(-EPSILON);
         jacobian.set_column(column, &((plus - minus) / (2.0 * EPSILON)));
     }
     jacobian
@@ -309,7 +285,7 @@ fn composed_pose_jacobian(
 }
 
 fn compose_pose(start: &SE23, end: &SE23, alignment: &SE2, tau: f64, dt: f64) -> SE3 {
-    let pose = SE23Spline::new(start.clone(), end.clone(), dt).evaluate(tau);
+    let pose = SE23Spline::new(start, end, dt).evaluate(tau);
     let half_yaw = alignment.theta() * 0.5;
     SE3::from_rot_trans(
         SO3::from_xyzw(0.0, 0.0, half_yaw.sin(), half_yaw.cos()),

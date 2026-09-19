@@ -160,27 +160,29 @@ impl Scenario {
         let start = &self.camera_to_field_keyframes[upper - 1];
         let end = &self.camera_to_field_keyframes[upper];
         let alpha = (time_seconds - start.time_seconds) / (end.time_seconds - start.time_seconds);
-        let start_pose = keyframe_pose(start);
-        let end_pose = keyframe_pose(end);
-        Isometry3::from_parts(
-            Translation3::from(
-                start_pose
-                    .translation
-                    .vector
-                    .lerp(&end_pose.translation.vector, alpha),
-            ),
-            start_pose.rotation.slerp(&end_pose.rotation, alpha),
-        )
+        keyframe_pose(start).lerp_slerp(&keyframe_pose(end), alpha)
     }
 
-    /// Returns a stationary three-second camera trajectory.
+    /// Returns a stationary three-second view of nearby own-half markings for bootstrap.
     pub fn stationary() -> Self {
         from_robot_poses(
             "stationary",
             3.0,
             vec![
-                (0.0, robot_pose([-3.5, 1.5, 0.55], [0.0, -0.1, 0.5])),
-                (3.0, robot_pose([-3.5, 1.5, 0.55], [0.0, -0.1, 0.5])),
+                (
+                    0.0,
+                    robot_pose(
+                        [-3.5, 1.5, 0.55],
+                        [0.0, 0.2, -5.0 * std::f32::consts::PI / 6.0],
+                    ),
+                ),
+                (
+                    3.0,
+                    robot_pose(
+                        [-3.5, 1.5, 0.55],
+                        [0.0, 0.2, -5.0 * std::f32::consts::PI / 6.0],
+                    ),
+                ),
             ],
         )
     }
@@ -230,7 +232,8 @@ impl Scenario {
     pub fn field_figure_eight_twice() -> Self {
         const DURATION_SECONDS: f32 = 24.0;
         const SEGMENTS: usize = 80;
-        const START_THETA: f32 = -std::f32::consts::FRAC_PI_4;
+        // Acquire nearby markings on our half before traversing the symmetry boundary.
+        const START_THETA: f32 = -std::f32::consts::FRAC_PI_2;
         let poses = (0..=SEGMENTS)
             .map(|index| {
                 let progress = index as f32 / SEGMENTS as f32;
@@ -432,7 +435,8 @@ mod tests {
         assert!(max_x > 3.9);
         assert!(max_y > 2.4);
         assert!(start.translation.x < 0.0);
-        assert!(start.translation.y < -2.4);
+        assert!(start.translation.x < -3.9);
+        assert!(start.translation.y.abs() < 1.0e-5);
         assert!((start.translation.vector - after_one_lap.translation.vector).norm() < 1.0e-5);
         assert!((start.translation.vector - after_two_laps.translation.vector).norm() < 1.0e-5);
         assert!(start.rotation.angle_to(&after_one_lap.rotation) < 1.0e-5);

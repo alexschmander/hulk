@@ -15,7 +15,7 @@ pub struct SE23Kinematics<T: Numeric> {
 }
 
 impl<T: Numeric> SE23Spline<T> {
-    pub fn new(start: SE23<T>, end: SE23<T>, dt: T) -> Self {
+    pub fn new(start: &SE23<T>, end: &SE23<T>, dt: T) -> Self {
         Self {
             geodesic: GeodesicSpline::new(start.rot().clone(), end.rot()),
             position: CubicHermiteSpline::new(

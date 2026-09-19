@@ -2,7 +2,7 @@ use booster::ImuState;
 use coordinate_systems::{Local, Robot};
 use factrs::{core::SO3, traits::Variable, variables::SE23};
 use linear_algebra::Isometry3;
-use nalgebra::{Vector2, Vector3, vector};
+use nalgebra::{Vector3, vector};
 
 use crate::camera_intrinsics::CameraIntrinsics;
 use crate::conversions::robot_to_local_to_se23;
@@ -19,17 +19,6 @@ impl InitialState {
             robot_to_local,
             camera_intrinsics,
         }
-    }
-
-    pub fn from_robot_to_local_and_intrinsics_components(
-        robot_to_local: SE23<f64>,
-        focal_lengths: Vector2<f64>,
-        optical_center: Vector2<f64>,
-    ) -> Self {
-        Self::new(
-            robot_to_local,
-            CameraIntrinsics::new(focal_lengths, optical_center),
-        )
     }
 
     pub fn from_initial_height_and_intrinsics(

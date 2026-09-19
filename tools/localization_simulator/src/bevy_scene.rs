@@ -5,7 +5,7 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use types::{
-    field_dimensions::FieldDimensions,
+    field_dimensions::{FieldDimensions, Half, Side},
     field_marks::{FieldMark, field_marks_from_field_dimensions},
 };
 
@@ -57,7 +57,6 @@ pub fn setup_field_scene(
         Transform::from_xyz(0.0, -0.015, 0.0),
     ));
 
-    let half_length = dimensions.length / 2.0;
     let mut segments = Vec::new();
     for mark in field_marks_from_field_dimensions(&dimensions) {
         match mark {
@@ -93,16 +92,13 @@ pub fn setup_field_scene(
         );
     }
 
-    for sign in [-1.0_f32, 1.0] {
-        for side in [-1.0_f32, 1.0] {
+    for half in [Half::Own, Half::Opponent] {
+        for side in [Side::Right, Side::Left] {
+            let post = dimensions.goal_post(half, side);
             commands.spawn((
                 Mesh3d(meshes.add(Cylinder::new(dimensions.goal_post_diameter / 2.0, 0.8))),
                 MeshMaterial3d(white.clone()),
-                Transform::from_xyz(
-                    sign * half_length,
-                    0.4,
-                    -side * (dimensions.goal_inner_width + dimensions.goal_post_diameter) / 2.0,
-                ),
+                Transform::from_xyz(post.x(), 0.4, -post.y()),
             ));
         }
     }

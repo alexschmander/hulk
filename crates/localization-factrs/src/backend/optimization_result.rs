@@ -1,9 +1,6 @@
 use std::time::SystemTime;
 
-use factrs::{
-    core::Vector3,
-    variables::{SE2, SE23},
-};
+use factrs::variables::{SE2, SE23};
 
 #[derive(Debug, Clone)]
 pub struct OptimizationResult {
@@ -25,10 +22,4 @@ pub struct OptimizationResult {
     pub latest_visual_robot_to_local: Option<SE23<f64>>,
     /// Outcome of the optimizer invocation that produced this result.
     pub optimizer_status: super::BackendOptimizerStatus,
-}
-
-impl OptimizationResult {
-    pub fn position(&self) -> Vector3<f64> {
-        self.latest_robot_to_local.xyz().into_owned()
-    }
 }

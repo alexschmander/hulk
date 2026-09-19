@@ -27,7 +27,9 @@ mod state;
 mod visual;
 mod visual_odometry;
 
-pub use configuration::{BackendConfiguration, FieldContainmentConfiguration};
+pub use configuration::{
+    BackendConfiguration, BackendConfigurationError, FieldContainmentConfiguration,
+};
 use diagnostics::ResidualDiagnosticsAccumulator;
 pub use diagnostics::{BackendOptimizerStatus, BackendSolveDiagnostics, ResidualDiagnostics};
 pub use error::VinsBackendError;
@@ -65,9 +67,7 @@ pub struct VinsBackend {
     highest_initialized_interval: Option<u32>,
     /// Stores the timestamp of the first measurement received by the backend.
     interval_assigner: IntervalAssigner,
-    /// Last IMU attitude sample seen by the sorted stream.
-    last_imu_attitude_measurement: Option<ImuMeasurement>,
-    /// Latest IMU attitude sample used by the live in-interval orientation factor.
+    /// Latest sorted IMU attitude sample, also used by the live orientation factor.
     latest_imu_attitude_measurement: Option<ImuMeasurement>,
     /// Next knot whose interpolated IMU attitude measurement has not been finalized yet.
     next_imu_attitude_knot_index: u32,
@@ -87,10 +87,7 @@ impl VinsBackend {
         measurement_receiver: UnboundedReceiver<SensorMeasurement>,
         result_sender: watch::Sender<Option<OptimizationResult>>,
     ) -> Self {
-        assert!(
-            config.optimizer_max_iterations > 0,
-            "optimizer_max_iterations must be positive"
-        );
+        config.validate().expect("invalid backend configuration");
 
         let (graph, values) = initialize_graph(&initial_state);
 
@@ -107,7 +104,6 @@ impl VinsBackend {
             values,
             last_knot_time: None,
             highest_initialized_interval: None,
-            last_imu_attitude_measurement: None,
             latest_imu_attitude_measurement: None,
             next_imu_attitude_knot_index: 0,
             last_imu_knot_orientation: None,
@@ -126,7 +122,8 @@ impl VinsBackend {
             .map(|optimizer_status| self.solve_diagnostics(optimizer_status))
     }
 
-    /// Blocks until new measurements are available, ingests them, and optimizes the graph once.
+    /// Blocks until a batch is available, ingests it, and optimizes once unless it only
+    /// contains configuration updates. Such batches return `None` without publishing.
     pub fn solve_next_blocking(&mut self) -> Result<Option<OptimizationResult>, VinsBackendError> {
         let mut measurements = Vec::new();
         if self
@@ -137,16 +134,20 @@ impl VinsBackend {
             return Err(VinsBackendError::FrontendDisconnected);
         }
 
-        self.ingest_sensor_measurements(measurements.drain(..))?;
+        if !self.ingest_sensor_measurements(measurements)? {
+            return Ok(None);
+        }
         self.optimize_and_publish()
     }
 
     pub fn solve_once(&mut self) -> Result<Option<OptimizationResult>, VinsBackendError> {
-        self.ingest_until_empty()?;
+        if !self.ingest_until_empty()? {
+            return Ok(None);
+        }
         self.optimize_and_publish()
     }
 
-    fn ingest_until_empty(&mut self) -> Result<(), VinsBackendError> {
+    fn ingest_until_empty(&mut self) -> Result<bool, VinsBackendError> {
         let mut measurements = IntervalMeasurements::new();
         loop {
             match self.measurement_receiver.try_recv() {
@@ -164,7 +165,7 @@ impl VinsBackend {
     fn ingest_sensor_measurements(
         &mut self,
         measurements: impl IntoIterator<Item = SensorMeasurement>,
-    ) -> Result<(), VinsBackendError> {
+    ) -> Result<bool, VinsBackendError> {
         let mut interval_measurements = IntervalMeasurements::new();
         for measurement in measurements {
             interval_measurements.push(measurement);
@@ -176,7 +177,16 @@ impl VinsBackend {
     fn ingest_measurements(
         &mut self,
         mut new_measurements: IntervalMeasurements,
-    ) -> Result<(), VinsBackendError> {
+    ) -> Result<bool, VinsBackendError> {
+        let configuration_only = new_measurements.configuration.is_some()
+            && new_measurements.resets.is_empty()
+            && new_measurements.imu.is_empty()
+            && new_measurements.visual.is_empty()
+            && new_measurements.visual_odometry.is_empty()
+            && new_measurements.foot_heights.is_empty();
+        if let Some(config) = new_measurements.configuration.take() {
+            self.config = config;
+        }
         let latest_reset = new_measurements.latest_reset().cloned();
         if let Some(reset) = latest_reset {
             self.reset_to_initial_state(reset.initial_state, reset.time, reset.generation);
@@ -188,9 +198,9 @@ impl VinsBackend {
         self.ingest_visual_odometry(new_measurements.visual_odometry);
         self.ingest_foot_heights(new_measurements.foot_heights);
 
-        Ok(())
+        Ok(!configuration_only)
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

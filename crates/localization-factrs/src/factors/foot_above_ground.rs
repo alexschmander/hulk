@@ -86,7 +86,7 @@ impl IntervalFootAboveGroundFactor {
     fn residuals_on_spline<T: Numeric>(&self, start: SE23<T>, end: SE23<T>) -> VectorX<T> {
         assert_eq!(self.measurements.len(), self.measurement_taus.len());
 
-        let spline = SE23Spline::new(start, end, T::from(self.duration));
+        let spline = SE23Spline::new(&start, &end, T::from(self.duration));
         let mut residuals = VectorX::<T>::zeros(self.dim_out());
 
         for (index, (measurement, measurement_tau)) in self
@@ -96,19 +96,17 @@ impl IntervalFootAboveGroundFactor {
             .enumerate()
         {
             let pose = spline.evaluate(T::from(*measurement_tau));
-            residuals[index * 2] = foot_residual(&pose, &measurement.left_sole_in_robot, self);
-            residuals[index * 2 + 1] = foot_residual(&pose, &measurement.right_sole_in_robot, self);
+            residuals[index * 2] =
+                foot_residual(&pose, &measurement.left_sole_in_robot, self.sigma);
+            residuals[index * 2 + 1] =
+                foot_residual(&pose, &measurement.right_sole_in_robot, self.sigma);
         }
 
         residuals
     }
 }
 
-fn foot_residual<T: Numeric>(
-    pose: &SE23<T>,
-    sole_in_robot: &Point3<Robot>,
-    factor: &IntervalFootAboveGroundFactor,
-) -> T {
+fn foot_residual<T: Numeric>(pose: &SE23<T>, sole_in_robot: &Point3<Robot>, sigma: f64) -> T {
     let sole_in_robot = nalgebra::Vector3::new(
         T::from(sole_in_robot.x() as f64),
         T::from(sole_in_robot.y() as f64),
@@ -116,7 +114,7 @@ fn foot_residual<T: Numeric>(
     );
     let sole_in_field = pose.rot().apply(sole_in_robot.as_view()) + pose.xyz();
     if sole_in_field.z < T::zero() {
-        -sole_in_field.z / T::from(factor.sigma)
+        -sole_in_field.z / T::from(sigma)
     } else {
         T::zero()
     }

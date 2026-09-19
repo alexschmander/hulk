@@ -281,6 +281,7 @@ impl LocalizationSimulatorApp {
             });
         if self.scenario_choice != previous_scenario_choice {
             if self.scenario_choice == ScenarioChoice::VoFault {
+                self.config.visual_odometry_mode = VisualOdometryMode::SyntheticDelta;
                 self.config.vo_outlier = Some(default_vo_outlier());
             } else if previous_scenario_choice == ScenarioChoice::VoFault
                 || self.scenario_choice == ScenarioChoice::PoseTeleport
@@ -305,6 +306,7 @@ impl LocalizationSimulatorApp {
                     "Production association",
                 );
             });
+        let previous_vo_mode = self.config.visual_odometry_mode;
         ComboBox::from_label("Visual odometry")
             .selected_text(match self.config.visual_odometry_mode {
                 VisualOdometryMode::SyntheticDelta => "Synthetic delta",
@@ -316,13 +318,23 @@ impl LocalizationSimulatorApp {
                     VisualOdometryMode::SyntheticDelta,
                     "Synthetic delta",
                 );
-                ui.selectable_value(
-                    &mut self.config.visual_odometry_mode,
-                    VisualOdometryMode::ProductionStereo,
-                    "Production stereo",
-                );
+                ui.add_enabled_ui(self.scenario_choice != ScenarioChoice::VoFault, |ui| {
+                    ui.selectable_value(
+                        &mut self.config.visual_odometry_mode,
+                        VisualOdometryMode::ProductionStereo,
+                        "Production stereo",
+                    );
+                });
             });
         if self.config.visual_odometry_mode == VisualOdometryMode::ProductionStereo {
+            if previous_vo_mode != self.config.visual_odometry_mode {
+                self.config.vo_translation_sigma_m = 0.0;
+                self.config.vo_rotation_sigma_rad = 0.0;
+                self.config.vo_translation_bias_per_step = [0.0; 3];
+                self.config.vo_rotation_bias_per_step = [0.0; 3];
+                self.config.vo_outlier = None;
+            }
+            ui.label("Synthetic VO noise, bias and outliers are disabled in production stereo.");
             ui.add(
                 Slider::new(&mut self.config.right_camera_delay_ms, 0.0..=20.0)
                     .step_by(0.1)
@@ -345,49 +357,54 @@ impl LocalizationSimulatorApp {
             Slider::new(&mut self.config.landmark_dropout_probability, 0.0..=1.0)
                 .text("Landmark dropout"),
         );
-        ui.add(
-            Slider::new(&mut self.config.vo_translation_sigma_m, 0.0..=0.05)
-                .text("VO translation sigma (m)"),
-        );
-        ui.add(
-            Slider::new(&mut self.config.vo_rotation_sigma_rad, 0.0..=0.05)
-                .text("VO rotation sigma (rad)"),
-        );
-        ui.collapsing("VO bias and one-shot outlier", |ui| {
-            vector_controls(
-                ui,
-                "Translation bias/step (m)",
-                &mut self.config.vo_translation_bias_per_step,
-                0.0001,
-            );
-            vector_controls(
-                ui,
-                "Rotation bias/step (rad)",
-                &mut self.config.vo_rotation_bias_per_step,
-                0.0001,
-            );
-
-            let mut outlier_enabled = self.config.vo_outlier.is_some();
-            if ui
-                .checkbox(&mut outlier_enabled, "Enable one-shot VO outlier")
-                .changed()
-            {
-                self.config.vo_outlier = outlier_enabled.then_some(default_vo_outlier());
-            }
-            if let Some(outlier) = &mut self.config.vo_outlier {
-                ui.horizontal(|ui| {
-                    ui.label("Transition index");
-                    ui.add(egui::DragValue::new(&mut outlier.transition_index).speed(1));
-                });
-                vector_controls(ui, "Translation (m)", &mut outlier.translation, 0.1);
-                vector_controls(
-                    ui,
-                    "Rotation scaled axis (rad)",
-                    &mut outlier.rotation_scaled_axis,
-                    0.05,
+        ui.add_enabled_ui(
+            self.config.visual_odometry_mode == VisualOdometryMode::SyntheticDelta,
+            |ui| {
+                ui.add(
+                    Slider::new(&mut self.config.vo_translation_sigma_m, 0.0..=0.05)
+                        .text("VO translation sigma (m)"),
                 );
-            }
-        });
+                ui.add(
+                    Slider::new(&mut self.config.vo_rotation_sigma_rad, 0.0..=0.05)
+                        .text("VO rotation sigma (rad)"),
+                );
+                ui.collapsing("VO bias and one-shot outlier", |ui| {
+                    vector_controls(
+                        ui,
+                        "Translation bias/step (m)",
+                        &mut self.config.vo_translation_bias_per_step,
+                        0.0001,
+                    );
+                    vector_controls(
+                        ui,
+                        "Rotation bias/step (rad)",
+                        &mut self.config.vo_rotation_bias_per_step,
+                        0.0001,
+                    );
+
+                    let mut outlier_enabled = self.config.vo_outlier.is_some();
+                    if ui
+                        .checkbox(&mut outlier_enabled, "Enable one-shot VO outlier")
+                        .changed()
+                    {
+                        self.config.vo_outlier = outlier_enabled.then_some(default_vo_outlier());
+                    }
+                    if let Some(outlier) = &mut self.config.vo_outlier {
+                        ui.horizontal(|ui| {
+                            ui.label("Transition index");
+                            ui.add(egui::DragValue::new(&mut outlier.transition_index).speed(1));
+                        });
+                        vector_controls(ui, "Translation (m)", &mut outlier.translation, 0.1);
+                        vector_controls(
+                            ui,
+                            "Rotation scaled axis (rad)",
+                            &mut outlier.rotation_scaled_axis,
+                            0.05,
+                        );
+                    }
+                });
+            },
+        );
         self.configuration_dirty = self.simulation.as_ref().is_none_or(|simulation| {
             simulation.config() != &self.config
                 || self.scenario_choice != self.applied_scenario_choice

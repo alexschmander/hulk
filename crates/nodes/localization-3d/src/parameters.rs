@@ -6,6 +6,8 @@ use ros_z::Message;
 use serde::{Deserialize, Serialize};
 use types::field_dimensions::FieldDimensions;
 
+const MAX_TRACKING_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Runtime parameters for the 3D localization node.
 #[derive(Clone, Debug, Deserialize, Serialize, Message)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +21,9 @@ pub struct Localization3dParameters {
     /// Time without a converged aligned backend result before localization is declared lost.
     #[serde(default = "default_tracking_timeout")]
     pub tracking_timeout: Duration,
+    /// Time without a newly acknowledged, valid visual reprojection before tracking is lost.
+    #[serde(default = "default_tracking_timeout")]
+    pub visual_tracking_timeout: Duration,
 }
 
 fn default_tracking_timeout() -> Duration {
@@ -40,10 +45,19 @@ impl Localization3dParameters {
         if !self.field_containment_sigma.is_finite() || self.field_containment_sigma <= 0.0 {
             return Err("field_containment_sigma must be finite and > 0".to_string());
         }
-        if self.tracking_timeout.is_zero() {
-            return Err("tracking_timeout must be > 0".to_string());
+        for (name, timeout) in [
+            ("tracking_timeout", self.tracking_timeout),
+            ("visual_tracking_timeout", self.visual_tracking_timeout),
+        ] {
+            if timeout.is_zero() || timeout > MAX_TRACKING_TIMEOUT {
+                return Err(format!("{name} must be > 0 and <= 24 hours"));
+            }
         }
-        Ok(())
+        // This hook runs before remote updates are committed. Match backend validation so
+        // accepted tuning cannot later fail in the ingestion loop or factor constructors.
+        backend_configuration_from_parameters_and_field_dimensions(self, &FieldDimensions::SPL_2025)
+            .validate()
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -90,5 +104,39 @@ fn backend_configuration(
             field_containment_sigma,
         ),
         gravity: Vector3::new(0.0, 0.0, 9.81),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_tuning_rejects_unusable_whitening_and_timer_ranges_before_commit() {
+        let parameters = Localization3dParameters {
+            accelerometer_process_noise_variance: 10.0,
+            visual_feature_noise_variance: 10000.0,
+            field_containment_sigma: 1.0,
+            tracking_timeout: Duration::from_secs(2),
+            visual_tracking_timeout: Duration::from_secs(2),
+        };
+        assert!(parameters.validate().is_ok());
+        let mut invalid = parameters.clone();
+        invalid.accelerometer_process_noise_variance = 1.0e-250;
+        assert!(invalid.validate().is_err());
+        invalid = parameters.clone();
+        invalid.visual_feature_noise_variance = f64::INFINITY;
+        assert!(invalid.validate().is_err());
+        invalid = parameters.clone();
+        invalid.field_containment_sigma = 1.0e-250;
+        assert!(invalid.validate().is_err());
+        for timeout in [Duration::ZERO, Duration::MAX] {
+            invalid = parameters.clone();
+            invalid.tracking_timeout = timeout;
+            assert!(invalid.validate().is_err());
+            invalid = parameters.clone();
+            invalid.visual_tracking_timeout = timeout;
+            assert!(invalid.validate().is_err());
+        }
     }
 }

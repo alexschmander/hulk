@@ -111,7 +111,7 @@ impl IntervalGaussianProcessImuFactor {
         pose_end: SE23<T>,
     ) -> VectorX<T> {
         let dt = T::from(self.duration);
-        let spline = SE23Spline::new(pose_start, pose_end, dt);
+        let spline = SE23Spline::new(&pose_start, &pose_end, dt);
 
         assert_eq!(self.measurements.len(), self.measurement_taus.len());
 
@@ -129,7 +129,6 @@ impl IntervalGaussianProcessImuFactor {
             .enumerate()
         {
             let measurement_tau = T::from(*measurement_tau);
-            let current_pose = spline.evaluate(measurement_tau);
             let kinematics = spline.evaluate_derivative(measurement_tau);
 
             let predicted_gyro = kinematics.angular_velocity_local;
@@ -145,6 +144,7 @@ impl IntervalGaussianProcessImuFactor {
                 .copy_from(&whitened_gyroscope_error);
 
             if self.use_accelerometer_measurements {
+                let current_pose = spline.evaluate(measurement_tau);
                 let predicted_accel = current_pose.rot().inverse().apply(
                     (kinematics.linear_acceleration_global + self.gravity.cast::<T>()).as_view(),
                 );

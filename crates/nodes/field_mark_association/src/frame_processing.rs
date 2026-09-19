@@ -1,14 +1,22 @@
-use std::{future::ready, time::Duration};
+use std::{
+    future::ready,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use color_eyre::Result;
-use coordinate_systems::{Camera, Field, Local, Robot};
-use linear_algebra::{Isometry2, Isometry3};
-use projection::camera_matrix::CameraMatrix;
-use projection::intrinsic::Intrinsic;
-use ros_z::{cache::Cache, parameter::NodeParameters, pubsub::Publisher, time::Time};
-use ros_z_streams::FutureItem;
+use color_eyre::{Result, eyre::Context as _};
+use coordinate_systems::{Camera, Robot};
+use linear_algebra::Isometry3;
+use projection::{camera_matrix::CameraMatrix, intrinsic::Intrinsic};
+use ros_z::{
+    cache::Cache,
+    parameter::NodeParameters,
+    pubsub::Publisher,
+    time::{Clock, Time},
+};
 use types::{
     field_dimensions::FieldDimensions,
+    localization::LocalizationState3D,
     object_detection::{Object, RobocupObjectLabel},
     primary_state::PrimaryState,
     time_wrapper::TimeWrapper,
@@ -16,24 +24,25 @@ use types::{
 };
 
 use crate::{
-    GlobalVisualLocalization, GlobalVisualLocalizer, parameters::FieldMarkAssociationParameters,
+    api::{AssociationInput, associate_visual_features},
+    parameters::FieldMarkAssociationParameters,
     robot_to_camera,
 };
 
 const MAX_CAMERA_MATRIX_TIME_DISTANCE: Duration = Duration::from_millis(100);
 
 type DetectedObjects = TimeWrapper<Vec<Object<RobocupObjectLabel>>>;
-type DetectedObjectsItem<'a> = FutureItem<'a, (Option<DetectedObjects>,)>;
 
 pub(crate) struct DetectionProcessingContext<'a> {
-    pub(crate) association_solver: &'a mut GlobalVisualLocalizer,
     pub(crate) parameters: &'a NodeParameters<FieldMarkAssociationParameters>,
     pub(crate) camera_matrix_cache: &'a Cache<TimeWrapper<CameraMatrix>>,
     pub(crate) field_dimensions_cache: &'a Cache<FieldDimensions>,
     pub(crate) association_geometry_cache: &'a Cache<TimeWrapper<AssociationGeometry>>,
+    pub(crate) latest_association_geometry: &'a Cache<TimeWrapper<AssociationGeometry>>,
     pub(crate) primary_state_cache: &'a Cache<PrimaryState>,
-    pub(crate) associations_publisher: &'a Publisher<TimeWrapper<VisualLocalizationFrame>>,
-    pub(crate) global_localization_publisher: &'a Publisher<Option<GlobalLocalizationDebug>>,
+    pub(crate) associations_publisher: Arc<Publisher<TimeWrapper<VisualLocalizationFrame>>>,
+    pub(crate) global_localization_publisher: Arc<Publisher<Option<GlobalLocalizationDebug>>>,
+    pub(crate) clock: &'a Clock,
 }
 
 struct PreparedDetectionFrame {
@@ -41,182 +50,345 @@ struct PreparedDetectionFrame {
     objects: Vec<Object<RobocupObjectLabel>>,
     robot_to_camera: Isometry3<Robot, Camera>,
     camera_intrinsic: Intrinsic,
-    epoch: u64,
-    robot_to_local: Isometry3<Robot, Local>,
-    field_dimensions: FieldDimensions,
-    alignment_hint: Option<Isometry2<Local, Field>>,
-    parameters: FieldMarkAssociationParameters,
-    include_debug: bool,
+    geometry: AssociationGeometry,
+    field_dimensions: Arc<FieldDimensions>,
+    parameters: Arc<FieldMarkAssociationParameters>,
 }
 
-struct ProcessedDetectionFrame {
-    image_time: Time,
-    robot_to_camera: Isometry3<Robot, Camera>,
-    epoch: u64,
-    localization: GlobalVisualLocalization,
+pub(crate) fn keep_latest_detection(
+    pending: &mut Option<DetectedObjects>,
+    objects: DetectedObjects,
+) {
+    if pending
+        .as_ref()
+        .is_none_or(|previous| objects.time > previous.time)
+    {
+        *pending = Some(objects);
+    }
 }
 
+// The node polls this future alongside recv; neither solving nor publishing suspends ingestion.
 pub(crate) async fn process_detected_objects(
-    item: DetectedObjectsItem<'_>,
-    ctx: DetectionProcessingContext<'_>,
+    objects: DetectedObjects,
+    ctx: &DetectionProcessingContext<'_>,
 ) -> Result<()> {
-    for (image_time, (objects,)) in item.persistent {
-        let Some(processed_frame) =
-            tokio::task::block_in_place(|| -> Result<Option<ProcessedDetectionFrame>> {
-                if association_is_damping(ctx.primary_state_cache) {
-                    return Ok(None);
-                }
+    let Some(frame) = prepare_detection_frame(objects, ctx) else {
+        return Ok(());
+    };
+    let started = Instant::now();
+    let (frame, localization) = tokio::task::spawn_blocking(move || {
+        let visual_features = crate::find_detected_visual_features(&frame.objects);
+        let localization = associate_visual_features(
+            AssociationInput {
+                visual_features: &visual_features,
+                robot_to_camera: frame.robot_to_camera,
+                geometry: &frame.geometry,
+                camera_intrinsic: frame.camera_intrinsic,
+                field_dimensions: &frame.field_dimensions,
+                time: frame.image_time,
+            },
+            &frame.parameters,
+        );
+        (frame, localization)
+    })
+    .await
+    .wrap_err("field-mark association worker failed")?;
 
-                let Some(frame) = prepare_detection_frame(image_time, objects, &ctx) else {
-                    return Ok(None);
-                };
-                let image_time = frame.image_time;
-                let robot_to_camera = frame.robot_to_camera;
-                let epoch = frame.epoch;
-
-                let localization = associate_detection_frame(frame, ctx.association_solver)?;
-
-                if association_is_damping(ctx.primary_state_cache)
-                    || ctx
-                        .association_geometry_cache
-                        .get_latest()
-                        .is_none_or(|geometry| geometry.inner.epoch != epoch)
-                {
-                    return Ok(None);
-                }
-
-                Ok(Some(ProcessedDetectionFrame {
-                    image_time,
-                    robot_to_camera,
-                    epoch,
-                    localization,
-                }))
-            })?
-        else {
-            continue;
+    // A blocking job cannot be cancelled: retain its slot until it returns, then discard late work.
+    // Reuse the calibrated age limit for the wall-time budget, including blocking-pool queue time.
+    let max_age = frame.parameters.max_pose_hint_age;
+    if started.elapsed() > max_age || !frame_is_current(&frame, ctx, max_age) {
+        return Ok(());
+    }
+    if !localization.associations.is_empty() {
+        let publisher = Arc::clone(&ctx.associations_publisher);
+        let message = TimeWrapper {
+            time: frame.image_time,
+            inner: VisualLocalizationFrame {
+                epoch: frame.geometry.epoch,
+                robot_to_camera: frame.robot_to_camera,
+                robot_to_local: frame.geometry.robot_to_local,
+                camera_intrinsic: frame.camera_intrinsic,
+                associations: localization.associations,
+            },
         };
-
-        publish_localization_frame(
-            ctx.associations_publisher,
-            ctx.global_localization_publisher,
-            processed_frame,
-        )
-        .await?;
+        let runtime = tokio::runtime::Handle::current();
+        // Await each blocking send before starting another: publication keeps the single frame
+        // slot, but never occupies an ingestion worker. Cancellation cannot abort an active send.
+        tokio::task::spawn_blocking(move || runtime.block_on(publisher.publish(&message)))
+            .await
+            .wrap_err("field-mark association publisher failed")??;
+    }
+    if started.elapsed() <= max_age && frame_is_current(&frame, ctx, max_age) {
+        let publisher = Arc::clone(&ctx.global_localization_publisher);
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            runtime.block_on(publisher.publish_if_subscribed(|| ready(localization.debug)))
+        })
+        .await
+        .wrap_err("field-mark association debug publisher failed")??;
     }
     Ok(())
 }
 
 fn prepare_detection_frame(
-    image_time: Time,
-    objects: Option<DetectedObjects>,
+    objects: DetectedObjects,
     ctx: &DetectionProcessingContext<'_>,
 ) -> Option<PreparedDetectionFrame> {
+    let image_time = objects.time;
     let camera_matrix = ctx.camera_matrix_cache.get_nearest(image_time)?;
-    if !camera_matrix_is_fresh(&camera_matrix, image_time) {
+    if camera_matrix.time.abs_diff(image_time) > MAX_CAMERA_MATRIX_TIME_DISTANCE {
         return None;
     }
-    let field_dimensions = ctx.field_dimensions_cache.get_nearest(image_time)?;
-
-    let parameters = ctx.parameters.snapshot().typed().clone();
-    let camera_matrix = camera_matrix.inner.clone();
-    let geometry =
-        association_geometry_at(image_time, &parameters, ctx.association_geometry_cache)?;
-
-    Some(PreparedDetectionFrame {
+    let field_dimensions = ctx.field_dimensions_cache.get_latest()?;
+    let parameters = ctx.parameters.snapshot().typed.clone();
+    let latest = ctx.latest_association_geometry.get_latest()?;
+    let geometry = geometry_for_image(
         image_time,
-        objects: objects.map(|item| item.inner).unwrap_or_default(),
-        robot_to_camera: robot_to_camera(&camera_matrix),
-        camera_intrinsic: camera_matrix.intrinsics,
-        epoch: geometry.epoch,
-        robot_to_local: geometry.robot_to_local,
-        field_dimensions: *field_dimensions.as_ref(),
-        alignment_hint: geometry.local_to_field,
+        &ctx.association_geometry_cache.get_interval(
+            image_time - parameters.max_pose_hint_age,
+            image_time + parameters.max_pose_hint_age,
+        ),
+        &latest,
+        parameters.max_pose_hint_age,
+    )?;
+    let frame = PreparedDetectionFrame {
+        image_time,
+        objects: objects.inner,
+        robot_to_camera: robot_to_camera(&camera_matrix.inner),
+        camera_intrinsic: camera_matrix.inner.intrinsics,
+        geometry,
+        field_dimensions,
         parameters,
-        include_debug: ctx.global_localization_publisher.has_subscribers(),
-    })
+    };
+    frame_is_current(&frame, ctx, frame.parameters.max_pose_hint_age).then_some(frame)
 }
 
-fn association_geometry_at(
+fn geometry_for_image(
     image_time: Time,
-    parameters: &FieldMarkAssociationParameters,
-    geometry_cache: &Cache<TimeWrapper<AssociationGeometry>>,
+    history: &[Arc<TimeWrapper<AssociationGeometry>>],
+    latest: &TimeWrapper<AssociationGeometry>,
+    max_age: Duration,
 ) -> Option<AssociationGeometry> {
-    let geometry =
-        geometry_cache
-            .get_nearest_with_stamp(image_time)
-            .and_then(|(stamp, localization)| {
-                if time_distance(stamp, image_time) > parameters.max_pose_hint_age {
-                    return None;
-                }
-                Some(localization.inner.clone())
-            })?;
-    geometry_cache
-        .get_latest()
-        .is_some_and(|latest| latest.inner.epoch == geometry.epoch)
-        .then_some(geometry)
+    // Select complete snapshots; never attach a new state/covariance to an old branch's pose.
+    // Include latest because the independently populated history may not contain it yet.
+    std::iter::once(latest)
+        .chain(history.iter().rev().map(Arc::as_ref))
+        .filter(|geometry| {
+            geometry.time.abs_diff(image_time) <= max_age
+                && same_lifecycle(&geometry.inner, &latest.inner)
+        })
+        .min_by_key(|geometry| (geometry.time.abs_diff(image_time), geometry.time))
+        .map(|geometry| geometry.inner.clone())
 }
 
-fn associate_detection_frame(
-    frame: PreparedDetectionFrame,
-    solver: &mut GlobalVisualLocalizer,
-) -> Result<GlobalVisualLocalization> {
-    let visual_features = crate::find_detected_visual_features(&frame.objects);
-    if visual_features.supported_feature_count() == 0 {
-        return Ok(GlobalVisualLocalization {
-            debug: None,
-            associations: Vec::new(),
-            local_to_field: None,
-        });
+fn frame_is_current(
+    frame: &PreparedDetectionFrame,
+    ctx: &DetectionProcessingContext<'_>,
+    max_age: Duration,
+) -> bool {
+    // Both sources replace their immutable Arc on update, including runtime parameter reloads.
+    if !Arc::ptr_eq(&frame.parameters, &ctx.parameters.snapshot().typed)
+        || ctx
+            .field_dimensions_cache
+            .get_latest()
+            .is_none_or(|dimensions| !Arc::ptr_eq(&frame.field_dimensions, &dimensions))
+    {
+        return false;
+    }
+    let damping = ctx
+        .primary_state_cache
+        .get_latest()
+        .is_none_or(|state| *state == PrimaryState::Damping);
+    result_is_current(
+        frame.image_time,
+        &frame.geometry,
+        damping,
+        ctx.latest_association_geometry.get_latest().as_deref(),
+        ctx.clock.now(),
+        max_age,
+    )
+}
+
+fn result_is_current(
+    image_time: Time,
+    geometry: &AssociationGeometry,
+    damping: bool,
+    latest: Option<&TimeWrapper<AssociationGeometry>>,
+    now: Time,
+    max_age: Duration,
+) -> bool {
+    !damping
+        && image_time.abs_diff(now) <= max_age
+        && latest.is_some_and(|latest| {
+            latest.time.abs_diff(now) <= max_age && same_lifecycle(geometry, &latest.inner)
+        })
+}
+
+fn same_lifecycle(geometry: &AssociationGeometry, latest: &AssociationGeometry) -> bool {
+    geometry.epoch == latest.epoch
+        && matches!(
+            (geometry.state, latest.state),
+            (LocalizationState3D::Startup, LocalizationState3D::Startup)
+                | (
+                    LocalizationState3D::Tracking { .. },
+                    LocalizationState3D::Tracking { .. }
+                )
+                | (
+                    LocalizationState3D::LostTrack { .. },
+                    LocalizationState3D::LostTrack { .. }
+                )
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::localization::LocalizationEstimate3D;
+
+    #[test]
+    fn pending_detection_keeps_only_the_newest_timestamp() {
+        let mut pending = None;
+        for nanos in [1, 3, 2, 4, 4] {
+            keep_latest_detection(
+                &mut pending,
+                TimeWrapper {
+                    time: Time::from_nanos(nanos),
+                    inner: Vec::new(),
+                },
+            );
+        }
+        assert_eq!(pending.take().unwrap().time, Time::from_nanos(4));
+        assert!(pending.is_none());
     }
 
-    Ok(solver.localize_with_debug(
-        &visual_features,
-        frame.robot_to_camera,
-        frame.robot_to_local,
-        frame.camera_intrinsic,
-        &frame.field_dimensions,
-        frame.alignment_hint,
-        &frame.parameters.global_localizer,
-        frame.include_debug,
-    ))
-}
+    #[test]
+    fn newer_publication_with_older_pose_invalidates_tracking_and_supplies_coherent_geometry() {
+        use ros_z::cache::CacheInner;
 
-async fn publish_localization_frame(
-    associations_publisher: &Publisher<TimeWrapper<VisualLocalizationFrame>>,
-    global_localization_publisher: &Publisher<Option<GlobalLocalizationDebug>>,
-    processed_frame: ProcessedDetectionFrame,
-) -> Result<()> {
-    let debug = processed_frame.localization.debug.clone();
-    global_localization_publisher
-        .publish_if_subscribed(|| ready(debug))
-        .await?;
-    let Some(local_to_field) = processed_frame.localization.local_to_field else {
-        return Ok(());
-    };
-    associations_publisher
-        .publish(&TimeWrapper {
-            time: processed_frame.image_time,
-            inner: VisualLocalizationFrame {
-                epoch: processed_frame.epoch,
-                robot_to_camera: processed_frame.robot_to_camera,
-                local_to_field,
-                associations: processed_frame.localization.associations,
+        let time = Time::from_nanos(1_000_000_000);
+        let age = Duration::from_millis(250);
+        let estimate = LocalizationEstimate3D {
+            robot_to_field: Isometry3::identity(),
+            covariance: nalgebra::SMatrix::identity(),
+        };
+        let tracking = TimeWrapper {
+            time,
+            inner: AssociationGeometry {
+                epoch: 7,
+                state: LocalizationState3D::Tracking {
+                    estimate,
+                    last_successful_solve: time,
+                },
+                robot_to_local: Isometry3::identity(),
+                local_to_field: None,
             },
-        })
-        .await?;
-    Ok(())
-}
+        };
+        let mut lost = tracking.clone();
+        lost.time = time - Duration::from_millis(100);
+        lost.inner.state = LocalizationState3D::LostTrack {
+            last_known_estimate: LocalizationEstimate3D {
+                covariance: estimate.covariance * 2.0,
+                ..estimate
+            },
+            last_successful_solve: lost.time,
+        };
+        lost.inner.robot_to_local = Isometry3::from_translation(1.0, 2.0, 0.0);
 
-pub(crate) fn association_is_damping(primary_state_cache: &Cache<PrimaryState>) -> bool {
-    primary_state_cache
-        .get_latest()
-        .is_none_or(|state| *state == PrimaryState::Damping)
-}
+        let mut history = CacheInner::new(128);
+        history.insert(tracking.time, tracking.clone());
+        history.insert(lost.time, lost.clone());
+        let mut publications = CacheInner::new(1);
+        publications.insert(time, tracking.clone());
+        publications.insert(time + Duration::from_millis(1), lost.clone());
+        let latest = publications.get_latest().unwrap();
+        assert!(result_is_current(
+            time,
+            &tracking.inner,
+            false,
+            history.get_latest().as_deref(),
+            time,
+            age
+        ));
+        assert!(!result_is_current(
+            time,
+            &tracking.inner,
+            false,
+            Some(&latest),
+            time,
+            age
+        ));
 
-fn camera_matrix_is_fresh(camera_matrix: &TimeWrapper<CameraMatrix>, time: Time) -> bool {
-    time_distance(camera_matrix.time, time) <= MAX_CAMERA_MATRIX_TIME_DISTANCE
-}
+        let selected = geometry_for_image(
+            time,
+            &history.get_interval(time - age, time + age),
+            &latest,
+            age,
+        )
+        .unwrap();
+        assert_eq!(selected.state, lost.inner.state);
+        assert_eq!(selected.robot_to_local, lost.inner.robot_to_local);
+        // Latest remains usable before the history subscriber receives the transition.
+        let old_branch = [Arc::new(tracking)];
+        assert_eq!(
+            geometry_for_image(time, &old_branch, &latest, age)
+                .unwrap()
+                .state,
+            lost.inner.state
+        );
+        lost.time = time - age - Duration::from_nanos(1);
+        assert!(geometry_for_image(time, &old_branch, &lost, age).is_none());
+    }
 
-fn time_distance(a: Time, b: Time) -> Duration {
-    Duration::from_nanos(a.as_nanos().abs_diff(b.as_nanos()))
+    #[test]
+    fn late_results_require_fresh_matching_epoch_and_explicit_state() {
+        let time = Time::from_nanos(1_000_000_000);
+        let age = Duration::from_millis(250);
+        let estimate = LocalizationEstimate3D {
+            robot_to_field: Isometry3::identity(),
+            covariance: nalgebra::SMatrix::identity(),
+        };
+        let states = [
+            LocalizationState3D::Startup,
+            LocalizationState3D::Tracking {
+                estimate,
+                last_successful_solve: time,
+            },
+            LocalizationState3D::LostTrack {
+                last_known_estimate: estimate,
+                last_successful_solve: time,
+            },
+        ];
+        for (index, state) in states.into_iter().enumerate() {
+            let geometry = AssociationGeometry {
+                epoch: 7,
+                state,
+                robot_to_local: Isometry3::identity(),
+                local_to_field: None,
+            };
+            let mut latest = TimeWrapper {
+                time,
+                inner: geometry.clone(),
+            };
+            let valid = |damping, latest: Option<&TimeWrapper<AssociationGeometry>>, now| {
+                result_is_current(time, &geometry, damping, latest, now, age)
+            };
+            for (latest_index, latest_state) in states.into_iter().enumerate() {
+                latest.inner.state = latest_state;
+                assert_eq!(valid(false, Some(&latest), time), index == latest_index);
+            }
+            latest.inner.state = state;
+            let expired = age + Duration::from_nanos(1);
+            assert!(valid(false, Some(&latest), time + age));
+            assert!(!valid(true, Some(&latest), time));
+            assert!(!valid(false, None, time));
+            assert!(!valid(false, Some(&latest), time + expired));
+            assert!(!valid(false, Some(&latest), time - expired));
+            latest.time = time - expired;
+            assert!(!valid(false, Some(&latest), time));
+            latest.time = time;
+            latest.inner.epoch += 1;
+            assert!(!valid(false, Some(&latest), time));
+        }
+    }
 }

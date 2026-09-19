@@ -18,11 +18,7 @@ pub(crate) fn fresh_camera_matrix(
 }
 
 fn camera_matrix_is_fresh(camera_matrix: &TimeWrapper<CameraMatrix>, time: Time) -> bool {
-    time_distance(camera_matrix.time, time) <= MAX_CAMERA_MATRIX_TIME_DISTANCE
-}
-
-fn time_distance(a: Time, b: Time) -> Duration {
-    Duration::from_nanos(a.as_nanos().abs_diff(b.as_nanos()))
+    camera_matrix.time.abs_diff(time) <= MAX_CAMERA_MATRIX_TIME_DISTANCE
 }
 
 /// Converts ROS-Z camera-matrix intrinsics into the optimizer camera-intrinsics type.

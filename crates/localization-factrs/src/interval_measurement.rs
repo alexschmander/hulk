@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub struct IntervalMeasurements {
+    pub configuration: Option<crate::BackendConfiguration>,
     pub resets: Vec<ResetMeasurement>,
     pub imu: Vec<ImuMeasurement>,
     pub visual: Vec<VisualFrameMeasurement>,
@@ -18,6 +19,7 @@ pub struct IntervalMeasurements {
 impl IntervalMeasurements {
     pub fn new() -> Self {
         Self {
+            configuration: None,
             resets: Vec::new(),
             imu: Vec::new(),
             visual: Vec::new(),
@@ -32,6 +34,7 @@ impl IntervalMeasurements {
 
     pub fn push(&mut self, measurement: SensorMeasurement) {
         match measurement {
+            SensorMeasurement::Configuration(config) => self.configuration = Some(*config),
             SensorMeasurement::Reset(reset) => self.push_reset(reset),
             SensorMeasurement::Imu(imu) => self.push_imu(imu),
             SensorMeasurement::Visual(visual) => self.push_visual(visual),
@@ -43,7 +46,7 @@ impl IntervalMeasurements {
     }
 
     pub fn push_visual(&mut self, visual: VisualFrameMeasurement) {
-        insert_visual_frame(&mut self.visual, visual);
+        insert_sorted(&mut self.visual, visual, |frame| frame.time);
     }
 
     pub fn push_reset(&mut self, reset: ResetMeasurement) {
@@ -67,26 +70,14 @@ impl IntervalMeasurements {
     }
 
     pub fn retain_at_or_after(&mut self, time: SystemTime) {
-        self.resets.retain(|measurement| measurement.time >= time);
         self.imu.retain(|measurement| measurement.time >= time);
-        self.visual
-            .retain(|frame| visual_frame_time(frame).is_some_and(|frame_time| frame_time >= time));
+        self.visual.retain(|frame| frame.time >= time);
         self.visual_odometry.retain(|measurement| {
             measurement.previous_time >= time && measurement.current_time >= time
         });
         self.foot_heights
             .retain(|measurement| measurement.time >= time);
     }
-}
-
-fn insert_visual_frame(frames: &mut Vec<VisualFrameMeasurement>, visual: VisualFrameMeasurement) {
-    insert_sorted(frames, visual, |visual| {
-        visual_frame_time(visual).expect("visual frames must contain at least one measurement")
-    });
-}
-
-fn visual_frame_time(visual: &VisualFrameMeasurement) -> Option<SystemTime> {
-    Some(visual.measurements.first()?.time)
 }
 
 fn insert_sorted<T, K: Ord>(vec: &mut Vec<T>, item: T, key: impl Fn(&T) -> K) {

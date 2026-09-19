@@ -77,6 +77,11 @@ pub fn run(args: HeadlessArgs) -> Result<()> {
     if let Some(visual_odometry) = args.visual_odometry {
         config.visual_odometry_mode = visual_odometry.into();
     }
+    if args.config.is_none() && config.visual_odometry_mode == VisualOdometryMode::ProductionStereo
+    {
+        config.vo_translation_sigma_m = 0.0;
+        config.vo_rotation_sigma_rad = 0.0;
+    }
     config
         .validate()
         .map_err(|message| color_eyre::eyre::eyre!(message))?;

@@ -68,6 +68,10 @@ impl SyntheticSensors {
                     previous_camera_to_field.inverse() * camera_to_field;
                 let measured = self.noisy_delta(exact_current_camera_to_previous_camera);
                 self.current_camera_to_visual_odometer *= measured;
+                // Bound numerical drift independently of the configured sensor noise.
+                self.current_camera_to_visual_odometer
+                    .rotation
+                    .renormalize();
                 self.transition_index += 1;
                 VisualOdometryDelta {
                     previous_time,
@@ -132,13 +136,7 @@ impl SyntheticSensors {
                 self.landmark_rng.sample::<f32, _>(StandardNormal),
             ) * self.config.landmark_pixel_sigma;
             let pixel = ideal_pixel + noise;
-            if !pixel.x.is_finite()
-                || !pixel.y.is_finite()
-                || pixel.x < 0.0
-                || pixel.y < 0.0
-                || pixel.x >= camera_matrix.image_size.inner.x
-                || pixel.y >= camera_matrix.image_size.inner.y
-            {
+            if !pixel_in_bounds(pixel, camera_matrix) {
                 continue;
             }
             let framed_pixel = Framed::wrap(pixel);
@@ -167,13 +165,16 @@ fn project_in_bounds(point: Point3<f32>, camera_matrix: &CameraMatrix) -> Option
         .camera_to_pixel(Framed::wrap(point.coords))
         .ok()?
         .inner;
-    (pixel.x.is_finite()
+    pixel_in_bounds(pixel, camera_matrix).then_some(pixel)
+}
+
+fn pixel_in_bounds(pixel: Point2<f32>, camera_matrix: &CameraMatrix) -> bool {
+    pixel.x.is_finite()
         && pixel.y.is_finite()
         && pixel.x >= 0.0
         && pixel.y >= 0.0
         && pixel.x < camera_matrix.image_size.inner.x
-        && pixel.y < camera_matrix.image_size.inner.y)
-        .then_some(pixel)
+        && pixel.y < camera_matrix.image_size.inner.y
 }
 
 fn push_detection(
@@ -253,6 +254,26 @@ mod tests {
     }
 
     #[test]
+    fn pixel_bounds_are_finite_and_half_open() {
+        let matrix = CameraMatrix {
+            image_size: linear_algebra::vector![640.0, 480.0],
+            ..Default::default()
+        };
+        assert!(pixel_in_bounds(Point2::new(0.0, 0.0), &matrix));
+        assert!(pixel_in_bounds(Point2::new(639.5, 479.5), &matrix));
+        for pixel in [
+            Point2::new(-1.0, 0.0),
+            Point2::new(0.0, -1.0),
+            Point2::new(640.0, 0.0),
+            Point2::new(0.0, 480.0),
+            Point2::new(f32::NAN, 0.0),
+            Point2::new(0.0, f32::INFINITY),
+        ] {
+            assert!(!pixel_in_bounds(pixel, &matrix));
+        }
+    }
+
+    #[test]
     fn exact_projection_returns_only_finite_in_bounds_pixels() {
         let scenario = Scenario::stationary();
         let camera_to_field = scenario.sample_camera_to_field(0.0);
@@ -272,6 +293,38 @@ mod tests {
             assert!((0.0..640.0).contains(&pixel.x));
             assert!((0.0..480.0).contains(&pixel.y));
         }
+    }
+
+    #[test]
+    fn exact_full_trajectory_preserves_cumulative_pose() {
+        let scenario = Scenario::field_figure_eight_twice();
+        let mut sensors = SyntheticSensors::new(&exact_config(0), &FieldDimensions::SPL_2025);
+        let mut max_norm_error = 0.0_f32;
+        let mut max_translation_error = 0.0_f32;
+        let initial = scenario.sample_camera_to_field(0.0);
+        let tick = crate::config::TICK_INTERVAL;
+        for index in 0..=scenario.tick_count() {
+            let pose = scenario.sample_camera_to_field(index as f32 * tick.as_secs_f32());
+            let measured = sensors.measure_visual_odometry(
+                Time::from_nanos(index as i64 * tick.as_nanos() as i64),
+                &pose,
+            );
+            let cumulative = measured.odometer.current_left_camera_to_visual_odometer;
+            max_norm_error =
+                max_norm_error.max((cumulative.rotation.quaternion().norm() - 1.0).abs());
+            max_translation_error = max_translation_error.max(
+                (cumulative.translation.vector - (initial.inverse() * pose).translation.vector)
+                    .norm(),
+            );
+        }
+        assert!(
+            max_norm_error < 1.0e-6,
+            "quaternion norm error: {max_norm_error}"
+        );
+        assert!(
+            max_translation_error < 1.0e-3,
+            "translation error: {max_translation_error}"
+        );
     }
 
     #[test]

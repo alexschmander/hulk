@@ -23,10 +23,7 @@ pub(crate) fn initialize_graph(initial_state: &InitialState) -> (Graph, Values) 
         PriorResidual::new(initial_state.camera_intrinsics.clone()),
         CameraIntrinsics(0),
     )
-    .noise(GaussianNoise::<4>::from_diag_sigmas(
-        INITIAL_CAMERA_INTRINSICS_PRIOR_SIGMA,
-        INITIAL_CAMERA_INTRINSICS_PRIOR_SIGMA,
-        INITIAL_CAMERA_INTRINSICS_PRIOR_SIGMA,
+    .noise(GaussianNoise::<4>::from_scalar_sigma(
         INITIAL_CAMERA_INTRINSICS_PRIOR_SIGMA,
     ))
     .build();

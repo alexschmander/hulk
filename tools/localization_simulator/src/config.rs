@@ -33,10 +33,10 @@ pub fn production_association_parameters() -> Result<FieldMarkAssociationParamet
 /// Selects whether field points bypass or exercise production association.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum AssociationMode {
-    /// Feed the estimator known ground-truth landmark correspondences.
-    #[default]
+    /// Explicit isolation mode: bypass association with known ground-truth correspondences.
     KnownCorrespondences,
     /// Feed class-grouped pixels through the production stateless associator.
+    #[default]
     ProductionAssociation,
 }
 
@@ -142,7 +142,7 @@ impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
             seed: 0,
-            association_mode: AssociationMode::KnownCorrespondences,
+            association_mode: AssociationMode::ProductionAssociation,
             visual_odometry_mode: VisualOdometryMode::SyntheticDelta,
             right_camera_delay_ms: 0.0,
             assume_synchronized_stereo_timestamps: true,
@@ -194,6 +194,18 @@ impl SimulationConfig {
                 "vo_outlier.rotation_scaled_axis",
             )?;
         }
+        if self.visual_odometry_mode == VisualOdometryMode::ProductionStereo
+            && (self.vo_translation_sigma_m != 0.0
+                || self.vo_rotation_sigma_rad != 0.0
+                || self.vo_translation_bias_per_step != [0.0; 3]
+                || self.vo_rotation_bias_per_step != [0.0; 3]
+                || self.vo_outlier.is_some())
+        {
+            return Err(
+                "ProductionStereo requires zero synthetic VO noise/bias and vo_outlier: null"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 }
@@ -221,6 +233,41 @@ fn validate_vector(value: [f32; 3], name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_stereo_rejects_synthetic_perturbations() {
+        let config = SimulationConfig {
+            visual_odometry_mode: VisualOdometryMode::ProductionStereo,
+            vo_translation_sigma_m: 0.0,
+            vo_rotation_sigma_rad: 0.0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        for incompatible in [
+            SimulationConfig {
+                vo_translation_sigma_m: 0.001,
+                ..config.clone()
+            },
+            SimulationConfig {
+                vo_rotation_sigma_rad: 0.001,
+                ..config.clone()
+            },
+            SimulationConfig {
+                vo_translation_bias_per_step: [0.001; 3],
+                ..config.clone()
+            },
+            SimulationConfig {
+                vo_rotation_bias_per_step: [0.001; 3],
+                ..config.clone()
+            },
+            SimulationConfig {
+                vo_outlier: Some(SimulationConfig::diagnostic_vo_fault()),
+                ..config
+            },
+        ] {
+            assert!(incompatible.validate().is_err());
+        }
+    }
 
     #[test]
     fn unknown_configuration_fields_are_rejected() {

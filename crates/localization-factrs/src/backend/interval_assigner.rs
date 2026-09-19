@@ -26,7 +26,8 @@ impl IntervalAssigner {
         Some(self.index_of_duration(time_since_start))
     }
 
-    pub(super) fn current_or_initialize_interval_start_time(
+    #[cfg(test)]
+    fn current_or_initialize_interval_start_time(
         &self,
         measurement_time: SystemTime,
     ) -> Option<SystemTime> {

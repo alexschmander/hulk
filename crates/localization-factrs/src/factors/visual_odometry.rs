@@ -20,14 +20,14 @@ pub struct VisualOdometryMeasurement {
 
 #[derive(Debug, Clone)]
 pub struct VisualOdometryFactor {
-    measurements: Vec<VisualOdometryDelta>,
+    measurement: VisualOdometryDelta,
     information_root: SMatrix<f64, 6, 6>,
     duration: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct AdjacentVisualOdometryFactor {
-    measurements: Vec<VisualOdometryDelta>,
+    measurement: VisualOdometryDelta,
     information_root: SMatrix<f64, 6, 6>,
     duration: f64,
 }
@@ -45,11 +45,20 @@ impl Residual for VisualOdometryFactor {
     type Differ = ForwardProp;
 
     fn dim_out(&self) -> usize {
-        self.measurements.len() * 6
+        6
     }
 
     fn residual<T: Numeric>(&self, (start, end): (SE23<T>, SE23<T>)) -> VectorX<T> {
-        self.residuals_on_spline(start, end)
+        let spline = SE23Spline::new(&start, &end, T::from(self.duration));
+        let previous_pose = se23_pose_to_se3(spline.evaluate(T::from(self.measurement.start_tau)));
+        let current_pose = se23_pose_to_se3(spline.evaluate(T::from(self.measurement.end_tau)));
+        let whitened = delta_residual(
+            previous_pose,
+            current_pose,
+            &self.measurement.robot_delta,
+            &self.information_root.cast::<T>(),
+        );
+        VectorX::from_column_slice(whitened.as_slice())
     }
 }
 
@@ -59,105 +68,54 @@ impl Residual for AdjacentVisualOdometryFactor {
     type Differ = ForwardProp;
 
     fn dim_out(&self) -> usize {
-        self.measurements.len() * 6
+        6
     }
 
     fn residual<T: Numeric>(
         &self,
         (previous_start, middle, current_end): (SE23<T>, SE23<T>, SE23<T>),
     ) -> VectorX<T> {
-        self.residuals_on_splines(previous_start, middle, current_end)
+        let previous_spline = SE23Spline::new(&previous_start, &middle, T::from(self.duration));
+        let current_spline = SE23Spline::new(&middle, &current_end, T::from(self.duration));
+        let previous_pose =
+            se23_pose_to_se3(previous_spline.evaluate(T::from(self.measurement.start_tau)));
+        let current_pose =
+            se23_pose_to_se3(current_spline.evaluate(T::from(self.measurement.end_tau)));
+        let whitened = delta_residual(
+            previous_pose,
+            current_pose,
+            &self.measurement.robot_delta,
+            &self.information_root.cast::<T>(),
+        );
+        VectorX::from_column_slice(whitened.as_slice())
     }
 }
 
 impl VisualOdometryFactor {
     pub fn new(
-        measurements: Vec<VisualOdometryDelta>,
+        measurement: VisualOdometryDelta,
         visual_odometry_noise: SMatrix<f64, 6, 6>,
         duration: f64,
     ) -> Self {
         Self {
-            measurements,
+            measurement,
             information_root: information_root(visual_odometry_noise),
             duration,
         }
-    }
-
-    fn residuals_on_spline<T: Numeric>(&self, start: SE23<T>, end: SE23<T>) -> VectorX<T> {
-        let mut residuals = VectorX::<T>::zeros(self.dim_out());
-        if self.measurements.is_empty() {
-            return residuals;
-        }
-
-        let spline = SE23Spline::new(start, end, T::from(self.duration));
-        let information_root = self.information_root.cast::<T>();
-
-        for (index, measurement) in self.measurements.iter().enumerate() {
-            let previous_pose = se23_pose_to_se3(spline.evaluate(T::from(measurement.start_tau)));
-            let current_pose = se23_pose_to_se3(spline.evaluate(T::from(measurement.end_tau)));
-            let whitened_error = delta_residual(
-                previous_pose,
-                current_pose,
-                &measurement.robot_delta,
-                &information_root,
-            );
-
-            residuals
-                .fixed_view_mut::<6, 1>(index * 6, 0)
-                .copy_from(&whitened_error);
-        }
-
-        residuals
     }
 }
 
 impl AdjacentVisualOdometryFactor {
     pub fn new(
-        measurements: Vec<VisualOdometryDelta>,
+        measurement: VisualOdometryDelta,
         visual_odometry_noise: SMatrix<f64, 6, 6>,
         duration: f64,
     ) -> Self {
         Self {
-            measurements,
+            measurement,
             information_root: information_root(visual_odometry_noise),
             duration,
         }
-    }
-
-    fn residuals_on_splines<T: Numeric>(
-        &self,
-        previous_start: SE23<T>,
-        middle: SE23<T>,
-        current_end: SE23<T>,
-    ) -> VectorX<T> {
-        let mut residuals = VectorX::<T>::zeros(self.dim_out());
-        if self.measurements.is_empty() {
-            return residuals;
-        }
-
-        let previous_spline =
-            SE23Spline::new(previous_start, middle.clone(), T::from(self.duration));
-        let current_spline = SE23Spline::new(middle, current_end, T::from(self.duration));
-        let information_root = self.information_root.cast::<T>();
-
-        for (index, measurement) in self.measurements.iter().enumerate() {
-            let previous_pose =
-                se23_pose_to_se3(previous_spline.evaluate(T::from(measurement.start_tau)));
-            let current_pose =
-                se23_pose_to_se3(current_spline.evaluate(T::from(measurement.end_tau)));
-            let whitened_error = delta_residual(
-                previous_pose,
-                current_pose,
-                &measurement.robot_delta,
-                &information_root,
-            );
-
-            residuals
-                .fixed_view_mut::<6, 1>(index * 6, 0)
-                .copy_from(&whitened_error);
-        }
-
-        residuals
     }
 }
 
@@ -229,29 +187,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_deltas_have_empty_residual() {
-        let factor = VisualOdometryFactor::new(vec![], SMatrix::<f64, 6, 6>::identity(), 1.0);
-
-        let residual = factor.residuals_on_spline(
-            state(Vector3::zeros(), Vector3::zeros()),
-            state(Vector3::zeros(), Vector3::zeros()),
-        );
-
-        assert_eq!(residual.len(), 0);
-    }
-
-    #[test]
     fn residual_is_zero_for_matching_camera_motion() {
         let factor = VisualOdometryFactor::new(
-            vec![delta(0.0, 1.0, translation(1.0, 0.0, 0.0))],
+            delta(0.0, 1.0, translation(1.0, 0.0, 0.0)),
             SMatrix::<f64, 6, 6>::identity(),
             1.0,
         );
 
-        let residual = factor.residuals_on_spline(
+        let residual = factor.residual((
             state(Vector3::zeros(), vector![1.0, 0.0, 0.0]),
             state(vector![1.0, 0.0, 0.0], vector![1.0, 0.0, 0.0]),
-        );
+        ));
 
         assert!(
             residual.iter().all(|value| value.abs() < 1e-9),
@@ -262,16 +208,16 @@ mod tests {
     #[test]
     fn adjacent_residual_is_zero_for_matching_camera_motion() {
         let factor = AdjacentVisualOdometryFactor::new(
-            vec![delta(0.5, 0.5, translation(1.0, 0.0, 0.0))],
+            delta(0.5, 0.5, translation(1.0, 0.0, 0.0)),
             SMatrix::<f64, 6, 6>::identity(),
             1.0,
         );
 
-        let residual = factor.residuals_on_splines(
+        let residual = factor.residual((
             state(Vector3::zeros(), vector![1.0, 0.0, 0.0]),
             state(vector![1.0, 0.0, 0.0], vector![1.0, 0.0, 0.0]),
             state(vector![2.0, 0.0, 0.0], vector![1.0, 0.0, 0.0]),
-        );
+        ));
 
         assert!(
             residual.iter().all(|value| value.abs() < 1e-9),
@@ -282,15 +228,15 @@ mod tests {
     #[test]
     fn residual_is_nonzero_for_mismatching_odometer_motion() {
         let factor = VisualOdometryFactor::new(
-            vec![delta(0.0, 1.0, translation(0.5, 0.0, 0.0))],
+            delta(0.0, 1.0, translation(0.5, 0.0, 0.0)),
             SMatrix::<f64, 6, 6>::identity(),
             1.0,
         );
 
-        let residual = factor.residuals_on_spline(
+        let residual = factor.residual((
             state(Vector3::zeros(), vector![1.0, 0.0, 0.0]),
             state(vector![1.0, 0.0, 0.0], vector![1.0, 0.0, 0.0]),
-        );
+        ));
 
         assert!(
             residual.norm() > 0.1,

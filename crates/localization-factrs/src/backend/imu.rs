@@ -45,7 +45,7 @@ impl VinsBackend {
     }
 
     fn process_imu_attitude_measurements(&mut self, measurements: Vec<ImuMeasurement>) {
-        let mut previous = self.last_imu_attitude_measurement.clone();
+        let mut previous = self.latest_imu_attitude_measurement.take();
 
         for measurement in measurements {
             if let Some(previous) = previous.as_ref() {
@@ -61,8 +61,7 @@ impl VinsBackend {
             previous = Some(measurement);
         }
 
-        self.latest_imu_attitude_measurement = previous.clone();
-        self.last_imu_attitude_measurement = previous;
+        self.latest_imu_attitude_measurement = previous;
     }
 
     fn add_exact_imu_attitude_knot(&mut self, measurement: &ImuMeasurement) {
@@ -173,19 +172,16 @@ impl VinsBackend {
     }
 
     pub(super) fn add_current_spline_orientation_factor(&mut self) {
-        let Some(current_measurement) = self.latest_imu_attitude_measurement.clone() else {
-            return;
-        };
-        let Some(start_time) = self
-            .interval_assigner
-            .current_or_initialize_interval_start_time(current_measurement.time)
-        else {
+        let Some(current_measurement) = self.latest_imu_attitude_measurement.as_ref() else {
             return;
         };
         let Some(interval_index) = self
             .interval_assigner
-            .assign_or_initialize_interval(start_time)
+            .assign_or_initialize_interval(current_measurement.time)
         else {
+            return;
+        };
+        let Some(start_time) = self.interval_assigner.interval_start_time(interval_index) else {
             return;
         };
         if !self.interval_states_available(interval_index) {
@@ -202,7 +198,7 @@ impl VinsBackend {
         let end_time = start_time + self.config.knot_spacing;
         let residual = CurrentSplineOrientationFactor::new(
             start_orientation.orientation.clone(),
-            &current_measurement,
+            current_measurement,
             self.config.roll_pitch_yaw_noise,
             start_time,
             end_time,
@@ -214,11 +210,9 @@ impl VinsBackend {
     }
 
     pub(super) fn remove_current_spline_orientation_factor(&mut self) {
-        self.optimizer.graph_mut().remove_factors(|factor| {
-            factor
-                .residual_as::<CurrentSplineOrientationFactor>()
-                .is_some()
-        });
+        self.optimizer
+            .graph_mut()
+            .remove_factors(|factor| factor.is_residual::<CurrentSplineOrientationFactor>());
     }
 
     /// filter out measurements in order to keep graph from exploding with too many IMU kinematics factors when the frontend provides high-frequency IMU data

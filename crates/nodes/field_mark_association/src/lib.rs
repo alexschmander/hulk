@@ -6,19 +6,22 @@ mod api;
 mod features;
 mod frame_processing;
 mod global_association;
+mod map;
 mod node;
 mod parameters;
+mod tracking;
 
-pub use api::{GlobalVisualLocalization, GlobalVisualLocalizer, localize_global_visual_features};
+pub use api::{
+    AssociationInput, AssociationResult, GlobalAssociationInput, associate_global_visual_features,
+    associate_visual_features,
+};
 pub use features::{
-    DetectedVisualFeature, DetectedVisualFeatures, find_detected_goalposts,
-    find_detected_visual_features,
+    DetectedVisualFeature, DetectedVisualFeatures, VisualFeatureClass, find_detected_goalposts,
+    find_detected_visual_features, raw_detections,
 };
-pub use global_association::{
-    GlobalAssociationConfig as GlobalLocalizerParameters, VisualFeatureClass,
-};
+pub use global_association::GlobalAssociationConfig as GlobalLocalizerParameters;
 pub use node::{run, run_boxed};
-pub use parameters::FieldMarkAssociationParameters;
+pub use parameters::{FieldMarkAssociationParameters, TrackingAssociationParameters};
 pub use types::visual_localization::{
     ASSOCIATION_GEOMETRY_TOPIC, AssociationGeometry, FieldMarkAssociation,
     GLOBAL_LOCALIZATION_DEBUG_TOPIC, GlobalLocalizationDebug, VisualLocalizationFrame,
@@ -37,7 +40,7 @@ pub struct FieldFeatureLandmark {
 pub fn field_feature_landmarks(
     field_dimensions: &types::field_dimensions::FieldDimensions,
 ) -> Vec<FieldFeatureLandmark> {
-    global_association::candidate_points(field_dimensions)
+    map::candidate_points(field_dimensions)
         .into_iter()
         .map(|(class, position)| FieldFeatureLandmark { class, position })
         .collect()
