@@ -98,7 +98,6 @@ members = [
   "tools/localization_simulator",
   "tools/mujoco-simulator/mujoco-rust-server",
   "tools/pepsi",
-  "tools/robot_viewer",
   "tools/tensorrt-compile",
   "tools/twix",
   "tools/widget_gallery",
