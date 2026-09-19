@@ -56,7 +56,8 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await?;
 
-    let feature_duration_pub = node
+    // Historical topic name: this measures the full pipeline, including triangulation and PnP/LM.
+    let processing_duration_pub = node
         .publisher::<Duration>("debug/visual_odometry/feature_extraction_duration")
         .build()
         .await?;
@@ -104,10 +105,10 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         let parameters = parameters.typed();
 
         let had_previous_image = previous_image_time.is_some();
-        let pose_estimation_parameters = parameters.pose_estimation_parameters.clone();
         let (odometry_result, duration) = tokio::task::block_in_place(|| {
             let start_time = Instant::now();
-            let odometry = pipeline.process(&stereo_image_pair, &pose_estimation_parameters);
+            let odometry =
+                pipeline.process(&stereo_image_pair, &parameters.pose_estimation_parameters);
             (odometry, start_time.elapsed())
         });
 
@@ -140,7 +141,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
                         .current_left_camera_to_visual_odometer(),
                 })
                 .await?;
-            feature_duration_pub
+            processing_duration_pub
                 .publish_if_subscribed(|| ready(duration))
                 .await?;
             continue;
@@ -172,7 +173,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
                 .publish_if_subscribed(|| ready(triangulated_features))
                 .await?;
         }
-        feature_duration_pub
+        processing_duration_pub
             .publish_if_subscribed(|| ready(duration))
             .await?;
     }

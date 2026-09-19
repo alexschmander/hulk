@@ -8,7 +8,8 @@ use crate::{
     feature_extractor::{CurrentLeft, FrameFeatures, Matches, NUM_KEYPOINTS, PreviousLeft},
     parameters::StereoVisualOdometryPoseEstimationParameters,
     pose_refinement::{
-        matrix3_from_mat3a, refine_pose_lm_direct, residual_with_x_offset, vector3_from_vec3a,
+        mat3a_from_matrix3, matrix3_from_mat3a, refine_pose_lm_direct, residual_with_x_offset,
+        vec3a_from_vector3, vector3_from_vec3a,
     },
     triangulator::{StereoPoint, StereoTriangulator},
 };
@@ -54,14 +55,8 @@ pub struct OdometryDiagnostics {
     pub lm_delta_rotation_deg: Option<f32>,
     pub left_rmse_before_lm: Option<f32>,
     pub right_rmse_before_lm: Option<f32>,
-    pub stereo_rmse_before_lm: Option<f32>,
-    pub weighted_cost_before_lm: Option<f32>,
     pub left_rmse_after_lm: Option<f32>,
     pub right_rmse_after_lm: Option<f32>,
-    pub stereo_rmse_after_lm: Option<f32>,
-    pub weighted_cost_after_lm: Option<f32>,
-    pub right_bad_fraction_before_lm: Option<f32>,
-    pub right_bad_fraction_after_lm: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -110,12 +105,8 @@ impl OdometryScratch {
         let rotation = pose.rotation.to_rotation_matrix();
         let rotation = rotation.matrix();
         let pose = PnPResult {
-            rotation: Mat3AF32::from_cols(
-                Vec3AF32::new(rotation[(0, 0)], rotation[(1, 0)], rotation[(2, 0)]),
-                Vec3AF32::new(rotation[(0, 1)], rotation[(1, 1)], rotation[(2, 1)]),
-                Vec3AF32::new(rotation[(0, 2)], rotation[(1, 2)], rotation[(2, 2)]),
-            ),
-            translation: Vec3AF32::new(pose.translation.x, pose.translation.y, pose.translation.z),
+            rotation: mat3a_from_matrix3(rotation),
+            translation: vec3a_from_vector3(pose.translation.vector),
             rvec: Vec3AF32::new(0.0, 0.0, 0.0),
             reproj_rmse: None,
             num_iterations: None,
@@ -280,7 +271,7 @@ pub fn estimate_previous_to_current(
     scratch.correspondences.clear();
     fill_right_observations_by_left_index(current_points, scratch);
 
-    for (previous_index, current_index, _score) in temporal_matches.left_to_right() {
+    for (previous_index, current_index) in temporal_matches.matched_pairs() {
         if !current_left.is_valid(current_index) {
             continue;
         }
@@ -315,8 +306,8 @@ pub fn estimate_previous_to_current(
     scratch.diagnostics.correspondences = scratch.correspondences.len();
     let disparities =
         temporal_matches
-            .left_to_right()
-            .filter_map(|(previous_index, current_index, _)| {
+            .matched_pairs()
+            .filter_map(|(previous_index, current_index)| {
                 current_left
                     .is_valid(current_index)
                     .then(|| previous.point(previous_index).map(|point| point.disparity))
@@ -548,31 +539,24 @@ fn estimate_ransac_pose(
         )
     });
 
-    if let (Some(refit_pose), Some(refit_metrics), Some(ransac_metrics)) =
-        (refit_pose.as_ref(), refit_metrics, ransac_metrics)
-        && refit_is_left_consistent(ransac_metrics, refit_metrics)
-    {
-        scratch.diagnostics.refit_used = true;
-        let mut diagnostics = scratch.diagnostics;
-        let pose = refine_pose(
-            refit_pose,
-            &scratch.inlier_correspondences,
-            triangulator,
-            parameters,
-            true,
-            &mut diagnostics,
-        );
-        scratch.diagnostics = diagnostics;
-        return pose;
-    }
+    let (initial_pose, allow_initial_fallback) =
+        if let (Some(refit_pose), Some(refit_metrics), Some(ransac_metrics)) =
+            (refit_pose.as_ref(), refit_metrics, ransac_metrics)
+            && refit_is_left_consistent(ransac_metrics, refit_metrics)
+        {
+            scratch.diagnostics.refit_used = true;
+            (refit_pose, true)
+        } else {
+            (&result.pose, false)
+        };
 
     let mut diagnostics = scratch.diagnostics;
     let pose = refine_pose(
-        &result.pose,
+        initial_pose,
         &scratch.inlier_correspondences,
         triangulator,
         parameters,
-        false,
+        allow_initial_fallback,
         &mut diagnostics,
     );
     scratch.diagnostics = diagnostics;
@@ -597,8 +581,7 @@ fn refine_pose(
     diagnostics: &mut OdometryDiagnostics,
 ) -> Option<PnPResult> {
     if correspondences.len() < parameters.minimum_pnp_correspondences {
-        return allow_initial_fallback
-            .then(|| pose_with_metrics(initial_pose, correspondences, triangulator))?;
+        return None;
     }
 
     let initial_metrics = reprojection_metrics(
@@ -677,20 +660,7 @@ fn disparity_weight(
     (disparity / parameters.full_weight_disparity_px).clamp(parameters.min_disparity_weight, 1.0)
 }
 
-fn pose_with_metrics(
-    pose: &PnPResult,
-    correspondences: &[PoseCorrespondence],
-    triangulator: &StereoTriangulator,
-) -> Option<PnPResult> {
-    let metrics = reprojection_metrics(
-        pose,
-        correspondences,
-        triangulator.intrinsics_f32(),
-        triangulator.baseline(),
-    )?;
-    Some(with_stereo_rmse(pose.clone(), metrics))
-}
-
+// Acceptance metrics use unrobust squared errors, not LM's weighted Huber objective.
 fn reprojection_metrics(
     pose: &PnPResult,
     correspondences: &[PoseCorrespondence],
@@ -745,6 +715,7 @@ fn reprojection_metrics(
     .then_some(metrics)
 }
 
+// Replace Kornia's left-only RMSE with unweighted combined left/right RMSE.
 fn with_stereo_rmse(mut pose: PnPResult, metrics: ReprojectionMetrics) -> PnPResult {
     pose.reproj_rmse = metrics.stereo_rmse();
     pose
@@ -753,17 +724,11 @@ fn with_stereo_rmse(mut pose: PnPResult, metrics: ReprojectionMetrics) -> PnPRes
 fn fill_diagnostics_before_lm(diagnostics: &mut OdometryDiagnostics, metrics: ReprojectionMetrics) {
     diagnostics.left_rmse_before_lm = metrics.left_rmse();
     diagnostics.right_rmse_before_lm = metrics.right_rmse();
-    diagnostics.stereo_rmse_before_lm = metrics.stereo_rmse();
-    diagnostics.weighted_cost_before_lm = metrics.weighted_cost();
-    diagnostics.right_bad_fraction_before_lm = metrics.right_bad_fraction();
 }
 
 fn fill_diagnostics_after_lm(diagnostics: &mut OdometryDiagnostics, metrics: ReprojectionMetrics) {
     diagnostics.left_rmse_after_lm = metrics.left_rmse();
     diagnostics.right_rmse_after_lm = metrics.right_rmse();
-    diagnostics.stereo_rmse_after_lm = metrics.stereo_rmse();
-    diagnostics.weighted_cost_after_lm = metrics.weighted_cost();
-    diagnostics.right_bad_fraction_after_lm = metrics.right_bad_fraction();
 }
 
 fn fill_lm_delta(
@@ -871,15 +836,12 @@ mod tests {
     ) -> na::Isometry3<f32> {
         let correspondences = points
             .iter()
-            .map(|point| {
-                let point = previous_to_current * na::Point3::new(point.x, point.y, point.z);
+            .map(|world_point| {
+                let point = previous_to_current
+                    * na::Point3::new(world_point.x, world_point.y, world_point.z);
                 let left = Vec2F32::new(100.0 * point.x / point.z, 100.0 * point.y / point.z);
                 PoseCorrespondence {
-                    world_point: Vec3AF32::new(
-                        previous_to_current.inverse_transform_point(&point).x,
-                        previous_to_current.inverse_transform_point(&point).y,
-                        previous_to_current.inverse_transform_point(&point).z,
-                    ),
+                    world_point: *world_point,
                     image_point: left,
                     right_image_point: Some(Vec2F32::new(left.x - 50.0 / point.z, left.y)),
                     weight: 1.0,

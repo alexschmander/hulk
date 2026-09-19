@@ -597,14 +597,8 @@ struct DiagnosticsMetrics {
     lm_delta_rotation_deg: Vec<f32>,
     left_rmse_before_lm: Vec<f32>,
     right_rmse_before_lm: Vec<f32>,
-    stereo_rmse_before_lm: Vec<f32>,
-    weighted_cost_before_lm: Vec<f32>,
     left_rmse_after_lm: Vec<f32>,
     right_rmse_after_lm: Vec<f32>,
-    stereo_rmse_after_lm: Vec<f32>,
-    weighted_cost_after_lm: Vec<f32>,
-    right_bad_fraction_before_lm: Vec<f32>,
-    right_bad_fraction_after_lm: Vec<f32>,
 }
 
 impl DiagnosticsMetrics {
@@ -635,34 +629,10 @@ impl DiagnosticsMetrics {
             &mut self.right_rmse_before_lm,
             diagnostics.right_rmse_before_lm,
         );
-        push_some(
-            &mut self.stereo_rmse_before_lm,
-            diagnostics.stereo_rmse_before_lm,
-        );
-        push_some(
-            &mut self.weighted_cost_before_lm,
-            diagnostics.weighted_cost_before_lm,
-        );
         push_some(&mut self.left_rmse_after_lm, diagnostics.left_rmse_after_lm);
         push_some(
             &mut self.right_rmse_after_lm,
             diagnostics.right_rmse_after_lm,
-        );
-        push_some(
-            &mut self.stereo_rmse_after_lm,
-            diagnostics.stereo_rmse_after_lm,
-        );
-        push_some(
-            &mut self.weighted_cost_after_lm,
-            diagnostics.weighted_cost_after_lm,
-        );
-        push_some(
-            &mut self.right_bad_fraction_before_lm,
-            diagnostics.right_bad_fraction_before_lm,
-        );
-        push_some(
-            &mut self.right_bad_fraction_after_lm,
-            diagnostics.right_bad_fraction_after_lm,
         );
     }
 
@@ -685,22 +655,10 @@ impl DiagnosticsMetrics {
             .append(&mut other.left_rmse_before_lm);
         self.right_rmse_before_lm
             .append(&mut other.right_rmse_before_lm);
-        self.stereo_rmse_before_lm
-            .append(&mut other.stereo_rmse_before_lm);
-        self.weighted_cost_before_lm
-            .append(&mut other.weighted_cost_before_lm);
         self.left_rmse_after_lm
             .append(&mut other.left_rmse_after_lm);
         self.right_rmse_after_lm
             .append(&mut other.right_rmse_after_lm);
-        self.stereo_rmse_after_lm
-            .append(&mut other.stereo_rmse_after_lm);
-        self.weighted_cost_after_lm
-            .append(&mut other.weighted_cost_after_lm);
-        self.right_bad_fraction_before_lm
-            .append(&mut other.right_bad_fraction_before_lm);
-        self.right_bad_fraction_after_lm
-            .append(&mut other.right_bad_fraction_after_lm);
     }
 
     fn print(&self) {

@@ -76,9 +76,9 @@ impl VisualOdometryPipeline {
                 &mut self.current_points,
             );
 
-            if let Some(previous_frame) = self.previous_frame.as_ref() {
+            let odometry = if let Some(previous_frame) = self.previous_frame.as_ref() {
                 let temporal_matches = features.temporal_matches()?;
-                let odometry = estimate_previous_to_current(
+                estimate_previous_to_current(
                     previous_frame,
                     &current_left,
                     &self.current_points,
@@ -86,13 +86,12 @@ impl VisualOdometryPipeline {
                     &self.triangulator,
                     parameters,
                     &mut self.odometry_scratch,
-                );
-                features.copy_current_left_to(&mut self.previous_features)?;
-                odometry
+                )
             } else {
-                features.copy_current_left_to(&mut self.previous_features)?;
                 None
-            }
+            };
+            features.copy_current_left_to(&mut self.previous_features)?;
+            odometry
         };
 
         if let Some(previous_frame) = self.previous_frame.as_mut() {
@@ -149,5 +148,9 @@ impl VisualOdometryPipeline {
                 }
             })
             .collect()
+    }
+
+    pub fn triangulated_feature_count(&self) -> usize {
+        self.current_points.len()
     }
 }
