@@ -9,6 +9,104 @@ The simulator renders the SPL field, moves a ground-truth camera rig along a six
 trajectory, synthesizes localization inputs, runs the production association and localization
 implementations, and displays estimated poses against ground truth.
 
+## Localization Lifecycle
+
+The robot publishes retained `localization/state_3d` messages. Association receives the same
+state together with timestamped Local-frame geometry and an epoch on
+`localization/association_geometry`.
+
+| State | Association | Transition |
+| --- | --- | --- |
+| `Startup` | Stateless global landmark-geometry matching | Three or more certified correspondences and an accepted backend result establish tracking. |
+| `Tracking` | Image-space prediction and uncertainty-gated one-to-one assignment | Solver/visual freshness failure or a VO epoch discontinuity enters `LostTrack`. |
+| `LostTrack` | The tracking solver with wider uncertainty around the retained estimate | A new recovery frame acknowledged and validated by the backend restores tracking. |
+
+The own-half assumption (robot field X below zero) is used only when localization computes its
+startup alignment seed. Tracking and recovery retain the established field orientation, including
+in the opponent half. Leaving damping resets the estimator and starts a new startup epoch.
+Association returns correspondences, not a fitted field pose. Localization alone seeds and
+optimizes alignment. Its production geometry uses Local, Robot, and camera transforms rather than
+Ground-frame output corrections; initial height comes from sole kinematics and IMU tilt.
+
+Global matching requires a nondegenerate seed and agreement of every retained detection. It rejects
+ambiguous landmark assignments and exhausted search budgets rather than certifying an arbitrary
+subset. Tracking propagates the full pose covariance into image space. Recovery never falls back
+to global startup: predictions older than `tracking.max_age` remain lost until explicit restart.
+Repeated stationary images are retries, not independent votes for an ambiguous pose.
+
+Tracking and recovery with three to five detections score joint image residuals, including shared
+pose uncertainty across features. The joint Mahalanobis cutoff preserves the configured 2D gate's
+tail probability for the larger residual dimension. Larger frames use the faster marginal-assignment
+path. Sparse
+joint search is bounded by `global_localizer.max_work`; budget exhaustion rejects rather than
+returning a winner before all plausible alternatives have been checked.
+
+Association uses one blocking worker and one replaceable pending detection frame. Localization
+ingestion forwards measurements without awaiting optimization or network publishing; outgoing
+snapshots use latest-value mailboxes. Stale and obsolete-epoch/state association results are dropped.
+These bounds prevent association backlog but are not a hard real-time scheduling guarantee.
+Publication runs on blocking workers because Zenoh sends can block synchronously even through an
+async API. A stalled send cannot occupy the ingestion runtime worker. Diagnostic snapshots are
+latest-value and best-effort: intermediate diagnostics may be dropped rather than delaying solving.
+Closing ingestion closes the output mailboxes; an active transport send still finishes or times out
+before its worker exits.
+
+The simulator defaults to production association and supplies estimator geometry, not ground-truth
+poses, to that path. Known-correspondence mode remains available explicitly for estimator isolation.
+Its synchronous runner shares the production loss and visual-acknowledgement checks.
+
+### Live Tuning
+
+The `localization3d` parameter API updates the running node without resetting its pose, alignment,
+or epoch. Timeout changes take effect immediately, including shortening an already armed deadline.
+Both tracking timeouts must be positive and no greater than 24 hours. Numerical validation is
+shared with the backend and runs before remote parameter changes are committed.
+
+Noise and containment updates enter the backend's measurement channel without blocking ingestion.
+The latest update in a drained batch applies before constructing factors in that batch. Existing
+factors, including extended interval factors, keep their original weights until they leave the
+optimization window. Marginalized information is not retrospectively reweighted. Configuration-only
+batches do not trigger a solve, and damping resets preserve the latest tuning. Knot spacing, window
+size, and iteration limits are structural settings and are not exposed as live node parameters.
+
+Association parameters are sampled per frame. Geometry messages no longer contain a redundant
+source tag; the epoch and localization state determine how they are used. Global diagnostics expose
+`association_count` and `pairwise_distance_rms`, not an apparent candidate score that merely repeated
+the count. Rebuild robot and visualization consumers together after these message-schema changes.
+
+Run solver-only host timing characterization with:
+
+```sh
+cargo test -p field_mark_association --lib runtime_characterization -- --ignored --nocapture
+```
+
+The measurements exclude transport, perception and backend scheduling. Measure end-to-end frame
+age and tail latency on the robot before treating them as deployment performance claims.
+
+### Sparse-Feature Regression
+
+```sh
+cargo test -p localization_simulator --lib sparse_ -- --nocapture
+```
+
+These tests restrict emitted sensor observations, then run production association and the real
+backend with the bundled parameters. They do not inject correspondences, pose hints, or fabricated
+backend acknowledgements. They cover:
+
+- Startup with zero, one, and two features, followed by stationary three-feature acquisition.
+- A stationary field-boundary view containing only two L spots and one penalty spot, including
+  loss and recovery.
+- A short two-feature gap bridged while tracking, and a longer gap causing loss at the visual deadline.
+- Recovery with three, four, and five features, including in the opponent half without a symmetry reset.
+- Five deterministic noisy stationary runs (0.5 px landmark noise and 1 mm / 0.001 rad VO noise per step).
+- Rejection of a frame at the exact loss boundary until a post-loss frame is acknowledged.
+- Continued `LostTrack` after restoring features beyond the prior's five-second validity horizon.
+
+The tests require a live global pose only during Tracking, preserve the last trusted estimate while
+lost, and check every published pose against truth within 10 cm and 5 degrees. Output prints actual
+state-transition times and maximum errors. Synthetic geometry and sensor noise do not reproduce
+neural-network misclassifications, camera calibration error, transport scheduling, or hardware latency.
+
 ## Requirements
 
 ### Correctness
@@ -83,6 +181,10 @@ The collapsible **VO bias and one-shot outlier** section configures per-step tra
 bias and a deterministic transition-indexed SE(3) outlier. Input edits are staged: playback is
 disabled until **Apply configuration / rebuild** is pressed, preventing old results from being
 mistaken for the newly displayed settings.
+
+These perturbations apply only to synthetic VO. Production-stereo mode disables and clears those
+controls; configuration files combining production stereo with synthetic perturbations are rejected
+rather than silently running a different experiment.
 
 The `pose_teleport` scenario changes the ground-truth robot pose discontinuously. The `vo_fault`
 scenario remains physically smooth and enables a deterministic VO-only transform outlier. This
