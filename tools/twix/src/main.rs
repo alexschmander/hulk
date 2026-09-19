@@ -11,14 +11,15 @@ use configuration::{
     keys::KeybindAction,
 };
 use eframe::{
-    App, CreationContext, Frame, NativeOptions, Storage,
+    App, CreationContext, Frame, NativeOptions, Renderer, Storage,
     egui::{CentralPanel, Layout, Panel as EguiPanel, Ui},
+    egui_wgpu::{WgpuConfiguration, WgpuSetup},
     emath::Align,
     run_native,
 };
 use layout::{FocusDirection, TwixLayout};
 use log::{error, warn};
-use panels::{ImagePanel, MapPanel, ParameterPanel, TextPanel};
+use panels::{ImagePanel, Map3DPanel, MapPanel, ParameterPanel, TextPanel};
 use repository::{Repository, inspect_version::check_for_update};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use visuals::Visuals;
@@ -39,7 +40,7 @@ mod twix_painter;
 mod visuals;
 mod zoom_and_pan;
 
-impl_selectable_panel!(TextPanel, ImagePanel, MapPanel, ParameterPanel);
+impl_selectable_panel!(TextPanel, ImagePanel, MapPanel, Map3DPanel, ParameterPanel);
 
 #[derive(Debug, Clone, clap::Parser)]
 struct Arguments {
@@ -76,6 +77,11 @@ impl TwixApp {
         configuration: Configuration,
     ) -> Self {
         let namespace_editor = backend.namespace();
+        if let Some(render_state) = &creation_context.wgpu_render_state {
+            creation_context.egui_ctx.data_mut(|data| {
+                data.insert_temp(eframe::egui::Id::new("render_state"), render_state.clone());
+            });
+        }
 
         let layout = TwixLayout::load(
             creation_context.storage,
@@ -247,9 +253,25 @@ fn main() -> eframe::Result<()> {
         .expect("failed to build Tokio runtime");
     let runtime_handle = runtime.handle().clone();
 
+    let mut wgpu_options = WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+        let previous = setup.device_descriptor.clone();
+        setup.device_descriptor = Arc::new(move |adapter| {
+            let mut descriptor = previous(adapter);
+            descriptor
+                .required_limits
+                .max_storage_buffers_per_shader_stage = 9;
+            descriptor
+        });
+    }
+
     run_native(
         "Twix",
-        NativeOptions::default(),
+        NativeOptions {
+            renderer: Renderer::Wgpu,
+            wgpu_options,
+            ..Default::default()
+        },
         Box::new(move |creation_context| {
             egui_extras::install_image_loaders(&creation_context.egui_ctx);
             egui_material_icons::initialize(&creation_context.egui_ctx);

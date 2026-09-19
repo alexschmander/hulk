@@ -4246,14 +4246,11 @@ dependencies = [
  "geometry",
  "linear_algebra",
  "linear_sum_assignment",
- "log",
  "nalgebra 0.34.2",
  "ndarray 0.16.1",
  "projection",
  "ros-z",
- "ros-z-streams",
  "serde",
- "smallvec",
  "tokio",
  "types",
 ]
@@ -9572,31 +9569,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "robot_viewer"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "clap",
- "color-eyre",
- "coordinate_systems",
- "eframe",
- "egui_bevy",
- "field_mark_association",
- "image",
- "kinematics",
- "linear_algebra",
- "nalgebra 0.34.2",
- "projection",
- "ros-z",
- "ros-z-debug",
- "ros-z-streams",
- "ros2",
- "tokio",
- "tracing-subscriber",
- "types",
-]
-
-[[package]]
 name = "ron"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11747,12 +11719,14 @@ version = "0.16.0"
 dependencies = [
  "ball_filter",
  "behavior_node",
+ "bevy",
  "clap",
  "color-eyre",
  "convert_case 0.7.1",
  "coordinate_systems",
  "dirs",
  "eframe",
+ "egui_bevy",
  "egui_extras",
  "egui_material_icons",
  "egui_tiles",
@@ -11761,6 +11735,7 @@ dependencies = [
  "hulk_widgets",
  "image",
  "itertools 0.14.0",
+ "kinematics",
  "linear_algebra",
  "log",
  "nalgebra 0.34.2",
@@ -11848,6 +11823,7 @@ dependencies = [
  "nalgebra 0.34.2",
  "num-traits",
  "ordered-float 4.6.0",
+ "projection",
  "pyo3",
  "ros-z",
  "ros-z-schema",
