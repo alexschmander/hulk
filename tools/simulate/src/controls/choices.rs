@@ -88,11 +88,15 @@ pub fn choices(path: &str) -> Option<Vec<Value>> {
                 height_above_ground: 0.0,
                 image_region_target: ImageRegion::Center,
             },
-            HeadMotion::LookLeftAndRightOf {
+            HeadMotion::GlanceLeftAndRightOf {
                 target: point![1.0, 0.0],
                 height_above_ground: 0.0,
             },
             HeadMotion::Damping,
+            HeadMotion::MoveWithVelocity {
+                yaw: 0.0,
+                pitch: 0.0,
+            },
         ]
         .into_iter()
         .map(value)
