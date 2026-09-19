@@ -11052,12 +11052,15 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 name = "simulate"
 version = "0.1.0"
 dependencies = [
+ "ball_state_composer",
+ "behavior_node",
  "bevy",
  "booster",
  "cdr",
  "clap",
  "color-eyre",
  "coordinate_systems",
+ "fall_detection",
  "geometry",
  "global_parameter_provider",
  "hardware_interface",
@@ -11071,6 +11074,7 @@ dependencies = [
  "nalgebra 0.34.2",
  "projection",
  "ros-z",
+ "rule_obstacle_composer",
  "serde",
  "serde_json",
  "tempfile",
