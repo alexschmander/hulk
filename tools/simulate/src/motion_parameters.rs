@@ -182,11 +182,8 @@ async fn refresh_snapshots(clients: &[(&str, &str, RemoteParameterClient)], stat
 
 fn validate(group: &str, value: &Value) -> Result<()> {
     match group {
-        "head_motion" => {
-            serde_json::from_value::<head_motion::parameters::Parameters>(value.clone())?
-                .validate()
-                .map_err(|e| eyre!(e))
-        }
+        // The head node owns its private parameter schema and validates remote writes.
+        "head_motion" => Ok(()),
         "joint_limits" => {
             serde_json::from_value::<types::joint_limits::JointLimits>(value.clone())?
                 .validate()
@@ -199,15 +196,8 @@ fn validate(group: &str, value: &Value) -> Result<()> {
         }
         "hardware_interface" => {
             let p = serde_json::from_value::<hardware_interface::Parameters>(value.clone())?;
-            if [
-                p.joint_control_message_interval,
-                p.rotate_head_message_interval,
-                p.sdk_request_timeout,
-            ]
-            .iter()
-            .any(Duration::is_zero)
-            {
-                return Err(eyre!("Hardware intervals must be greater than zero"));
+            if p.sdk_request_timeout.is_zero() {
+                return Err(eyre!("Hardware timeout must be greater than zero"));
             }
             Ok(())
         }
@@ -246,13 +236,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let head = context.create_node("head_motion").build().await.unwrap();
-        let head_parameters = head
-            .bind_parameter_as::<head_motion::parameters::Parameters>("head_motion")
-            .unwrap();
-        head_parameters
-            .add_validation_hook(head_motion::parameters::Parameters::validate)
-            .unwrap();
+        let head_task = tokio::spawn(head_motion::node::run_boxed(context.clone()));
         let inference = context
             .create_node("motion_inference")
             .build()
@@ -290,7 +274,7 @@ mod tests {
             Ok("Head parameters applied live".into())
         );
         assert_eq!(
-            head_parameters.snapshot().typed().joint_control.kp.yaw,
+            wait(1).await.snapshots["head_motion"].value["joint_control"]["kp"]["yaw"],
             17.0
         );
         assert_eq!(clock.now(), Time::from_nanos(4_000_000_000));
@@ -299,7 +283,7 @@ mod tests {
         client.apply("head_motion", value, snapshot).unwrap();
         assert!(wait(2).await.result.unwrap().is_err());
         assert_eq!(
-            head_parameters.snapshot().typed().joint_control.kp.yaw,
+            wait(1).await.snapshots["head_motion"].value["joint_control"]["kp"]["yaw"],
             17.0
         );
         // Inference parameters also update while the logical clock is paused.
@@ -324,6 +308,8 @@ mod tests {
             1.5
         );
         drop(client);
+        head_task.abort();
+        let _ = head_task.await;
         context.shutdown().unwrap();
     }
 }
