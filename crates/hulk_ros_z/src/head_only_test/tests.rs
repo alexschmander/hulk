@@ -16,6 +16,10 @@ async fn timed_seated_test_records_and_returns_firmware_to_damping() {
         head_test_seconds: 1,
         head_test_yaw: 0.0,
         head_test_pitch: 0.7,
+        head_test_yaw_kp: Some(12.0),
+        head_test_yaw_kd: None,
+        head_test_pitch_kp: None,
+        head_test_pitch_kd: None,
     };
     let layers = prepare(
         &args,
@@ -134,6 +138,12 @@ async fn timed_seated_test_records_and_returns_firmware_to_damping() {
     let sent = sent.lock().unwrap();
     assert!(sent.iter().any(|c| c.motor_commands[0].kp > 0.0));
     for command in sent.iter() {
+        if command.motor_commands[0].kp > 0.0 {
+            assert_eq!(command.motor_commands[0].kp, 12.0);
+            assert_eq!(command.motor_commands[0].kd, 1.2);
+            assert_eq!(command.motor_commands[1].kp, 10.0);
+            assert_eq!(command.motor_commands[1].kd, 1.2);
+        }
         for motor in command.motor_commands.iter().skip(2) {
             assert_eq!(
                 (motor.kp, motor.kd, motor.velocity, motor.torque),
@@ -179,5 +189,47 @@ async fn timed_seated_test_records_and_returns_firmware_to_damping() {
     assert!(result["test_error"].is_null());
     assert!(result["damping_error"].is_null());
     assert!(result["recording_error"].is_null());
+    let experiment: serde_json::Value =
+        serde_json::from_slice(&fs::read(log.join("experiment.json")).unwrap()).unwrap();
+    assert_eq!(experiment["gain_overrides"], json!({"kp": {"yaw": 12.0}}));
+    assert_eq!(experiment["head_motion"], json!("LookAround"));
     ctx.shutdown().unwrap();
+}
+
+#[test]
+fn gain_options_require_head_only_and_valid_values() {
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    assert!(Cli::try_parse_from(["test", "--head-test-yaw-kp", "12"]).is_err());
+    for value in ["NaN", "inf", "-1", "1e99"] {
+        assert!(
+            Cli::try_parse_from([
+                "test",
+                "--head-only-test",
+                "scan",
+                "--head-test-yaw-kp",
+                value
+            ])
+            .is_err()
+        );
+    }
+    let cli = Cli::try_parse_from([
+        "test",
+        "--head-only-test",
+        "scan",
+        "--head-test-yaw-kp",
+        "12",
+        "--head-test-pitch-kd",
+        "1.4",
+    ])
+    .unwrap();
+    assert_eq!(cli.args.head_test_yaw_kp, Some(12.0));
+    assert_eq!(cli.args.head_test_pitch_kd, Some(1.4));
+    assert_eq!(cli.args.head_test_yaw_kd, None);
 }

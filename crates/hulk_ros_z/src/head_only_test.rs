@@ -27,8 +27,21 @@ use types::{
 pub enum Pattern {
     Zero,
     Hold,
+    /// Left -> center -> right -> center, with pitch changes (LookAround).
     Scan,
     LookAround,
+    /// Original center-once, then left/right lost-ball search.
+    Search,
+}
+
+impl Pattern {
+    fn head_motion(self) -> HeadMotion {
+        match self {
+            Self::Zero | Self::Hold => HeadMotion::ZeroAngles,
+            Self::Scan | Self::LookAround => HeadMotion::LookAround,
+            Self::Search => HeadMotion::SearchForLostBall,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -45,6 +58,26 @@ pub struct Args {
     /// Fixed hold pitch, in radians; used only by the hold pattern.
     #[arg(long, default_value_t = 0.7, allow_hyphen_values = true)]
     head_test_pitch: f32,
+    /// Override only the active yaw proportional gain for this experiment.
+    #[arg(long, requires = "head_only_test", value_parser = parse_gain)]
+    head_test_yaw_kp: Option<f32>,
+    /// Override only the active yaw derivative gain for this experiment.
+    #[arg(long, requires = "head_only_test", value_parser = parse_gain)]
+    head_test_yaw_kd: Option<f32>,
+    /// Override only the active pitch proportional gain for this experiment.
+    #[arg(long, requires = "head_only_test", value_parser = parse_gain)]
+    head_test_pitch_kp: Option<f32>,
+    /// Override only the active pitch derivative gain for this experiment.
+    #[arg(long, requires = "head_only_test", value_parser = parse_gain)]
+    head_test_pitch_kd: Option<f32>,
+}
+
+fn parse_gain(value: &str) -> Result<f32, String> {
+    let gain: f32 = value.parse().map_err(|_| "gain must be a number")?;
+    if !gain.is_finite() || gain < 0.0 {
+        return Err("gain must be finite and nonnegative".into());
+    }
+    Ok(gain)
 }
 
 pub fn prepare(
@@ -88,9 +121,25 @@ pub fn prepare(
         Some(Pattern::Hold) => json!({"yaw": args.head_test_yaw, "pitch": args.head_test_pitch}),
         _ => serde_json::Value::Null,
     };
+    let mut head_overrides = json!({"injected_head_joints": injected});
+    let mut gain_overrides = json!({});
+    for (joint, gain, value) in [
+        ("yaw", "kp", args.head_test_yaw_kp),
+        ("yaw", "kd", args.head_test_yaw_kd),
+        ("pitch", "kp", args.head_test_pitch_kp),
+        ("pitch", "kd", args.head_test_pitch_kd),
+    ] {
+        if let Some(value) = value {
+            ensure!(value.is_finite() && value >= 0.0, "invalid {joint} {gain}");
+            gain_overrides[gain][joint] = json!(value);
+        }
+    }
+    if gain_overrides != json!({}) {
+        head_overrides["joint_control"] = gain_overrides.clone();
+    }
     fs::write(
         overrides.join("head_motion.json5"),
-        serde_json::to_vec_pretty(&json!({"injected_head_joints": injected}))?,
+        serde_json::to_vec_pretty(&head_overrides)?,
     )?;
     let recording = mcap_recorder::McapRecorderParameters {
         enable: true,
@@ -122,7 +171,9 @@ pub fn prepare(
         log.join("experiment.json"),
         serde_json::to_vec_pretty(&json!({
             "mode": "head_only", "pattern": format!("{:?}", args.head_only_test),
+            "head_motion": args.head_only_test.map(Pattern::head_motion),
             "seconds": args.head_test_seconds, "yaw": args.head_test_yaw, "pitch": args.head_test_pitch,
+            "gain_overrides": gain_overrides,
             "hardware_id": hardware_id, "namespace": namespace,
             "arguments": std::env::args().collect::<Vec<_>>(), "source_parameter_layers": layers,
             "body": {"kp": 0, "kd": 1, "velocity": 0, "torque": 0},
@@ -136,11 +187,7 @@ pub async fn run(ctx: Arc<Context>, args: &Args, log: PathBuf, namespace: &str) 
     let pattern = args
         .head_only_test
         .ok_or_else(|| eyre!("head-only pattern missing"))?;
-    let head = match pattern {
-        Pattern::Zero | Pattern::Hold => HeadMotion::ZeroAngles,
-        Pattern::Scan => HeadMotion::SearchForLostBall,
-        Pattern::LookAround => HeadMotion::LookAround,
-    };
+    let head = pattern.head_motion();
     let node = ctx.create_node("head_only_test").build().await?;
     let qos = QosProfile {
         history: QosHistory::from_depth(1),

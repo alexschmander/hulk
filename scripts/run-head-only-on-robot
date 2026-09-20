@@ -5,13 +5,36 @@ pattern=${1:-zero}
 seconds=${2:-10}
 yaw=${3:-0}
 pitch=${4:-0.7}
-[[ "$pattern" =~ ^(zero|scan|look-around|hold)$ ]] || exit 1
+[[ "$pattern" =~ ^(zero|scan|look-around|search|hold)$ ]] || exit 1
 [[ "$seconds" =~ ^[0-9]+$ ]] && ((10#$seconds >= 1 && 10#$seconds <= 600)) || exit 1
 for angle in "$yaw" "$pitch"; do [[ "$angle" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || exit 1; done
+shift "$(( $# < 4 ? $# : 4 ))"
+gain_args=()
+gain_label=
+run_id=
+while (( $# )); do
+    case "$1" in
+        --yaw-kp|--yaw-kd|--pitch-kp|--pitch-kd) ;;
+        --run-id)
+            [[ "${2:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,120}$ ]] || { echo 'Invalid run ID' >&2; exit 1; }
+            run_id=$2
+            shift 2
+            continue
+            ;;
+        *) echo "Unknown gain option: $1" >&2; exit 1 ;;
+    esac
+    [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'Gains must be nonnegative decimal numbers' >&2; exit 1; }
+    gain_args+=("--head-test-${1#--}" "$2")
+    gain_label+="-${1#--}$2"
+    shift 2
+done
 cd "$kit"
 sha256sum --status -c SHA256SUMS
 exec 9>/home/booster/hulk/.head-only-test.lock
 flock -n 9 || { echo 'Another head-only test is running' >&2; exit 1; }
+mkdir -p "$kit/logs"
+log="$kit/logs/${run_id:-$(date -u +%Y%m%dT%H%M%S)-$pattern$gain_label}"
+[[ ! -e "$log" && ! -e "$log.out" && ! -e "$log.err" ]] || { echo "Run already exists: $log" >&2; exit 1; }
 sudo systemctl stop hulk
 sudo systemctl is-active --quiet hulk-runtime
 podman=/usr/local/bin/podman
@@ -19,8 +42,6 @@ if sudo "$podman" exec hulk pgrep -x hulk_ros_z >/dev/null; then
     echo 'A HULK process is still running; refusing concurrent control' >&2
     exit 1
 fi
-mkdir -p "$kit/logs"
-log="$kit/logs/$(date -u +%Y%m%dT%H%M%S)-$pattern"
 pid_file="$log.pid"
 stop_file="$log.stop"
 child=
@@ -39,6 +60,7 @@ sudo "$podman" exec --user "$(id -u booster)" --workdir "$kit" \
     --router tcp/127.0.0.1:7447 --log-path "$log" \
     --head-only-test "$pattern" --head-test-seconds "$seconds" \
     --head-test-yaw "$yaw" --head-test-pitch "$pitch" \
+    "${gain_args[@]}" \
     > >(tee "$log.out") 2> >(tee "$log.err" >&2) &
 child=$!
 status=0

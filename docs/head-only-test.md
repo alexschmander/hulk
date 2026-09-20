@@ -11,7 +11,7 @@ The SDK uses one mode for the robot, so the test enters **Custom** mode with act
 head commands and damped body commands. It returns to SDK **Damping** afterward.
 It never requests Prepare or Walking.
 
-## Tomorrow
+## Run
 
 The prepared ARM64 kit is in `target/head-only-kit`. Use the robot's actual IP:
 
@@ -26,6 +26,12 @@ test. It requires SSH access as `booster`, sudo, and the existing `hulk-runtime`
 container and SDK/Zenoh bridge. The regular application binary and parameters are
 not replaced. The normal service remains stopped after the test.
 
+The DDS bridge allowlist must permit `rt/joint_ctrl` in the Zenoh-to-DDS
+direction (the bridge configuration may use the DDS name `joint_ctrl`). A
+successful Custom-mode RPC does not prove joint commands can cross the bridge.
+The first four recordings on 2026-09-20 were made before that allowlist entry was
+added and cannot establish active tracking performance.
+
 Once the first test works, collect these runs with the same supported posture:
 
 ```bash
@@ -33,10 +39,10 @@ Once the first test works, collect these runs with the same supported posture:
 ./scripts/head-only-test run 10.1.24.42 hold 15 0 0.7
 # The right endpoint that failed to settle in the earlier recording.
 ./scripts/head-only-test run 10.1.24.42 hold 15 -0.95 0.7
-# Search scan, with the current production trajectory and gains.
+# Three-waypoint scan, including pitch changes.
 ./scripts/head-only-test run 10.1.24.42 scan 45
-# Optional localization scan.
-./scripts/head-only-test run 10.1.24.42 look-around 30
+# Original side-to-side search for comparison with earlier recordings.
+./scripts/head-only-test run 10.1.24.42 search 30
 ./scripts/head-only-test fetch 10.1.24.42
 ```
 
@@ -53,6 +59,111 @@ Loss of fresh sensor data, commands, head-service replies, or hardware state
 disables head output and latches a fault. Restart the test after resolving the
 cause; Prepare does not rearm this runtime. Keep the robot's physical stop
 available for failures outside the process, including loss of transport.
+
+## Scan path
+
+`scan` now uses production **LookAround**: left `(yaw=0.95, pitch=0.5)` -> center
+`(0, 0.7)` -> right `(-0.95, 0.5)` -> center, then repeats. Angles are radians.
+It exercises yaw reversals, a center waypoint, and pitch changes. Arrival, dwell,
+and timeout use the existing LookAround parameters (currently 1 s dwell and 2 s
+maximum per waypoint). `look-around` remains an equivalent name.
+
+`search` preserves the old scan: center once, then alternate left/right at pitch
+0.7. Use it for comparisons with recordings from before this change. The production
+lost-ball search behavior itself is unchanged. Each experiment now also records
+its actual `head_motion`, so the two scan types can be distinguished explicitly.
+
+## Gain campaign
+
+The campaign runs a fixed matrix for one selected joint. Defaults are:
+
+| Stage | kp | kd |
+|---|---:|---:|
+| Baseline | 10 | 1.2 |
+| Higher proportional gain | 12 | 1.2 |
+| Higher derivative gain | 10 | 1.4 |
+| Combined | 12 | 1.4 |
+
+For each pair, it holds center `(0, 0.7)`, left `(0.95, 0.5)`, and right
+`(-0.95, 0.5)` for 15 seconds each, then runs the three-waypoint scan for 30 seconds.
+That is 16 recordings and 5 minutes of active testing, plus startup/transfers and
+2 seconds in damping between runs. Every run starts a separate timed process and
+returns to firmware damping. The other head joint is explicitly fixed at kp=10,
+kd=1.2. Body damping, trajectory limits, and update rates remain unchanged.
+
+Preview without contacting the robot or requiring a prepared kit:
+
+```bash
+./scripts/head-only-test campaign 10.1.24.43 --dry-run
+```
+
+Run the yaw campaign with the robot seated/supported and the bridge configured:
+
+```bash
+./scripts/head-only-test campaign 10.1.24.43
+```
+
+Remain with the robot, leave the head untouched during measurements, and use
+Ctrl-C if oscillation or roughness increases. Ctrl-C stops the campaign and
+requests damping; no subsequent gain setting starts. `stop ROBOT_IP` during an
+active run also prevents progression once that run's result is downloaded. The
+campaign does not automatically judge physical smoothness or choose a winning
+setting. Completion means the timed run finished and finalized its outputs; it
+does not prove commands crossed the bridge or the head tracked correctly.
+
+It downloads and verifies `result.json` after every run. A failed run, interruption,
+incomplete result, or failed download stops progression. Completed recordings and
+available partial recordings are retained. Each run has a unique campaign/index/
+waypoint name. The local manifest lives at
+`logs/head-only/ROBOT_IP/BUILD_ID/campaigns/CAMPAIGN_ID.json`, with exact commands,
+gains, run IDs, statuses, and results. Each run's recording directory is a sibling
+of `campaigns/`, named by its `run_id`. Do not rebuild the kit during a campaign;
+the script stops if it detects a different build ID. Restarting a campaign creates
+new IDs and does not overwrite earlier runs. The normal HULK service stays stopped.
+
+After examining yaw results, the same campaign can isolate pitch, or use a custom
+matrix and durations:
+
+```bash
+./scripts/head-only-test campaign 10.1.24.43 --joint pitch
+./scripts/head-only-test campaign 10.1.24.43 --joint yaw --kp 10 11 12 --kd 1.2 1.3 --hold-seconds 15 --scan-seconds 30 --dry-run
+```
+
+Values are traversed with kd outermost, kp innermost. A custom matrix replaces the
+defaults for the specified gain; include the baseline explicitly when comparing.
+The campaign uses the current default LookAround waypoint coordinates for its
+holds; keep those scan waypoints unchanged when comparing campaign results.
+Python 3 on the laptop is required; no extra Python packages are needed.
+
+Compare final five-second hold error, overshoot, settling, measured torque,
+constant-speed ripple, and scan arrival/timeouts. Raising kp may reduce endpoint
+error but amplify the response to position steps. Compare each single-gain change
+against baseline before interpreting the combined change. The earlier holds made
+before the bridge correction cannot replace this baseline.
+
+## Manual gain testing
+
+Manual runs remain available, independently of campaigns:
+
+```bash
+./scripts/head-only-test run 10.1.24.43 hold 15 -0.95 0.5 --yaw-kp 12 --yaw-kd 1.2
+./scripts/head-only-test run 10.1.24.43 scan 30 --yaw-kp 12 --yaw-kd 1.4
+./scripts/head-only-test run 10.1.24.43 scan 30 --pitch-kp 12 --pitch-kd 1.4
+./scripts/head-only-test run 10.1.24.43 search 30 --yaw-kp 10 --yaw-kd 1.2
+./scripts/head-only-test fetch 10.1.24.43
+```
+
+Optional flags `--yaw-kp`, `--yaw-kd`, `--pitch-kp`, `--pitch-kd` override only
+specified active head gains for that run. Others retain their parameter-layer
+values. They do not modify deployment parameters or head damping-mode gains.
+No flags means ordinary baseline parameters, even after a tuned run.
+
+Manual run names include explicit gain flags. `--run-id NAME` optionally supplies
+an exact directory name (letters, digits, underscores, hyphens; maximum 121
+characters); an existing run name is rejected. Campaigns use this option to link
+recordings to their manifest. `experiment.json` records `gain_overrides`,
+`parameters/test/head_motion.json5` contains the override layer, and
+`head_motion/diagnostics` records the complete evaluated parameters.
 
 ## Recordings
 
