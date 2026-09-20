@@ -3,7 +3,10 @@ use std::{path::PathBuf, sync::Arc};
 
 use bevy::prelude::Resource;
 use booster::{LowCommand, LowState};
-use color_eyre::{Result, eyre::eyre};
+use color_eyre::{
+    Result,
+    eyre::{ensure, eyre},
+};
 use coordinate_systems::{Ground, Robot};
 use linear_algebra::Isometry3;
 use projection::camera_matrix::CameraMatrix;
@@ -31,6 +34,7 @@ pub struct StackConfiguration {
     pub namespace: String,
     pub parameter_layers: Vec<PathBuf>,
     pub launch_nodes: bool,
+    pub head_only: bool,
 }
 
 #[derive(Resource)]
@@ -47,7 +51,8 @@ pub struct Robotics {
     ground: Publisher<TimeWrapper<Option<Isometry3<Ground, Robot>>>>,
     behavior_inputs: crate::behavior_inputs::BehaviorInputs,
     injection: watch::Sender<Option<MotionCommand>>,
-    injection_task: JoinHandle<()>,
+    injection_task: Option<JoinHandle<()>>,
+    head_commands: Option<Publisher<MotionCommand>>,
     injection_status: watch::Receiver<String>,
     motion: ros_z::cache::Cache<MotionCommand>,
     execution: ros_z::cache::Cache<types::motion_execution::MotionExecution>,
@@ -108,6 +113,7 @@ impl Robotics {
             &runtime,
             node.clone(),
             &configuration.namespace,
+            configuration.head_only,
         );
         let latest = QosProfile {
             history: QosHistory::from_depth(1),
@@ -143,18 +149,38 @@ impl Robotics {
             .build()
             .await?;
         let behavior_inputs = crate::behavior_inputs::BehaviorInputs::new(&node).await?;
-        let client = RemoteParameterClient::new(
-            node.clone(),
-            format!(
-                "{}/behavior_node",
-                configuration.namespace.trim_end_matches('/')
-            ),
-        )?;
         let (injection, updates) = watch::channel(None);
-        let (injection_status_tx, injection_status) =
-            watch::channel("Behavior controls motion".into());
-        let injection_task =
-            runtime.spawn(synchronize_injection(client, updates, injection_status_tx));
+        let (injection_status_tx, injection_status) = watch::channel(
+            if configuration.head_only {
+                "Body damped; head stopped"
+            } else {
+                "Behavior controls motion"
+            }
+            .into(),
+        );
+        let (injection_task, head_commands) = if configuration.head_only {
+            (
+                None,
+                Some(
+                    node.publisher("behavior/motion_command")
+                        .qos(latest)
+                        .build()
+                        .await?,
+                ),
+            )
+        } else {
+            let client = RemoteParameterClient::new(
+                node.clone(),
+                format!(
+                    "{}/behavior_node",
+                    configuration.namespace.trim_end_matches('/')
+                ),
+            )?;
+            (
+                Some(runtime.spawn(synchronize_injection(client, updates, injection_status_tx))),
+                None,
+            )
+        };
         let game = node
             .publisher("filtered_game_controller_state")
             .qos(retained)
@@ -210,7 +236,12 @@ impl Robotics {
             }
         });
         let (status_tx, status) = watch::channel(if configuration.launch_nodes {
-            "Behavior and motion nodes running".to_owned()
+            if configuration.head_only {
+                "Head-only mode · torso supported · body damping"
+            } else {
+                "Behavior and motion nodes running"
+            }
+            .to_owned()
         } else {
             "External I/O only (robotics nodes disabled)".to_owned()
         });
@@ -230,16 +261,22 @@ impl Robotics {
         });
         let ctx = context.clone();
         let launch = configuration.launch_nodes;
+        let head_only = configuration.head_only;
         let stack_task = runtime.spawn(async move {
             if !launch {
                 return;
             }
             let mut tasks = JoinSet::new();
             tasks.spawn(crate::simulated_sdk::run(ctx.clone()));
-            tasks.spawn(behavior_node::node::run_boxed(ctx.clone()));
-            tasks.spawn(ball_state_composer::run_boxed(ctx.clone()));
-            tasks.spawn(rule_obstacle_composer::run_boxed(ctx.clone()));
-            tasks.spawn(motion::run_boxed(ctx.clone()));
+            if head_only {
+                tasks.spawn(motion::run_head_only_boxed(ctx.clone()));
+            } else {
+                tasks.spawn(behavior_node::node::run_boxed(ctx.clone()));
+                tasks.spawn(ball_state_composer::run_boxed(ctx.clone()));
+                tasks.spawn(rule_obstacle_composer::run_boxed(ctx.clone()));
+                tasks.spawn(motion::run_boxed(ctx.clone()));
+                tasks.spawn(motion_inference::run_boxed(ctx.clone()));
+            }
             tasks.spawn(global_parameter_provider::run_boxed(ctx.clone()));
             tasks.spawn(synchronize_field_dimensions(
                 global_parameters,
@@ -248,7 +285,6 @@ impl Robotics {
                 field_layer,
             ));
             tasks.spawn(head_motion::node::run_boxed(ctx.clone()));
-            tasks.spawn(motion_inference::run_boxed(ctx.clone()));
             tasks.spawn(hardware_interface::run_boxed(ctx));
             if let Some(result) = tasks.join_next().await {
                 let reason = match result {
@@ -277,6 +313,7 @@ impl Robotics {
             behavior_inputs,
             injection,
             injection_task,
+            head_commands,
             injection_status,
             game,
             field,
@@ -298,6 +335,17 @@ impl Robotics {
             && let Some(reason) = &execution.fault
         {
             return format!("Motion fault: {reason}");
+        }
+        if self.is_head_only() {
+            return format!(
+                "{} · {}",
+                self.status.borrow().as_str(),
+                if self.injection_enabled {
+                    "head command enabled"
+                } else {
+                    "head stopped"
+                }
+            );
         }
         self.inference_status.borrow().as_ref().map_or_else(
             || {
@@ -322,7 +370,27 @@ impl Robotics {
             .unwrap_or_default()
     }
 
+    pub fn is_head_only(&self) -> bool {
+        self.configuration.head_only
+    }
+
+    pub fn validate_motion(&self, command: &MotionCommand) -> Result<()> {
+        ensure!(
+            if self.is_head_only() {
+                matches!(
+                    command,
+                    MotionCommand::HeadOnly { .. } | MotionCommand::Damping
+                )
+            } else {
+                !matches!(command, MotionCommand::HeadOnly { .. })
+            },
+            "command unavailable in this mode; start with --head-only for HeadOnly, or without it for body motion"
+        );
+        Ok(())
+    }
+
     pub fn inject_current_motion(&mut self) -> Result<()> {
+        self.validate_motion(&self.input_motion)?;
         self.injection_enabled = true;
         // An explicit Send also overrides a Twix edit to the same previously sent command.
         self.injection.send_replace(Some(self.input_motion.clone()));
@@ -344,6 +412,15 @@ impl Robotics {
             *current = next;
             true
         });
+        if let Some(commands) = &self.head_commands {
+            let command = if self.injection_enabled {
+                &self.input_motion
+            } else {
+                &MotionCommand::Damping
+            };
+            self.validate_motion(command)?;
+            self.runtime.block_on(commands.publish(command))?;
+        }
         self.runtime.block_on(async {
             self.behavior_inputs.publish_game(&self.input_game).await?;
             self.game.publish(&self.input_game).await?;
@@ -408,7 +485,9 @@ impl Robotics {
     }
 
     pub fn restart(&mut self) -> Result<()> {
-        self.injection_task.abort();
+        if let Some(task) = &self.injection_task {
+            task.abort();
+        }
         self.inference_status_task.abort();
         self.command_task.abort();
         self.stack_task.abort();
@@ -518,7 +597,9 @@ async fn synchronize_field_dimensions(
 
 impl Drop for Robotics {
     fn drop(&mut self) {
-        self.injection_task.abort();
+        if let Some(task) = &self.injection_task {
+            task.abort();
+        }
         self.inference_status_task.abort();
         self.command_task.abort();
         self.stack_task.abort();
@@ -574,6 +655,7 @@ mod tests {
                         layer.path().to_owned(),
                     ],
                     launch_nodes: true,
+                    head_only: false,
                 },
                 clock.clone(),
             )
@@ -848,6 +930,7 @@ mod tests {
                         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../etc/parameters/base"),
                     ],
                     launch_nodes: false,
+                    head_only: false,
                 },
                 clock.clone(),
             )
@@ -1212,3 +1295,6 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod head_only_tests;

@@ -4,7 +4,7 @@ use bevy::{
     asset::RenderAssetUsages, camera::visibility::RenderLayers, light::NotShadowCaster,
     mesh::PrimitiveTopology, prelude::*,
 };
-use mujoco_rs::prelude::{MjData, MjSpec, MjtObj};
+use mujoco_rs::prelude::{MjData, MjSpec, MjtObj, SpecItem};
 
 use super::object::{ObjectKind, ObjectPart};
 use crate::bevy_mujoco::{MjcfObject, MujocoBody, from_mujoco};
@@ -287,6 +287,23 @@ impl RobotAssets {
         });
         root
     }
+}
+
+/// Hold the torso at the MJCF bench height while all 22 motor joints remain dynamic.
+pub fn head_only_model() -> MjcfObject {
+    MjcfObject::from_factory(
+        || {
+            let mut spec = MjSpec::from_xml(ROBOT_MJCF).map_err(|error| error.to_string())?;
+            let joint = spec
+                .joint_mut("world_joint")
+                .ok_or_else(|| "K1 model is missing its free root joint".to_owned())?
+                .element_mut_pointer();
+            // SAFETY: this live joint belongs to spec, and no borrowed element survives deletion.
+            unsafe { spec.delete_element(joint) }.map_err(|error| error.to_string())?;
+            Ok(spec)
+        },
+        "Trunk",
+    )
 }
 
 pub fn spawn(commands: &mut Commands, assets: &RobotAssets, transform: Transform) -> Entity {

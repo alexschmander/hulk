@@ -65,9 +65,12 @@ fn publish_field_dimensions(parameters: Res<CurrentSimulatorParameters>, io: Res
     }
 }
 
-fn spawn_robot(mut commands: Commands, assets: Res<ObjectVisualAssets>) {
+fn spawn_robot(mut commands: Commands, assets: Res<ObjectVisualAssets>, io: Res<Robotics>) {
     let robot = robot::spawn(&mut commands, &assets.robot, Transform::default());
     commands.entity(robot).insert(ControlledRobot);
+    if io.is_head_only() {
+        commands.entity(robot).insert(robot::head_only_model());
+    }
 }
 
 fn bind_robot(
@@ -150,12 +153,14 @@ fn reset_robot(
         return;
     };
     robot_binding.reset_joints(world.data_mut());
-    world
-        .set_object_pose(
-            *robot,
-            Transform::from_xyz(0.0, assets.robot.ground_offset(), 0.0),
-        )
-        .expect("reset robot pose");
+    if !io.is_head_only() {
+        world
+            .set_object_pose(
+                *robot,
+                Transform::from_xyz(0.0, assets.robot.ground_offset(), 0.0),
+            )
+            .expect("reset robot pose");
+    }
     // Preserve monotonic MuJoCo time; restart nodes to clear controller histories and cached commands.
     if let Err(error) = io.restart() {
         control.message = Some(format!("Could not restart motion stack: {error:#}"));

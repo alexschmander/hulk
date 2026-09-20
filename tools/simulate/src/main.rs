@@ -53,6 +53,9 @@ struct Args {
     /// Publish sensors and accept raw joint commands without launching robotics nodes.
     #[arg(long)]
     no_robotics: bool,
+    /// Run only head control with body damping and a supported torso, without behavior or inference.
+    #[arg(long, conflicts_with = "no_robotics")]
+    head_only: bool,
 }
 
 fn main() -> Result<()> {
@@ -107,6 +110,7 @@ fn main() -> Result<()> {
             namespace: args.robot_namespace,
             parameter_layers,
             launch_nodes: !args.no_robotics,
+            head_only: args.head_only,
         },
         Clock::logical(RosTime::zero()),
     ))?;
@@ -175,4 +179,20 @@ fn setup_scene(mut commands: Commands) {
         DirectionalLight::default(),
         Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn head_only_launch_requires_the_managed_stack() {
+        assert!(
+            Args::try_parse_from(["simulate", "--head-only"])
+                .unwrap()
+                .head_only
+        );
+        assert!(!Args::try_parse_from(["simulate"]).unwrap().head_only);
+        assert!(Args::try_parse_from(["simulate", "--head-only", "--no-robotics"]).is_err());
+    }
 }

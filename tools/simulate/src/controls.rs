@@ -29,7 +29,7 @@ use crate::{
     scene::ball::SpawnedBalls,
     simulation::{ControlledRobot, SimulationControl},
 };
-use choices::{choices, is_angle, value, variant};
+use choices::{is_angle, value, variant};
 
 pub const PANEL_WIDTH: f32 = 480.0;
 
@@ -37,14 +37,18 @@ fn look_at_first_ball(
     world: &MujocoWorld,
     balls: &SpawnedBalls,
     robot: Entity,
+    head_only: bool,
 ) -> color_eyre::Result<MotionCommand> {
     let target = first_ball_in_ground(world, balls, robot)?;
-    Ok(MotionCommand::Stand {
-        head: HeadMotion::LookAt {
-            target: point![target.x, target.y],
-            height_above_ground: target.z,
-            image_region_target: ImageRegion::Center,
-        },
+    let head = HeadMotion::LookAt {
+        target: point![target.x, target.y],
+        height_above_ground: target.z,
+        image_region_target: ImageRegion::Center,
+    };
+    Ok(if head_only {
+        MotionCommand::HeadOnly { head }
+    } else {
+        MotionCommand::Stand { head }
     })
 }
 
@@ -129,6 +133,7 @@ struct Editor {
     pending: Option<(&'static str, Value)>,
     message_error: bool,
     track_ball: bool,
+    head_only: bool,
 }
 
 impl Default for Editor {
@@ -145,6 +150,7 @@ impl Default for Editor {
             pending: None,
             message_error: false,
             track_ball: false,
+            head_only: false,
             message: "Edit a command, then press Send. Numbers support dragging and text entry."
                 .into(),
         }
@@ -278,7 +284,14 @@ fn text(commands: &mut Commands, parent: Entity, content: impl Into<String>) {
     ));
 }
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, io: Res<Robotics>, mut editor: ResMut<Editor>) {
+    editor.head_only = io.is_head_only();
+    if editor.head_only {
+        editor.draft["motion"] = value(MotionCommand::HeadOnly {
+            head: HeadMotion::ZeroAngles,
+        });
+        editor.message = "Choose a head pattern, press Send command, then Run. Stop head motion returns to damping.".into();
+    }
     let root = commands
         .spawn((
             Node {
@@ -298,7 +311,16 @@ fn setup(mut commands: Commands) {
         ))
         .id();
     let header = row(&mut commands, root);
-    heading(&mut commands, header, "Motion studio", 24.0);
+    heading(
+        &mut commands,
+        header,
+        if editor.head_only {
+            "Head motion studio"
+        } else {
+            "Motion studio"
+        },
+        24.0,
+    );
     let toolbar = row(&mut commands, root);
     commands.spawn_scene(bsn! {
         @FeathersButton { @variant: ButtonVariant::Primary }
@@ -332,6 +354,9 @@ fn setup(mut commands: Commands) {
     let groups = row(&mut commands, root);
     commands.entity(groups).insert(ParameterNavigation);
     for &(key, title, _, _) in &crate::motion_parameters::GROUPS {
+        if editor.head_only && key == "motion_inference" {
+            continue;
+        }
         commands.spawn_scene(bsn! {
             @FeathersButton ChildOf(groups) template_value(ParameterTab(key))
             Node { height: px(30), flex_grow: 1.0 }
@@ -429,6 +454,7 @@ fn setup(mut commands: Commands) {
             } else {
                 let decoded = if editor.tab == "motion" {
                     serde_json::from_value::<MotionCommand>(editor.draft["motion"].clone()).map_err(color_eyre::Report::from).and_then(|mut command| {
+                        io.validate_motion(&command)?;
                         fill_kick_ground_truth(&mut command, &world, &balls, *robot, parameters.parameters.field_dimensions.length)?;
                         editor.track_ball = false;
                         editor.draft["motion"] = value(&command);
@@ -594,6 +620,9 @@ fn update_status(
                 MotionCommand::Kick { .. } => {
                     "Active vector: amber = kick direction from ball (1 m)".into()
                 }
+                _ if io.is_head_only() => {
+                    "Torso supported · body joints damped · no walking policy".into()
+                }
                 _ => "Command vectors appear when behavior outputs a walk or kick.".into(),
             },
             PanelLabel::KickBallOrigin => if balls.0.is_empty() {
@@ -627,7 +656,7 @@ fn update_status(
             }
             .into(),
             PanelLabel::Telemetry => format!(
-                "{}     {:.3} s     Joints: {}\nBehavior output: {}",
+                "{}     {:.3} s     Joints: {}\nActive command: {}",
                 if *mode == SimulationMode::Paused {
                     "Paused"
                 } else {
@@ -644,12 +673,22 @@ fn update_status(
             PanelLabel::Submit => if editor.tab == "parameters" {
                 if busy { "Applying..." } else { "Apply live" }
             } else if editor.tab == "motion" {
-                "Inject command"
+                if io.is_head_only() {
+                    "Send command"
+                } else {
+                    "Inject command"
+                }
             } else {
                 "Send game state"
             }
             .into(),
             PanelLabel::Details => match editor.tab {
+                "motion" if io.is_head_only() => {
+                    "Head control only. Stop returns to damping; reset clears a fault.".into()
+                }
+                "game" if io.is_head_only() => {
+                    "Field side configures the head scan patterns; behavior is disabled.".into()
+                }
                 "motion" => "Inject a body/head override, or clear it to run behavior.".into(),
                 "game" => "Match state and field side drive autonomous behavior.".into(),
                 _ => "Tune the running nodes. Applying keeps the robot and simulation running."
@@ -800,26 +839,27 @@ fn update_ball_target(
     if !editor.track_ball {
         return;
     }
-    let result = look_at_first_ball(&world, &balls, *robot).and_then(|command| {
-        let next = value(&command);
-        if next != value(&io.input_motion) {
-            io.injection_enabled = true;
-            io.input_motion = command;
-            io.publish_inputs()?;
-        }
-        editor.draft["motion"] = next;
-        // Update the displayed coordinates in place so tracking does not recreate
-        // the form or interrupt clicks. This also runs while dragging pauses physics.
-        for (entity, path, input) in &numbers {
-            if let Some(number) = editor.draft.pointer(&path.0).and_then(Value::as_f64) {
-                let next = NumberInputValue::F64(number);
-                if *input != next {
-                    commands.entity(entity).insert(next);
+    let result =
+        look_at_first_ball(&world, &balls, *robot, io.is_head_only()).and_then(|command| {
+            let next = value(&command);
+            if next != value(&io.input_motion) {
+                io.injection_enabled = true;
+                io.input_motion = command;
+                io.publish_inputs()?;
+            }
+            editor.draft["motion"] = next;
+            // Update the displayed coordinates in place so tracking does not recreate
+            // the form or interrupt clicks. This also runs while dragging pauses physics.
+            for (entity, path, input) in &numbers {
+                if let Some(number) = editor.draft.pointer(&path.0).and_then(Value::as_f64) {
+                    let next = NumberInputValue::F64(number);
+                    if *input != next {
+                        commands.entity(entity).insert(next);
+                    }
                 }
             }
-        }
-        Ok(())
-    });
+            Ok(())
+        });
     if let Err(error) = result {
         editor.track_ball = false;
         editor.message_error = true;
@@ -873,7 +913,7 @@ fn rebuild_form(
                 "",
                 &editor.draft["parameters"][group],
                 false,
-                &editor.expanded,
+                &editor,
             );
         } else {
             text(&mut commands, form, "Connecting to the running node...");
@@ -882,12 +922,12 @@ fn rebuild_form(
         if editor.tab == "motion" {
             commands.spawn_scene(bsn! {
                 @FeathersButton ChildOf(form) Node { height: px(32), width: percent(100) }
-                Children[label("Clear injected motion — let behavior control")]
+                Children[label(if editor.head_only { "Stop head motion" } else { "Clear injected motion — let behavior control" })]
                 on(|_: On<Activate>, mut io: ResMut<Robotics>, mut editor: ResMut<Editor>| {
                     editor.track_ball = false;
                     let result = io.clear_injection();
                     editor.message_error = result.is_err();
-                    editor.message = result.map_or_else(|e| e.to_string(), |()| "Clearing motion override; behavior follows Game settings.".into());
+                    editor.message = result.map_or_else(|e| e.to_string(), |()| if io.is_head_only() { "Head stopped; damping commanded.".into() } else { "Clearing motion override; behavior follows Game settings.".into() });
                 })
             });
             let shortcuts = row(&mut commands, form);
@@ -901,7 +941,7 @@ fn rebuild_form(
                         editor.message = "Ball tracking stopped; holding the last target".into();
                         return;
                     }
-                    let result = look_at_first_ball(&world, &balls, *robot).and_then(|command| {
+                    let result = look_at_first_ball(&world, &balls, *robot, io.is_head_only()).and_then(|command| {
                         editor.draft["motion"] = value(&command); editor.rebuild = true; io.injection_enabled = true; io.input_motion = command; io.inject_current_motion()
                     });
                     editor.track_ball = result.is_ok();
@@ -926,13 +966,17 @@ fn rebuild_form(
             form,
             &path,
             if editor.tab == "motion" {
-                "Behavior request"
+                if editor.head_only {
+                    "Head command"
+                } else {
+                    "Behavior request"
+                }
             } else {
                 "Match settings"
             },
             &editor.draft[editor.tab],
             true,
-            &editor.expanded,
+            &editor,
         );
     }
 }
@@ -985,7 +1029,7 @@ fn build_field(
     title: &str,
     current: &Value,
     allow_choices: bool,
-    expanded: &HashSet<String>,
+    editor: &Editor,
 ) {
     if matches!(
         path,
@@ -1097,7 +1141,7 @@ fn build_field(
         || path.ends_with("/penalties")
         || path.ends_with("_penalties_last_cycle");
     if collapsible {
-        let open = expanded.contains(path);
+        let open = editor.expanded.contains(path);
         let key = path.to_owned();
         let caption = format!("{}  {title}", if open { "−" } else { "+" });
         commands.spawn_scene(bsn! {
@@ -1131,7 +1175,7 @@ fn build_field(
     }
     if !parameter
         && allow_choices
-        && let Some(options) = choices(path)
+        && let Some(options) = choices::choices_for_mode(path, editor.head_only)
     {
         let row = commands
             .spawn((
@@ -1162,7 +1206,7 @@ fn build_field(
                     "Fields",
                     value,
                     false,
-                    expanded,
+                    editor,
                 );
             }
         }
@@ -1204,15 +1248,7 @@ fn build_field(
                     });
                 }
                 if let Some(value) = fields.get(player) {
-                    build_field(
-                        commands,
-                        row,
-                        &key,
-                        "Current penalty",
-                        value,
-                        false,
-                        expanded,
-                    );
+                    build_field(commands, row, &key, "Current penalty", value, false, editor);
                 }
             }
         } else {
@@ -1228,7 +1264,7 @@ fn build_field(
                     },
                     value,
                     true,
-                    expanded,
+                    editor,
                 );
             }
         }
@@ -1258,7 +1294,7 @@ fn build_field(
                 &item_label,
                 value,
                 true,
-                expanded,
+                editor,
             );
             if path.ends_with("/segments") {
                 let path = path.to_owned();
@@ -1463,6 +1499,7 @@ fn field_label(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::choices::choices;
     use super::*;
     use crate::{
         bevy_mujoco::{MjcfObject, MujocoWorldPlugin},
@@ -1610,6 +1647,7 @@ mod tests {
                         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../etc/parameters/base"),
                     ],
                     launch_nodes: false,
+                    head_only: false,
                 },
                 Clock::logical(Time::zero()),
             )
@@ -1665,6 +1703,7 @@ mod tests {
                 app.world().resource::<MujocoWorld>(),
                 app.world().resource::<SpawnedBalls>(),
                 robot,
+                false,
             )
         };
         assert!(target(&app).is_err());

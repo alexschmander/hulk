@@ -5,8 +5,9 @@ The Bevy scene runs a MuJoCo K1 and a small ROS-Z robotics stack.
 
 On `head-only-motion-simulator`, the simulator changes are rebased onto
 `head-only-motion` without the separate fall-detection commits. The default
-simulator still runs the normal behavior/motion path; the dedicated seated
-head-only test remains available through `scripts/head-only-test`.
+simulator runs the normal behavior/motion path by default. Use `--head-only` for
+the supported head test described below. The live-robot seated test remains
+available separately through `scripts/head-only-test`.
 
 ## Run
 
@@ -41,6 +42,35 @@ Dragging moves the actual MuJoCo ball horizontally at its current height and
 clears its linear/angular velocity. Physics pauses during the drag and resumes
 on release if it was running beforehand. Moving over a sidebar holds the last
 valid scene position. Click the field to clear the selection.
+
+## Head-only simulation
+
+```bash
+./simulator --head-only
+```
+
+In **Commands**, select **HeadOnly**, choose **LookAround** (or another head
+pattern), press **Send command**, then **Run** or Space. The initial draft is
+**HeadOnly → ZeroAngles**; the robot stays in damping until you send a command.
+**Look at first ball** also uses head-only control and follows a dragged ball.
+**Stop head motion** or **Damp robot** returns every joint to damping. Pausing
+freezes physics and logical time; resume to apply a queued command to the motors.
+
+The torso is fixed at the model's initial bench height to represent physical
+support. All motor joints remain dynamic, and body targets use `kp=0`, `kd=1`,
+with zero target velocity and feedforward torque. This does not reproduce a
+specific seated pose or live-robot friction/load conditions.
+
+This mode runs the production head controller, dedicated head-only motion runtime,
+hardware interface, global parameter provider, and simulated SDK. It starts no
+behavior node or body inference and needs no ONNX models/runtime. Only **HeadOnly**
+and **Damping** commands are accepted; walking, kicking, Prepare and get-up are
+unavailable. The Parameters tab exposes Head, Hardware and Joint limits. Game
+settings still supply the field side used by head scans, but do not run behavior.
+
+A fault latches damping. **Reset robot & stack** resets the joint pose and restarts
+the head-only stack with the selected command and current parameter settings.
+`--head-only` cannot be combined with `--no-robotics`.
 
 ## Robotics stack
 
@@ -313,6 +343,7 @@ disabled. To use an existing router:
   Simulator-local defaults (including `hardware_interface`) are loaded first, so
   robotics base/location/robot layers can override them.
 - `--robot-namespace`: namespace shared by the robotics nodes and UI publishers.
+- `--head-only`: supported head control with body damping; no behavior or body inference.
 - `--no-robotics`: run the UI, sensors and raw command receiver without launching nodes;
   useful for testing publishers or running the stack externally.
 

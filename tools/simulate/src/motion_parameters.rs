@@ -55,9 +55,10 @@ pub struct ParameterClient {
 }
 
 impl ParameterClient {
-    pub fn start(runtime: &Handle, node: Arc<Node>, namespace: &str) -> Self {
+    pub fn start(runtime: &Handle, node: Arc<Node>, namespace: &str, head_only: bool) -> Self {
         let clients: Vec<_> = GROUPS
             .iter()
+            .filter(|group| !head_only || group.0 != "motion_inference")
             .map(|&(key, _, target, path)| {
                 (
                     key,
@@ -262,7 +263,12 @@ mod tests {
             .bind_parameter_as::<motion_inference::config::Parameters>("motion_inference")
             .unwrap();
         let ui = Arc::new(context.create_node("ui").build().await.unwrap());
-        let client = ParameterClient::start(&Handle::current(), ui.clone(), "/live_parameter_test");
+        let client = ParameterClient::start(
+            &Handle::current(),
+            ui.clone(),
+            "/live_parameter_test",
+            false,
+        );
         let client_ref = &client;
         let wait = |completion| async move {
             tokio::time::timeout(Duration::from_secs(5), async {

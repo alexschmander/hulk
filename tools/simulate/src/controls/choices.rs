@@ -54,6 +54,19 @@ pub fn motion_choices() -> Vec<Value> {
     .collect()
 }
 
+pub fn choices_for_mode(path: &str, head_only: bool) -> Option<Vec<Value>> {
+    if head_only && path == "/motion" {
+        Some(vec![
+            value(MotionCommand::HeadOnly {
+                head: HeadMotion::ZeroAngles,
+            }),
+            value(MotionCommand::Damping),
+        ])
+    } else {
+        choices(path)
+    }
+}
+
 pub fn segment_choices() -> Vec<Value> {
     [
         PathSegment::LineSegment(LineSegment(point![0.0, 0.0], point![1.0, 0.0])),
@@ -232,6 +245,30 @@ pub fn variant(value: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_only_menu_excludes_body_commands_and_preserves_head_patterns() {
+        let commands = choices_for_mode("/motion", true).unwrap();
+        assert_eq!(commands.len(), 2);
+        for command in commands {
+            let command: MotionCommand = serde_json::from_value(command).unwrap();
+            assert!(matches!(
+                command,
+                MotionCommand::HeadOnly { .. } | MotionCommand::Damping
+            ));
+        }
+        assert!(
+            !choices_for_mode("/motion", false)
+                .unwrap()
+                .iter()
+                .any(|v| v.get("HeadOnly").is_some())
+        );
+        for head in choices_for_mode("/motion/HeadOnly/head", true).unwrap() {
+            let command: MotionCommand =
+                serde_json::from_value(serde_json::json!({"HeadOnly": {"head": head}})).unwrap();
+            assert!(matches!(command, MotionCommand::HeadOnly { .. }));
+        }
+    }
 
     #[test]
     fn every_motion_and_nested_head_variant_round_trips() {
