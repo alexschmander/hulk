@@ -237,7 +237,6 @@ impl Robotics {
             let mut tasks = JoinSet::new();
             tasks.spawn(crate::simulated_sdk::run(ctx.clone()));
             tasks.spawn(behavior_node::node::run_boxed(ctx.clone()));
-            tasks.spawn(fall_detection::run_boxed(ctx.clone()));
             tasks.spawn(ball_state_composer::run_boxed(ctx.clone()));
             tasks.spawn(rule_obstacle_composer::run_boxed(ctx.clone()));
             tasks.spawn(motion::run_boxed(ctx.clone()));
@@ -540,10 +539,7 @@ mod tests {
         use crate::bevy_mujoco::{MjcfObject, MujocoWorld, MujocoWorldPlugin, SimulationMode};
         use bevy::prelude::*;
         use ros_z::time::Time;
-        use types::{
-            fall_detection::{FALL_DETECTION_TOPIC, FallDetection},
-            hardware_status::{HARDWARE_STATUS_TOPIC, HardwareStatus},
-        };
+        use types::hardware_status::{HARDWARE_STATUS_TOPIC, HardwareStatus};
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let router = format!("tcp/127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -557,7 +553,7 @@ mod tests {
         )
         .unwrap();
         let clock = Clock::logical(Time::zero());
-        let (server, mut io, fall, hardware, inference) = runtime.block_on(async {
+        let (server, mut io, hardware, inference) = runtime.block_on(async {
             let server = ContextBuilder::default()
                 .with_mode("router")
                 .disable_multicast_scouting()
@@ -587,14 +583,6 @@ mod tests {
                 reliability: ros_z::qos::QosReliability::BestEffort,
                 ..Default::default()
             };
-            let fall = io
-                ._node
-                .subscriber::<FallDetection>(FALL_DETECTION_TOPIC)
-                .qos(qos)
-                .cache(1)
-                .build()
-                .await
-                .unwrap();
             let hardware = io
                 ._node
                 .subscriber::<HardwareStatus>(HARDWARE_STATUS_TOPIC)
@@ -614,7 +602,7 @@ mod tests {
                 .build()
                 .await
                 .unwrap();
-            (server, io, fall, hardware, inference)
+            (server, io, hardware, inference)
         });
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
@@ -725,7 +713,6 @@ mod tests {
             "behavior did not resume: {:?}",
             io.active_motion()
         );
-        assert!(fall.get_latest().unwrap().is_upright(clock.now()));
         let hardware = hardware.get_latest().unwrap();
         assert_eq!(
             hardware.acknowledged,
@@ -1117,7 +1104,6 @@ mod tests {
                 tasks.spawn(crate::simulated_sdk::run(io.context.clone()));
                 tasks.spawn(global_parameter_provider::run_boxed(io.context.clone()));
                 tasks.spawn(behavior_node::node::run_boxed(io.context.clone()));
-                tasks.spawn(fall_detection::run_boxed(io.context.clone()));
                 tasks.spawn(ball_state_composer::run_boxed(io.context.clone()));
                 tasks.spawn(rule_obstacle_composer::run_boxed(io.context.clone()));
                 tasks.spawn(hardware_interface::run_boxed(io.context.clone()));
@@ -1201,13 +1187,8 @@ mod tests {
         assert!((ball.ball_in_ground.x() - 1.5).abs() < 1e-5);
         assert!((ball.ball_in_ground_velocity.x() - 0.2).abs() < 1e-5);
         assert_eq!(board.world_state.obstacles.len(), 1);
-        assert!(
-            board
-                .world_state
-                .fall_detection
-                .unwrap()
-                .is_upright(clock.now())
-        );
+        // This branch uses the base stack's SDK fall input, which MuJoCo does not supply.
+        assert!(board.world_state.fall_down_state.is_none());
         io.input_game.game_state = FilteredGameState::Playing {
             ball_is_free: true,
             kick_off: false,

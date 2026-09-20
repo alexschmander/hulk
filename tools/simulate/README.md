@@ -3,6 +3,11 @@
 Based on `oleflb/simulator-die-zweite` (`3c6a288178f49cb9c360228823ac835aa2b06631`).
 The Bevy scene runs a MuJoCo K1 and a small ROS-Z robotics stack.
 
+On `head-only-motion-simulator`, the simulator changes are rebased onto
+`head-only-motion` without the separate fall-detection commits. The default
+simulator still runs the normal behavior/motion path; the dedicated seated
+head-only test remains available through `scripts/head-only-test`.
+
 ## Run
 
 From the repository root, run (also works from fish or inside `nix develop`):
@@ -40,7 +45,7 @@ valid scene position. Click the field to clear the selection.
 ## Robotics stack
 
 The launcher starts the production `behavior_node`, `ball_state_composer`,
-`rule_obstacle_composer`, `fall_detection`, `motion`, `head_motion`,
+`rule_obstacle_composer`, `motion`, `head_motion`,
 `motion_inference`, `hardware_interface`, and `global_parameter_provider` nodes.
 They share MuJoCo's logical clock. Behavior ticks every 20 ms and owns
 `behavior/motion_command`; motion sends the resulting joint commands through the
@@ -50,8 +55,9 @@ The global provider publishes retained `joint_limits`, `player_number`, and
 `field_dimensions`. Live field changes update its temporary parameter layer.
 With `--no-robotics`, the simulator publishes field dimensions directly instead.
 
-The simulator starts paused, with **no injected motion command**. Its temporary
-layer clears the base configuration's injection and disables remote control.
+The simulator starts paused, with **no injected motion command**. The shared base
+configuration also has no injection; the simulator's temporary layer clears any
+location/robot injection and disables remote control.
 The default Game state is Initial, so behavior requests Stand with a head scan.
 Set Game to Playing and send it to enable ball pursuit and kicking; add a ball
 from the palette. With no ball, behavior searches after its last-ball timeout.
@@ -87,10 +93,13 @@ The editor still refuses path-based **Walk** and suggests **Walk with velocity**
 External path requests use the upstream walking controller. Kick speed, ball velocity,
 and policy flags are forwarded to inference, which applies its policy limits.
 Head and body services run concurrently using the main node's service clients.
-Service errors, stale inputs, and recovery transitions use the upstream motion
-safety lifecycle. A latched control fault needs Damping followed by Prepare,
-then the desired command, or **Reset robot & stack**. Fall detection runs on
-measured simulated joints/IMU; recovery completion is not faked.
+Service errors and stale inputs use the upstream motion safety lifecycle.
+A latched control fault needs Damping followed by Prepare, then the desired
+command, or **Reset robot & stack**. This branch excludes the fall-detection and
+recovery-handover commits. The base behavior node consumes SDK fall state on
+`inputs/fall_down_state`, which this simulator does not supply. Automatic fall
+responses and recovery completion are therefore not exercised; manual **Stand up**
+still requests get-up inference.
 
 **Look at first ball** immediately sends `Stand { head: LookAt { ... } }` for the first
 spawned ball still in the scene and opens the constructed command in the form.
@@ -157,8 +166,8 @@ continues to aim toward world +X, independently of team side.
 | `rule_obstacles` | Real rule obstacle composer | Kickoff, opponent free-kick, and penalty restrictions follow production logic and manually supplied game state. |
 | `obstacles` | Ground-truth passive robot torso positions, conservative radii | Robot avoidance can be exercised; passive robots have physics but no decisions. Goal structures remain physical collisions and are not supplied as planner obstacles. No detection noise or classification tests. |
 | `position_of_interest` | Ball position, otherwise one metre straight ahead | Deterministic gaze fallback, without a tactical attention model. |
-| `fall_detection/status` | Real fall detector from MuJoCo `inputs/low_state` | Measured falling/fallen/upright classification and readiness; thresholds and dynamics remain those of the production node and simulated robot. |
-| `motion/execution` | Real motion node | Actual recovery phase, completion, and fault feedback; no fabricated successful get-up. |
+| `inputs/fall_down_state` | Absent; behavior receives `None` | The simulator does not emulate SDK fall classification. Automatic fall handling and recovery handover are not exercised. |
+| `motion/execution` | Real motion node | Motion phase and fault feedback; no recovery-completion reporting on this branch. |
 | `player_states` | Absent; behavior defaults to all players absent | Behavior selects its last-player striker/search branch. Cooperative role allocation, supporter positioning, Voronoi ownership contests, teammate passing, and the ordinary goalkeeper branch are not exercised. Passive robots do not count as teammates. Requires simulated team identities and independent stacks/state messages. |
 | `hypothetical_ball_positions` | Absent; empty default | No uncertain-ball gaze candidates. Ground truth cannot produce meaningful perception hypotheses without an observation model. |
 | `suggested_search_position` | Absent; `None` default | No distributed search suggestion. Current search subtree already uses its turning search action; the suggested-position walking branch is commented out upstream. |
@@ -182,7 +191,7 @@ you override either. The default router listens on loopback; for another machine
 run a shared reachable router and pass its endpoint to both programs.
 
 Useful Text topics are `behavior/motion_command`, `behavior/blackboard`,
-`behavior/trace`, `fall_detection/status`, `motion/execution`,
+`behavior/trace`, `motion/execution`,
 `motion_inference/status`, `hardware_interface/status`, `ball_state`,
 `ground_to_field`, and `rule_obstacles`. The Parameter panel can edit
 `/simulator/robot/behavior_node`, including `control.injected_motion_command`

@@ -11060,7 +11060,6 @@ dependencies = [
  "clap",
  "color-eyre",
  "coordinate_systems",
- "fall_detection",
  "geometry",
  "global_parameter_provider",
  "hardware_interface",

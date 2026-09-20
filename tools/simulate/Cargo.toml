@@ -7,7 +7,6 @@ homepage.workspace = true
 
 [dependencies]
 behavior_node = { workspace = true }
-fall_detection = { workspace = true }
 ball_state_composer = { workspace = true }
 rule_obstacle_composer = { workspace = true }
 mujoco-rs = { version = "5.0.0", features = ["auto-download-mujoco"] }
