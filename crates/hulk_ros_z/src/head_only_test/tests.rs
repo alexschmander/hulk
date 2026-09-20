@@ -140,7 +140,7 @@ async fn timed_seated_test_records_and_returns_firmware_to_damping() {
     for command in sent.iter() {
         if command.motor_commands[0].kp > 0.0 {
             assert_eq!(command.motor_commands[0].kp, 12.0);
-            assert_eq!(command.motor_commands[0].kd, 1.2);
+            assert_eq!(command.motor_commands[0].kd, 1.0);
             assert_eq!(command.motor_commands[1].kp, 10.0);
             assert_eq!(command.motor_commands[1].kd, 1.2);
         }

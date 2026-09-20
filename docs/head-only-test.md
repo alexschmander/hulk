@@ -157,6 +157,9 @@ Optional flags `--yaw-kp`, `--yaw-kd`, `--pitch-kp`, `--pitch-kd` override only
 specified active head gains for that run. Others retain their parameter-layer
 values. They do not modify deployment parameters or head damping-mode gains.
 No flags means ordinary baseline parameters, even after a tuned run.
+The current active defaults are yaw kp=12/kd=1.0 and pitch kp=10/kd=1.2.
+The campaign matrix above explicitly pins its gains for comparison with the earlier
+experiments; it does not inherit these changed yaw defaults.
 
 Manual run names include explicit gain flags. `--run-id NAME` optionally supplies
 an exact directory name (letters, digits, underscores, hyphens; maximum 121
