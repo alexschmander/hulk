@@ -1115,10 +1115,13 @@ mod tests {
         io: &mut Robotics,
         clock: &Clock,
     ) {
-        use kinematics::joints::Joints;
+        use kinematics::joints::{Joints, body::LowerBodyJoints};
         use motion_inference::{
-            inference::{InferenceCommand, InferenceOutput, Mode, PolicyExecution},
-            node::{INFERENCE_SERVICE, InferenceService},
+            inference::{InferenceCommand, InferenceResponse, PolicyExecution},
+            node::{
+                GETUP_INFERENCE_SERVICE, GetUpInferenceService, KICK_INFERENCE_SERVICE,
+                KickInferenceService, WALK_INFERENCE_SERVICE, WalkInferenceService,
+            },
         };
         use types::{filtered_game_state::FilteredGameState, motor_command::MotorCommand};
 
@@ -1127,11 +1130,6 @@ mod tests {
                 let node = io
                     .context
                     .create_node("inference_stub")
-                    .build()
-                    .await
-                    .unwrap();
-                let mut service = node
-                    .service_server::<InferenceService>(INFERENCE_SERVICE)
                     .build()
                     .await
                     .unwrap();
@@ -1161,29 +1159,58 @@ mod tests {
                     .unwrap();
                 let (sender, requests) = tokio::sync::mpsc::unbounded_channel();
                 let mut tasks = JoinSet::new();
-                tasks.spawn(async move {
-                    loop {
-                        let (request, reply) = service.take_request_async().await?.into_parts();
-                        sender.send(request).unwrap();
-                        let result = Ok(InferenceOutput {
-                            joints: Box::new(Joints::fill(MotorCommand {
-                                kp: 40.0,
-                                kd: 1.0,
-                                ..MotorCommand::zeros()
-                            })),
-                            mode: Mode::Body,
-                            execution: PolicyExecution {
-                                policy: request.command.policy(),
-                                started_at: request.requested_at,
-                                sensor_time: request.requested_at,
-                                progress: None,
-                            },
+                macro_rules! stub_inference {
+                    ($service:ty, $topic:expr, $variant:ident, $joints:ident) => {{
+                        let mut service = node
+                            .service_server::<$service>($topic)
+                            .build()
+                            .await
+                            .unwrap();
+                        let sender = sender.clone();
+                        tasks.spawn(async move {
+                            loop {
+                                let (request, reply) =
+                                    service.take_request_async().await?.into_parts();
+                                let command = InferenceCommand::$variant(request.command);
+                                sender.send(command).unwrap();
+                                let result = Ok(InferenceResponse {
+                                    joints: Box::new($joints::fill(MotorCommand {
+                                        kp: 40.0,
+                                        kd: 1.0,
+                                        ..MotorCommand::zeros()
+                                    })),
+                                    execution: PolicyExecution {
+                                        policy: command.policy(),
+                                        started_at: request.requested_at,
+                                        sensor_time: request.requested_at,
+                                        progress: None,
+                                    },
+                                });
+                                reply.reply_async(&result).await?;
+                            }
+                            #[allow(unreachable_code)]
+                            Ok::<(), color_eyre::Report>(())
                         });
-                        reply.reply_async(&result).await?;
-                    }
-                    #[allow(unreachable_code)]
-                    Ok::<(), color_eyre::Report>(())
-                });
+                    }};
+                }
+                stub_inference!(
+                    WalkInferenceService,
+                    WALK_INFERENCE_SERVICE,
+                    Walk,
+                    LowerBodyJoints
+                );
+                stub_inference!(
+                    KickInferenceService,
+                    KICK_INFERENCE_SERVICE,
+                    Kick,
+                    LowerBodyJoints
+                );
+                stub_inference!(
+                    GetUpInferenceService,
+                    GETUP_INFERENCE_SERVICE,
+                    GetUp,
+                    Joints
+                );
                 tasks.spawn(crate::simulated_sdk::run(io.context.clone()));
                 tasks.spawn(global_parameter_provider::run_boxed(io.context.clone()));
                 tasks.spawn(behavior_node::node::run_boxed(io.context.clone()));
@@ -1241,8 +1268,8 @@ mod tests {
         }
         assert_eq!(io.active_motion(), io.input_motion);
         let mut saw_walk = false;
-        while let Ok(request) = requests.try_recv() {
-            if let InferenceCommand::Walk(walk) = request.command {
+        while let Ok(command) = requests.try_recv() {
+            if let InferenceCommand::Walk(walk) = command {
                 saw_walk |= walk.velocity == linear_algebra::vector![0.25, -0.1]
                     && walk.angular_velocity == 0.4;
             }
