@@ -10,11 +10,10 @@ use ros_z::{
 use types::{
     field_dimensions::FieldDimensions,
     object_detection::{Object, RobocupObjectLabel},
-    primary_state::PrimaryState,
     time_wrapper::TimeWrapper,
     visual_localization::{
-        ASSOCIATION_GEOMETRY_TOPIC, AssociationGeometry, GLOBAL_LOCALIZATION_DEBUG_TOPIC,
-        GlobalLocalizationDebug, VISUAL_LOCALIZATION_TOPIC, VisualLocalizationFrame,
+        GLOBAL_LOCALIZATION_DEBUG_TOPIC, GlobalLocalizationDebug, VISUAL_LOCALIZATION_TOPIC,
+        VisualLocalizationFrame,
     },
 };
 
@@ -53,21 +52,18 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await?;
 
-    let association_geometry_cache = node
-        .subscriber::<TimeWrapper<AssociationGeometry>>(ASSOCIATION_GEOMETRY_TOPIC)
+    let estimates = node
+        .subscriber::<types::localization::LocalizationEstimate>(
+            types::localization::LOCALIZATION_ESTIMATE_TOPIC,
+        )
         .cache(128)
         .with_stamp(|message| message.time)
         .build()
         .await?;
-    // Lifecycle publications can carry older geometry; order authority by publication, not pose time.
-    let latest_association_geometry = node
-        .subscriber::<TimeWrapper<AssociationGeometry>>(ASSOCIATION_GEOMETRY_TOPIC)
-        .cache(1)
-        .build()
-        .await?;
-
-    let primary_state_cache = node
-        .subscriber::<PrimaryState>("primary_state")
+    let status = node
+        .subscriber::<types::localization::LocalizationStatus>(
+            types::localization::LOCALIZATION_STATUS_TOPIC,
+        )
         .qos(QosProfile {
             durability: QosDurability::TransientLocal,
             ..Default::default()
@@ -98,9 +94,9 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         parameters: &parameters,
         camera_matrix_cache: &camera_matrix_cache,
         field_dimensions_cache: &field_dimensions_cache,
-        association_geometry_cache: &association_geometry_cache,
-        latest_association_geometry: &latest_association_geometry,
-        primary_state_cache: &primary_state_cache,
+        estimates: &estimates,
+        status: &status,
+        tracking_reference: std::sync::Mutex::new(None),
         associations_publisher: Arc::new(associations_publisher),
         global_localization_publisher: Arc::new(global_localization_publisher),
         clock: node.clock(),

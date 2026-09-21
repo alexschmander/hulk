@@ -161,7 +161,13 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.len(), (TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
-        assert!(first.chunks_exact(4).any(|pixel| pixel != &first[..4]));
-        assert!(first.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(
+            first
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel != &first[..4])
+        );
+        assert!(first.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
     }
 }

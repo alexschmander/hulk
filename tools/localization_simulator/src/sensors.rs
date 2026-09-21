@@ -75,7 +75,6 @@ impl SyntheticSensors {
                 self.transition_index += 1;
                 VisualOdometryDelta {
                     previous_time,
-                    current_time: time,
                     current_left_camera_to_previous_left_camera: measured,
                 }
             },
@@ -83,10 +82,11 @@ impl SyntheticSensors {
         self.previous_camera_to_field = Some(*camera_to_field);
         self.previous_time = Some(time);
         VisualOdometryMeasurement {
-            delta,
+            delta: delta.clone(),
             odometer: VisualOdometer {
                 time,
                 epoch: 0,
+                delta,
                 current_left_camera_to_visual_odometer: self.current_camera_to_visual_odometer,
             },
             production_diagnostics: None,

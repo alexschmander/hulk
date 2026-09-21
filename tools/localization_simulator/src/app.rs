@@ -679,16 +679,15 @@ impl LocalizationSimulatorApp {
             ui.label("Marks: no field-mark frame at this tick");
         }
         if let Some(diagnostics) = &sample.diagnostics {
-            ui.label(format!("Optimizer: {:?}", diagnostics.optimizer_status));
-            ui.label(format!("Total error: {:.4}", diagnostics.total_error));
             ui.label(format!(
-                "VO factors / RMS: {} / {:.4}",
-                diagnostics.visual_odometry.factor_count, diagnostics.visual_odometry.mean_rms
+                "Optimizer: {} ({:?} iterations)",
+                diagnostics.termination, diagnostics.iterations
             ));
+            ui.label(format!("Final cost: {:?}", diagnostics.final_cost));
+            ui.label(format!("States: {}", diagnostics.state_count));
             ui.label(format!(
-                "Visual factors / RMS: {} / {:.4}",
-                diagnostics.visual_reprojection.factor_count,
-                diagnostics.visual_reprojection.mean_rms
+                "Active measurements: {}",
+                diagnostics.measurement_count
             ));
         } else {
             ui.label("Optimizer: no solve yet");

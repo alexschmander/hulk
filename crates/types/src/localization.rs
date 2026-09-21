@@ -1,39 +1,51 @@
 use nalgebra::SMatrix;
 use ros_z::time::Time;
 use ros_z::{Message, MessageSchema, SchemaBuilder, SerdeCdrCodec};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use coordinate_systems::{Field, Ground, Robot};
+use coordinate_systems::{Field, Ground, Local, Robot};
 use linear_algebra::{Isometry2, Isometry3};
 
 use crate::multivariate_normal_distribution::MultivariateNormalDistribution;
 
-pub const LOCALIZATION_STATE_3D_TOPIC: &str = "localization/state_3d";
+pub const LOCALIZATION_ESTIMATE_TOPIC: &str = "localization/estimate";
+pub const LOCALIZATION_STATUS_TOPIC: &str = "localization/status";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
-pub struct LocalizationEstimate3D {
-    /// Global pose in the same direction as the estimator's composed output.
-    pub robot_to_field: Isometry3<Robot, Field>,
-    /// Fact-rs tangent covariance for `robot_to_field`, ordered rotation then translation.
-    pub covariance: SMatrix<f32, 6, 6>,
+pub struct PoseEstimate<From, To> {
+    pub pose: Isometry3<From, To, f64>,
+    /// Right-local tangent covariance, ordered [rotation xyz, translation xyz].
+    pub covariance: SMatrix<f64, 6, 6>,
 }
 
-impl Message for LocalizationEstimate3D {
+impl<From, To> Message for PoseEstimate<From, To>
+where
+    From: Message + Serialize + DeserializeOwned,
+    To: Message + Serialize + DeserializeOwned,
+{
     type Codec = SerdeCdrCodec<Self>;
 
     fn type_name() -> String {
-        "types::localization::LocalizationEstimate3D".to_string()
+        format!(
+            "types::localization::PoseEstimate<{},{}>",
+            From::type_name(),
+            To::type_name()
+        )
     }
 }
 
-impl MessageSchema for LocalizationEstimate3D {
+impl<From, To> MessageSchema for PoseEstimate<From, To>
+where
+    From: Message + Serialize + DeserializeOwned,
+    To: Message + Serialize + DeserializeOwned,
+{
     fn build_schema(
         builder: &mut SchemaBuilder,
     ) -> Result<ros_z::__private::ros_z_schema::TypeDef, ros_z::__private::ros_z_schema::SchemaError>
     {
         builder.define_message_struct::<Self>(|fields| {
-            fields.field::<Isometry3<Robot, Field>>("robot_to_field")?;
-            let covariance = fields.shape::<[f32; 36]>()?;
+            fields.field::<Isometry3<From, To, f64>>("pose")?;
+            let covariance = fields.shape::<[f64; 36]>()?;
             fields.field_with_shape("covariance", covariance);
             Ok(())
         })
@@ -41,6 +53,36 @@ impl MessageSchema for LocalizationEstimate3D {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq)]
+pub struct LocalizationEstimate {
+    pub time: Time,
+    pub epoch: u64,
+    pub robot_to_local: PoseEstimate<Robot, Local>,
+    pub robot_to_field: Option<PoseEstimate<Robot, Field>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq, Eq)]
+pub enum LocalizationState {
+    Startup,
+    Tracking,
+    LostTrack,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq, Eq)]
+pub struct LocalizationStatus {
+    pub time: Time,
+    pub epoch: u64,
+    pub state: LocalizationState,
+}
+
+/// Pose prior used by the field-association algorithm (not a node output).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct LocalizationEstimate3D {
+    pub robot_to_field: Isometry3<Robot, Field>,
+    pub covariance: SMatrix<f32, 6, 6>,
+}
+
+/// Association's pose prior and freshness anchor, assembled by its consumer.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub enum LocalizationState3D {
     Startup,
     Tracking {
@@ -80,6 +122,12 @@ mod tests {
     use linear_algebra::IntoTransform;
 
     use super::*;
+
+    #[test]
+    fn localization_output_schemas_are_valid() {
+        LocalizationEstimate::schema();
+        LocalizationStatus::schema();
+    }
 
     #[test]
     fn ground_to_field_from_field_to_robot_flattens_robot_pose() {

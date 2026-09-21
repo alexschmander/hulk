@@ -89,7 +89,7 @@ fn gpu_multiple_tabs() {
                                     ui,
                                     PanelUiContext {
                                         backend: &backend,
-                                        egui_context: context.clone(),
+                                        egui_context: &context,
                                     },
                                 );
                             }

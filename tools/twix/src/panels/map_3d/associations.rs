@@ -9,42 +9,51 @@ use projection::Projection;
 use ros_z_debug::SampleRecord;
 use std::sync::Arc;
 use types::{
+    localization::{LOCALIZATION_STATUS_TOPIC, LocalizationStatus},
     time_wrapper::TimeWrapper,
-    visual_localization::{
-        ASSOCIATION_GEOMETRY_TOPIC, AssociationGeometry, VISUAL_LOCALIZATION_TOPIC,
-    },
+    visual_localization::VISUAL_LOCALIZATION_TOPIC,
 };
 
 pub(super) struct Observations {
     frames: Observation<TimeWrapper<FieldMarkAssociations>>,
-    geometry: Observation<TimeWrapper<AssociationGeometry>>,
+    status: Observation<LocalizationStatus>,
 }
 
 impl Observations {
     pub(super) fn new(context: &impl ObservationContext) -> color_eyre::Result<Self> {
         Ok(Self {
             frames: Observation::new(context, VISUAL_LOCALIZATION_TOPIC, 64, Default::default())?,
-            geometry: Observation::new(context, ASSOCIATION_GEOMETRY_TOPIC, 1, Default::default())?,
+            status: Observation::new(
+                context,
+                LOCALIZATION_STATUS_TOPIC,
+                1,
+                ros_z_debug::ObservationPolicy::default().with_subscriber_qos(
+                    ros_z::qos::QosProfile {
+                        durability: ros_z::qos::QosDurability::TransientLocal,
+                        ..Default::default()
+                    },
+                ),
+            )?,
         })
     }
 
     pub(super) fn epoch(&self, namespace: &str) -> Option<u64> {
-        self.geometry
+        self.status
             .latest(namespace)
-            .map(|geometry| geometry.value.inner.epoch)
+            .map(|status| status.value.epoch)
     }
 
     pub(super) fn current_frames(
         &self,
         namespace: &str,
     ) -> Vec<Arc<SampleRecord<TimeWrapper<FieldMarkAssociations>>>> {
-        let Some(geometry) = self.geometry.latest(namespace) else {
+        let Some(status) = self.status.latest(namespace) else {
             return Vec::new();
         };
         self.frames
             .all(namespace)
             .into_iter()
-            .filter(|frame| frame.value.inner.epoch == geometry.value.inner.epoch)
+            .filter(|frame| frame.value.inner.epoch == status.value.epoch)
             .collect()
     }
 }

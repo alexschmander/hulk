@@ -16,9 +16,8 @@ use ros_z::{
 };
 use types::{
     field_dimensions::FieldDimensions,
-    localization::LocalizationState3D,
+    localization::{LocalizationEstimate, LocalizationState3D, LocalizationStatus},
     object_detection::{Object, RobocupObjectLabel},
-    primary_state::PrimaryState,
     time_wrapper::TimeWrapper,
     visual_localization::{AssociationGeometry, GlobalLocalizationDebug, VisualLocalizationFrame},
 };
@@ -37,12 +36,42 @@ pub(crate) struct DetectionProcessingContext<'a> {
     pub(crate) parameters: &'a NodeParameters<FieldMarkAssociationParameters>,
     pub(crate) camera_matrix_cache: &'a Cache<TimeWrapper<CameraMatrix>>,
     pub(crate) field_dimensions_cache: &'a Cache<FieldDimensions>,
-    pub(crate) association_geometry_cache: &'a Cache<TimeWrapper<AssociationGeometry>>,
-    pub(crate) latest_association_geometry: &'a Cache<TimeWrapper<AssociationGeometry>>,
-    pub(crate) primary_state_cache: &'a Cache<PrimaryState>,
+    pub(crate) estimates: &'a Cache<LocalizationEstimate>,
+    pub(crate) status: &'a Cache<LocalizationStatus>,
+    pub(crate) tracking_reference: std::sync::Mutex<Option<LocalizationEstimate>>,
     pub(crate) associations_publisher: Arc<Publisher<TimeWrapper<VisualLocalizationFrame>>>,
     pub(crate) global_localization_publisher: Arc<Publisher<Option<GlobalLocalizationDebug>>>,
     pub(crate) clock: &'a Clock,
+}
+
+impl DetectionProcessingContext<'_> {
+    fn tracking_reference(
+        &self,
+        estimate: &LocalizationEstimate,
+        status: &LocalizationStatus,
+    ) -> Option<LocalizationEstimate> {
+        use types::localization::LocalizationState;
+        let mut reference = self.tracking_reference.lock().unwrap();
+        if reference
+            .as_ref()
+            .is_some_and(|prior| prior.epoch != status.epoch)
+        {
+            *reference = None;
+        }
+        if estimate.epoch == status.epoch && status.state == LocalizationState::Tracking {
+            *reference = Some(*estimate);
+        } else if reference.is_none() && status.state == LocalizationState::LostTrack {
+            // A late-starting consumer may recover a pre-loss anchor from history.
+            *reference = self
+                .estimates
+                .get_interval(status.time - Duration::from_secs(2), status.time)
+                .iter()
+                .filter(|e| e.epoch == status.epoch && e.robot_to_field.is_some())
+                .max_by_key(|e| e.time)
+                .map(|e| **e);
+        }
+        *reference
+    }
 }
 
 struct PreparedDetectionFrame {
@@ -142,16 +171,28 @@ fn prepare_detection_frame(
     }
     let field_dimensions = ctx.field_dimensions_cache.get_latest()?;
     let parameters = ctx.parameters.snapshot().typed.clone();
-    let latest = ctx.latest_association_geometry.get_latest()?;
-    let geometry = geometry_for_image(
-        image_time,
-        &ctx.association_geometry_cache.get_interval(
+    let status = ctx.status.get_latest()?;
+    let latest_estimate = ctx.estimates.get_latest()?;
+    let reference = ctx.tracking_reference(&latest_estimate, &status);
+    let latest = TimeWrapper {
+        time: latest_estimate.time,
+        inner: AssociationGeometry::from_estimate(&latest_estimate, &status, reference.as_ref())?,
+    };
+    let history: Vec<_> = ctx
+        .estimates
+        .get_interval(
             image_time - parameters.max_pose_hint_age,
             image_time + parameters.max_pose_hint_age,
-        ),
-        &latest,
-        parameters.max_pose_hint_age,
-    )?;
+        )
+        .iter()
+        .filter_map(|estimate| {
+            Some(Arc::new(TimeWrapper {
+                time: estimate.time,
+                inner: AssociationGeometry::from_estimate(estimate, &status, reference.as_ref())?,
+            }))
+        })
+        .collect();
+    let geometry = geometry_for_image(image_time, &history, &latest, parameters.max_pose_hint_age)?;
     let frame = PreparedDetectionFrame {
         image_time,
         objects: objects.inner,
@@ -196,15 +237,24 @@ fn frame_is_current(
     {
         return false;
     }
-    let damping = ctx
-        .primary_state_cache
+    let latest = ctx
+        .estimates
         .get_latest()
-        .is_none_or(|state| *state == PrimaryState::Damping);
+        .zip(ctx.status.get_latest())
+        .and_then(|(estimate, status)| {
+            Some(TimeWrapper {
+                time: estimate.time,
+                inner: AssociationGeometry::from_estimate(
+                    &estimate,
+                    &status,
+                    ctx.tracking_reference(&estimate, &status).as_ref(),
+                )?,
+            })
+        });
     result_is_current(
         frame.image_time,
         &frame.geometry,
-        damping,
-        ctx.latest_association_geometry.get_latest().as_deref(),
+        latest.as_ref(),
         ctx.clock.now(),
         max_age,
     )
@@ -213,13 +263,11 @@ fn frame_is_current(
 fn result_is_current(
     image_time: Time,
     geometry: &AssociationGeometry,
-    damping: bool,
     latest: Option<&TimeWrapper<AssociationGeometry>>,
     now: Time,
     max_age: Duration,
 ) -> bool {
-    !damping
-        && image_time.abs_diff(now) <= max_age
+    image_time.abs_diff(now) <= max_age
         && latest.is_some_and(|latest| {
             latest.time.abs_diff(now) <= max_age && same_lifecycle(geometry, &latest.inner)
         })
@@ -305,7 +353,6 @@ mod tests {
         assert!(result_is_current(
             time,
             &tracking.inner,
-            false,
             history.get_latest().as_deref(),
             time,
             age
@@ -313,7 +360,6 @@ mod tests {
         assert!(!result_is_current(
             time,
             &tracking.inner,
-            false,
             Some(&latest),
             time,
             age
@@ -370,25 +416,24 @@ mod tests {
                 time,
                 inner: geometry.clone(),
             };
-            let valid = |damping, latest: Option<&TimeWrapper<AssociationGeometry>>, now| {
-                result_is_current(time, &geometry, damping, latest, now, age)
+            let valid = |latest: Option<&TimeWrapper<AssociationGeometry>>, now| {
+                result_is_current(time, &geometry, latest, now, age)
             };
             for (latest_index, latest_state) in states.into_iter().enumerate() {
                 latest.inner.state = latest_state;
-                assert_eq!(valid(false, Some(&latest), time), index == latest_index);
+                assert_eq!(valid(Some(&latest), time), index == latest_index);
             }
             latest.inner.state = state;
             let expired = age + Duration::from_nanos(1);
-            assert!(valid(false, Some(&latest), time + age));
-            assert!(!valid(true, Some(&latest), time));
-            assert!(!valid(false, None, time));
-            assert!(!valid(false, Some(&latest), time + expired));
-            assert!(!valid(false, Some(&latest), time - expired));
+            assert!(valid(Some(&latest), time + age));
+            assert!(!valid(None, time));
+            assert!(!valid(Some(&latest), time + expired));
+            assert!(!valid(Some(&latest), time - expired));
             latest.time = time - expired;
-            assert!(!valid(false, Some(&latest), time));
+            assert!(!valid(Some(&latest), time));
             latest.time = time;
             latest.inner.epoch += 1;
-            assert!(!valid(false, Some(&latest), time));
+            assert!(!valid(Some(&latest), time));
         }
     }
 }

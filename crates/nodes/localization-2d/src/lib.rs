@@ -2,11 +2,19 @@ use std::{boxed::Box, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use color_eyre::Result;
 use coordinate_systems::{Field, Ground, Robot};
-use linear_algebra::{Isometry2, Isometry3};
-use ros_z::{cache::Cache, context::Context, time::Time};
+use linear_algebra::{IntoTransform, Isometry2, Isometry3};
+use ros_z::{
+    cache::Cache,
+    context::Context,
+    qos::{QosDurability, QosProfile},
+    time::Time,
+};
 use types::{
-    localization::ground_to_field_from_field_to_robot, time_wrapper::TimeWrapper,
-    visual_localization::LOCALIZATION_POSE_3D_TOPIC,
+    localization::{
+        LOCALIZATION_ESTIMATE_TOPIC, LOCALIZATION_STATUS_TOPIC, LocalizationEstimate,
+        LocalizationStatus, ground_to_field_from_field_to_robot,
+    },
+    time_wrapper::TimeWrapper,
 };
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
@@ -19,13 +27,22 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let node = ctx.create_node("localization2d").build().await?;
 
     let localization_subscriber = node
-        .subscriber::<TimeWrapper<Option<Isometry3<Field, Robot>>>>(LOCALIZATION_POSE_3D_TOPIC)
+        .subscriber::<LocalizationEstimate>(LOCALIZATION_ESTIMATE_TOPIC)
         .build()
         .await?;
     let robot_to_ground_cache = node
         .subscriber::<TimeWrapper<Option<Isometry3<Robot, Ground>>>>("robot_to_ground")
         .cache(128)
         .with_stamp(|wrapper| wrapper.time)
+        .build()
+        .await?;
+    let status = node
+        .subscriber::<LocalizationStatus>(LOCALIZATION_STATUS_TOPIC)
+        .qos(QosProfile {
+            durability: QosDurability::TransientLocal,
+            ..Default::default()
+        })
+        .cache(1)
         .build()
         .await?;
 
@@ -36,8 +53,14 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
 
     loop {
         let localization = localization_subscriber.recv().await?;
+        if status
+            .get_latest()
+            .is_none_or(|status| status.epoch != localization.epoch)
+        {
+            continue;
+        }
         let time = localization.time;
-        let Some(field_to_robot) = localization.inner else {
+        let Some(robot_to_field) = localization.robot_to_field else {
             continue;
         };
 
@@ -47,7 +70,12 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
 
         ground_to_field_publisher
             .publish(&ground_to_field_from_field_to_robot(
-                field_to_robot,
+                robot_to_field
+                    .pose
+                    .inner
+                    .cast()
+                    .inverse()
+                    .framed_transform(),
                 robot_to_ground,
             ))
             .await?;

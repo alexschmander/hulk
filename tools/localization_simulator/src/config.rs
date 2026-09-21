@@ -8,7 +8,6 @@ use localization_3d::Localization3dParameters;
 /// Fixed logical simulation tick.
 pub const TICK_INTERVAL: Duration = Duration::from_millis(20);
 /// Fixed backend solve cadence.
-pub const SOLVE_INTERVAL: Duration = Duration::from_millis(200);
 /// Fixed synthetic field-mark cadence.
 pub const FIELD_MARK_INTERVAL: Duration = Duration::from_millis(100);
 

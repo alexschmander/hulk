@@ -393,15 +393,6 @@ where
     TimeWrapper<T>: Message + Send + Sync + 'static,
     <TimeWrapper<T> as Message>::Codec: Send + Sync,
 {
-    pub(super) fn payload_history(&self) -> Vec<Arc<SampleRecord<TimeWrapper<T>>>> {
-        let mut samples = self.get_all();
-        // History is source-time ordered, preserving arrival order for source-time ties.
-        samples.sort_by_key(|s| s.value.time);
-        samples.reverse();
-        samples.dedup_by_key(|s| s.value.time);
-        samples.reverse();
-        samples
-    }
     pub(super) fn at_time(&self, time: Time) -> Option<Arc<SampleRecord<TimeWrapper<T>>>> {
         self.get_all()
             .into_iter()
@@ -959,14 +950,14 @@ pub(super) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn count_history_handles_common_and_differential_two_second_delays() {
         use super::super::{RenderedImageCache, image_retention, image_time};
-        use coordinate_systems::{Field, Robot};
         use linear_algebra::Isometry3;
         use ros2::sensor_msgs::image::Image;
         use types::{
-            object_detection::{Object, RobocupObjectLabel},
-            visual_localization::{
-                ASSOCIATION_GEOMETRY_TOPIC, AssociationGeometry, LOCALIZATION_POSE_3D_TOPIC,
+            localization::{
+                LOCALIZATION_ESTIMATE_TOPIC, LOCALIZATION_STATUS_TOPIC, LocalizationEstimate,
+                LocalizationState, LocalizationStatus, PoseEstimate,
             },
+            object_detection::{Object, RobocupObjectLabel},
         };
 
         let backend = Arc::new(
@@ -1008,16 +999,28 @@ pub(super) mod tests {
             .await
             .unwrap();
         let pose_pub = node
-            .publisher::<TimeWrapper<Option<Isometry3<Field, Robot>>>>(LOCALIZATION_POSE_3D_TOPIC)
+            .publisher::<LocalizationEstimate>(LOCALIZATION_ESTIMATE_TOPIC)
             .build()
             .await
             .unwrap();
         let geometry_pub = node
-            .publisher::<TimeWrapper<AssociationGeometry>>(ASSOCIATION_GEOMETRY_TOPIC)
+            .publisher::<LocalizationStatus>(LOCALIZATION_STATUS_TOPIC)
             .build()
             .await
             .unwrap();
         let time = |millis: i64| Time::from_nanos(millis * 1_000_000);
+        let estimate = |time, field: bool| LocalizationEstimate {
+            time,
+            epoch: 0,
+            robot_to_local: PoseEstimate {
+                pose: Isometry3::identity(),
+                covariance: nalgebra::SMatrix::identity(),
+            },
+            robot_to_field: field.then_some(PoseEstimate {
+                pose: Isometry3::identity(),
+                covariance: nalgebra::SMatrix::identity(),
+            }),
+        };
         for (field_index, field) in [false, true].into_iter().enumerate() {
             // Common delay, detections delayed relative to images, then the reverse.
             for (mode, (image_delay, geometry_delay)) in
@@ -1071,12 +1074,8 @@ pub(super) mod tests {
                                 while !overlays.ready(&overlays.prepare(time(stamp))) {
                                     let source = time(stamp + geometry_delay);
                                     camera_pub.publish_with_source_time(&TimeWrapper { time: time(stamp), inner: CameraMatrix::default() }, source).await.unwrap();
-                                    pose_pub.publish_with_source_time(&TimeWrapper { time: time(stamp), inner: Some(Isometry3::identity()) }, source).await.unwrap();
-                                    geometry_pub.publish_with_source_time(&TimeWrapper { time: time(stamp), inner: AssociationGeometry {
-                                        epoch: 0, state: types::localization::LocalizationState3D::Startup,
-                                        robot_to_local: Isometry3::identity(),
-                                        local_to_field: Some(linear_algebra::Isometry2::identity()),
-                                    } }, source).await.unwrap();
+                                    pose_pub.publish_with_source_time(&estimate(time(stamp), true), source).await.unwrap();
+                                    geometry_pub.publish_with_source_time(&LocalizationStatus { time: time(stamp), epoch: 0, state: LocalizationState::Tracking }, source).await.unwrap();
                                     object_pub.publish_with_source_time(&TimeWrapper { time: time(stamp), inner: vec![] }, source).await.unwrap();
                                     tokio::time::sleep(Duration::from_millis(10)).await;
                                 }
@@ -1155,10 +1154,7 @@ pub(super) mod tests {
                     // Explicit None makes projection unavailable, not permanently pending.
                     publish_at_until(
                         &pose_pub,
-                        &TimeWrapper {
-                            time: time(stamp),
-                            inner: None,
-                        },
+                        &estimate(time(stamp), false),
                         time(stamp + geometry_delay),
                         || !field || overlays.prepare(time(stamp)).field_unavailable,
                     )

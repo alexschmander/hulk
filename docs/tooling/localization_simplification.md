@@ -93,7 +93,7 @@ Baseline: 161 core unit tests passed, three runtime-characterization tests ignor
 Final package tests: 239 passed, six explicitly ignored, using:
 
 ```sh
-cargo test --locked -p localization-3d -p localization-factrs -p field_mark_association -p projection -p stereo_visual_odometry -p localization_simulator --no-default-features --features stereo_visual_odometry/ort-webgpu --quiet
+cargo test --locked -p localization-3d -p localization-fagra -p field_mark_association -p projection -p stereo_visual_odometry -p localization_simulator --no-default-features --features stereo_visual_odometry/ort-webgpu --quiet
 ```
 
 This includes recorded association fixtures, IMU spline integration, projection

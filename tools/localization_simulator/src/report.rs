@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use booster::ImuState;
 use color_eyre::{Result, eyre::eyre};
-use localization_3d::{GlobalVisualLock, Localization3dParameters, SolveDiagnostics};
+use localization_3d::{Localization3dParameters, SolveDiagnostics};
 use nalgebra::Isometry3;
 use serde::Serialize;
 use types::field_dimensions::FieldDimensions;
@@ -105,11 +105,10 @@ pub struct ProductionVoSummary {
     pub inliers_mean: f64,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GlobalLock {
     Unlocked,
-    WaitingForBackend,
     Locked,
 }
 
@@ -209,7 +208,7 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
                 live_steps.add(previous_live.as_ref(), &pose);
                 previous_live = Some(pose);
             }
-            if lock_acquired_at.is_none() && sample.global_visual_lock == GlobalVisualLock::Locked {
+            if lock_acquired_at.is_none() && sample.global_visual_lock == GlobalLock::Locked {
                 lock_acquired_at = Some(sample.time.as_nanos());
             }
             let truth_camera_to_field =
@@ -248,7 +247,7 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
                 visual_odometry_delta: sample.visual_odometry_delta.as_ref().map(|delta| {
                     VisualOdometryDeltaSample {
                         previous_time_ns: delta.previous_time.as_nanos(),
-                        current_time_ns: delta.current_time.as_nanos(),
+                        current_time_ns: sample.time.as_nanos(),
                         current_camera_to_previous_camera: Pose3::from_isometry(
                             &delta
                                 .current_left_camera_to_previous_left_camera
@@ -258,7 +257,7 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
                 }),
                 visual_odometry_error,
                 production_visual_odometry: sample.production_vo_diagnostics,
-                global_visual_lock: sample.global_visual_lock.into(),
+                global_visual_lock: sample.global_visual_lock,
                 backend_error,
                 live_error,
                 landmark_frame: sample.landmark_frame.as_ref().map(Into::into),
@@ -297,16 +296,6 @@ impl Pose3 {
         Self {
             translation_m: [translation.x, translation.y, translation.z],
             quaternion_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
-        }
-    }
-}
-
-impl From<GlobalVisualLock> for GlobalLock {
-    fn from(value: GlobalVisualLock) -> Self {
-        match value {
-            GlobalVisualLock::Unlocked => Self::Unlocked,
-            GlobalVisualLock::WaitingForBackend => Self::WaitingForBackend,
-            GlobalVisualLock::Locked => Self::Locked,
         }
     }
 }

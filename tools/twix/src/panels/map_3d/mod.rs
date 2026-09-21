@@ -6,7 +6,7 @@ use eframe::egui::{ComboBox, Ui};
 use egui_bevy::BevyWidget;
 use kinematics::robot_kinematics::RobotKinematics;
 use linear_algebra::Isometry3;
-use projection::{camera_matrix::CameraMatrix, intrinsic::Intrinsic};
+use projection::camera_matrix::CameraMatrix;
 use ros_z::{
     qos::{QosDurability, QosProfile},
     time::Time,
@@ -83,11 +83,11 @@ struct Observations {
     epoch: Option<u64>,
     last_anchor: Option<Time>,
     dimensions: Observation<FieldDimensions>,
-    localization: Observation<Option<Isometry3<Field, Robot>>>,
+    localization: Observation<types::localization::LocalizationEstimate>,
+    localization_status: Observation<types::localization::LocalizationStatus>,
     odometer: Observation<VisualOdometer>,
     kinematics: Observation<TimeWrapper<RobotKinematics>>,
     matrix: Observation<TimeWrapper<CameraMatrix>>,
-    intrinsics: Observation<Intrinsic>,
     images: Option<Observation<RosImage>>,
     associations: Option<associations::Observations>,
 }
@@ -107,21 +107,29 @@ impl Observations {
                     ..Default::default()
                 }),
             )?,
-            localization: Observation::new(context, "localization", 1, Default::default())?,
+            localization: Observation::new(
+                context,
+                types::localization::LOCALIZATION_ESTIMATE_TOPIC,
+                1,
+                Default::default(),
+            )?,
             odometer: Observation::new(
                 context,
                 "visual_odometry/current_left_camera_to_visual_odometer",
                 64,
                 Default::default(),
             )?,
+            localization_status: Observation::new(
+                context,
+                types::localization::LOCALIZATION_STATUS_TOPIC,
+                1,
+                ObservationPolicy::default().with_subscriber_qos(QosProfile {
+                    durability: QosDurability::TransientLocal,
+                    ..Default::default()
+                }),
+            )?,
             kinematics: Observation::new(context, "robot_kinematics", 1024, Default::default())?,
             matrix: Observation::new(context, "camera_matrix", 1024, Default::default())?,
-            intrinsics: Observation::new(
-                context,
-                "debug/calibrated_intrinsics",
-                1,
-                Default::default(),
-            )?,
             images: None,
             associations: None,
         })
@@ -188,15 +196,10 @@ impl Observations {
             .iter()
             .find(|image| Some(image_time(image)) == anchor)
             .cloned();
-        let mut camera_matrix = self
+        let camera_matrix = self
             .matrix
             .aligned(namespace, anchor)
             .map(|record| record.value.inner.clone());
-        if let (Some(matrix), Some(intrinsics)) =
-            (&mut camera_matrix, self.intrinsics.latest(namespace))
-        {
-            matrix.intrinsics = intrinsics.value;
-        }
         let odometer = match anchor {
             Some(time) => observation::nearest(
                 self.odometer.all(namespace),
@@ -213,11 +216,17 @@ impl Observations {
         ViewerData {
             pose_source: settings.pose_source,
             field_dimensions: self.dimensions.latest(namespace),
-            // ponytail: latest pose is not image-aligned; use pose_3d history if this becomes limiting.
+            // ponytail: latest solve pose; use estimate history for image-aligned rendering.
             localization: self
                 .localization
                 .latest(namespace)
-                .and_then(|record| record.value),
+                .filter(|record| {
+                    self.localization_status
+                        .latest(namespace)
+                        .is_some_and(|status| status.value.epoch == record.value.epoch)
+                })
+                .and_then(|record| record.value.robot_to_field)
+                .map(|field| Isometry3::wrap(field.pose.inner.cast::<f32>().inverse())),
             visual_odometer: odometer
                 .map(|record| record.value.current_left_camera_to_visual_odometer),
             robot_kinematics: self.kinematics.aligned(namespace, anchor),

@@ -11,14 +11,16 @@ implementations, and displays estimated poses against ground truth.
 
 ## Localization Lifecycle
 
-The robot publishes retained `localization/state_3d` messages. Association receives the same
-state together with timestamped Local-frame geometry and an epoch on
-`localization/association_geometry`.
+The robot publishes `localization/estimate` (timestamp, epoch, local pose/covariance,
+and optional field pose/covariance) and transient-local `localization/status`
+(timestamp, epoch, Startup/Tracking/LostTrack). Association combines matching epochs
+and retains its last tracking prior during loss; it never refreshes that prior from
+new local-only motion. `debug/solve_diagnostics` reports each numerical attempt.
 
 | State | Association | Transition |
 | --- | --- | --- |
 | `Startup` | Stateless global landmark-geometry matching | Three or more certified correspondences and an accepted backend result establish tracking. |
-| `Tracking` | Image-space prediction and uncertainty-gated one-to-one assignment | Solver/visual freshness failure or a VO epoch discontinuity enters `LostTrack`. |
+| `Tracking` | Image-space prediction and uncertainty-gated one-to-one assignment | Solver or visual freshness failure enters `LostTrack`. |
 | `LostTrack` | The tracking solver with wider uncertainty around the retained estimate | A new recovery frame acknowledged and validated by the backend restores tracking. |
 
 The own-half assumption (robot field X below zero) is used only when localization computes its
@@ -41,15 +43,21 @@ path. Sparse
 joint search is bounded by `global_localizer.max_work`; budget exhaustion rejects rather than
 returning a winner before all plausible alternatives have been checked.
 
-Association uses one blocking worker and one replaceable pending detection frame. Localization
-ingestion forwards measurements without awaiting optimization or network publishing; outgoing
-snapshots use latest-value mailboxes. Stale and obsolete-epoch/state association results are dropped.
-These bounds prevent association backlog but are not a hard real-time scheduling guarantee.
-Publication runs on blocking workers because Zenoh sends can block synchronously even through an
-async API. A stalled send cannot occupy the ingestion runtime worker. Diagnostic snapshots are
-latest-value and best-effort: intermediate diagnostics may be dropped rather than delaying solving.
-Closing ingestion closes the output mailboxes; an active transport send still finishes or times out
-before its worker exits.
+Association uses one blocking worker and one replaceable pending detection frame.
+Localization drains a bounded snapshot of the ROSZ subscriber queues, solves its fagra
+graph, publishes, and repeats. Queue capacities cover one second: 500 IMU, 500 kinematics,
+60 visual-localization and 60 VO messages. Overflow drops the oldest sample with a warning.
+No frontend mailbox or live-VO output propagation exists. Numerical work runs on a
+blocking thread, while ROSZ continues receiving. Timestamped geometry caches cover
+supporting lookups. Late measurements inside the two-second window remain eligible;
+older measurements are warned and discarded. A measurement gap exceeding the whole
+window reinitializes the local frame with a new epoch.
+
+The trajectory uses four-control cubic spline segments, 200 ms spacing, and f64 geometry.
+Velocity is derived from position; acceleration measurements remain disabled. Boundary
+controls are predicted initial guesses, not invented measurements. Covariance includes
+control/alignment cross-correlations. Failed or uphill numerical attempts do not publish
+a relabeled old pose; diagnostics distinguish convergence from the iteration limit.
 
 The simulator defaults to production association and supplies estimator geometry, not ground-truth
 poses, to that path. Known-correspondence mode remains available explicitly for estimator isolation.
@@ -270,12 +278,11 @@ association modes, inspect earlier history while paused, and enable a one-shot V
 ## Tasks
 
 - [x] Expose the production semantic landmark list without duplicating field geometry.
-- [x] Add a small synchronous localization runner around the existing production configuration and
-      `VinsFrontend`/`VinsBackend` APIs.
+- [x] Share the concrete fagra graph and lifecycle between the ROSZ node and deterministic runner.
 - [x] Implement trajectory interpolation and built-in scenarios.
 - [x] Implement deterministic synthetic camera, IMU, visual-odometry, and field-mark measurements.
 - [x] Implement known-correspondence and production-association modes.
-- [x] Run localization at explicit fixed checkpoints and retain result history.
+- [x] Ingest and solve each simulation input tick; retain original estimate timestamps in history.
 - [x] Add a Bevy field scene with truth/backend/live markers and trails.
 - [x] Add free-fly recording, playback controls, and diagnostics UI.
 - [x] Add headless deterministic regression tests.

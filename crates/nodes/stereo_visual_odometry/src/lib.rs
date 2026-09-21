@@ -35,6 +35,31 @@ pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> +
     Box::pin(run(ctx))
 }
 
+fn visual_odometer_message(
+    time: ros_z::time::Time,
+    epoch: u64,
+    previous_time: Option<ros_z::time::Time>,
+    previous_left_camera_to_current_left_camera: Option<&na::Isometry3<f32>>,
+    current_left_camera_to_visual_odometer: na::Isometry3<f32>,
+) -> VisualOdometer {
+    VisualOdometer {
+        time,
+        epoch,
+        delta: previous_time
+            .zip(previous_left_camera_to_current_left_camera)
+            .map(
+                |(previous_time, previous_left_camera_to_current_left_camera)| {
+                    VisualOdometryDelta {
+                        previous_time,
+                        current_left_camera_to_previous_left_camera:
+                            previous_left_camera_to_current_left_camera.inverse(),
+                    }
+                },
+            ),
+        current_left_camera_to_visual_odometer,
+    }
+}
+
 async fn run(ctx: Arc<Context>) -> Result<()> {
     let node = ctx.create_node("stereo_visual_odometry").build().await?;
     let node_parameters =
@@ -65,13 +90,6 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
     let debug_odometry_pub = node
         .publisher::<Option<na::Isometry3<f32>>>(
             "debug/visual_odometry/previous_left_camera_to_current_left_camera",
-        )
-        .build()
-        .await?;
-
-    let delta_odometry_pub = node
-        .publisher::<VisualOdometryDelta>(
-            "visual_odometry/current_left_camera_to_previous_left_camera",
         )
         .build()
         .await?;
@@ -134,39 +152,28 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             previous_image_time = None;
             pipeline.reset_tracking();
             odometer_pub
-                .publish(&VisualOdometer {
-                    time: current_image_time,
-                    epoch: odometer_epoch,
-                    current_left_camera_to_visual_odometer: pipeline
-                        .current_left_camera_to_visual_odometer(),
-                })
+                .publish(&visual_odometer_message(
+                    current_image_time,
+                    odometer_epoch,
+                    None,
+                    None,
+                    pipeline.current_left_camera_to_visual_odometer(),
+                ))
                 .await?;
             processing_duration_pub
                 .publish_if_subscribed(|| ready(duration))
                 .await?;
             continue;
         }
-        if let (Some(previous_time), Some(previous_left_camera_to_current_left_camera)) =
-            (previous_image_time, odometry.as_ref())
-        {
-            delta_odometry_pub
-                .publish(&VisualOdometryDelta {
-                    previous_time,
-                    current_time: current_image_time,
-                    current_left_camera_to_previous_left_camera:
-                        previous_left_camera_to_current_left_camera.inverse(),
-                })
-                .await?;
-        }
+        let visual_odometer = visual_odometer_message(
+            current_image_time,
+            odometer_epoch,
+            previous_image_time,
+            odometry.as_ref(),
+            pipeline.current_left_camera_to_visual_odometer(),
+        );
         previous_image_time = Some(current_image_time);
-        odometer_pub
-            .publish(&VisualOdometer {
-                time: current_image_time,
-                epoch: odometer_epoch,
-                current_left_camera_to_visual_odometer: pipeline
-                    .current_left_camera_to_visual_odometer(),
-            })
-            .await?;
+        odometer_pub.publish(&visual_odometer).await?;
         if triangulated_features_pub.has_subscribers() {
             let triangulated_features = pipeline.triangulated_features();
             triangulated_features_pub
@@ -176,5 +183,60 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         processing_duration_pub
             .publish_if_subscribed(|| ready(duration))
             .await?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_has_no_delta_without_both_frames() {
+        let time = ros_z::time::Time::from_nanos(2);
+        let estimate = na::Isometry3::identity();
+
+        assert!(
+            visual_odometer_message(time, 1, None, None, estimate)
+                .delta
+                .is_none()
+        );
+        assert!(
+            visual_odometer_message(time, 1, None, Some(&estimate), estimate)
+                .delta
+                .is_none()
+        );
+        assert!(
+            visual_odometer_message(time, 1, Some(time), None, estimate)
+                .delta
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn message_contains_inverse_delta_after_later_success() {
+        let previous_time = ros_z::time::Time::from_nanos(1);
+        let current_time = ros_z::time::Time::from_nanos(2);
+        let previous_to_current = na::Isometry3::translation(1.0, 2.0, 3.0);
+
+        let message = visual_odometer_message(
+            current_time,
+            7,
+            Some(previous_time),
+            Some(&previous_to_current),
+            previous_to_current.inverse(),
+        );
+        let delta = message.delta.expect("later successful frame has a delta");
+
+        assert_eq!(message.time, current_time);
+        assert_eq!(message.epoch, 7);
+        assert_eq!(delta.previous_time, previous_time);
+        assert_eq!(
+            delta.current_left_camera_to_previous_left_camera,
+            previous_to_current.inverse()
+        );
+        assert_eq!(
+            message.current_left_camera_to_visual_odometer,
+            previous_to_current.inverse()
+        );
     }
 }

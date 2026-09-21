@@ -23,8 +23,8 @@ pub use global_association::GlobalAssociationConfig as GlobalLocalizerParameters
 pub use node::{run, run_boxed};
 pub use parameters::{FieldMarkAssociationParameters, TrackingAssociationParameters};
 pub use types::visual_localization::{
-    ASSOCIATION_GEOMETRY_TOPIC, AssociationGeometry, FieldMarkAssociation,
-    GLOBAL_LOCALIZATION_DEBUG_TOPIC, GlobalLocalizationDebug, VisualLocalizationFrame,
+    AssociationGeometry, FieldMarkAssociation, GLOBAL_LOCALIZATION_DEBUG_TOPIC,
+    GlobalLocalizationDebug, VisualLocalizationFrame,
 };
 
 /// A semantic point landmark used by the production global-localization map.

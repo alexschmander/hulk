@@ -129,7 +129,6 @@ impl ProductionVisualOdometry {
         let delta = self.previous_time.zip(estimate).map(
             |(previous_time, previous_left_camera_to_current_left_camera)| VisualOdometryDelta {
                 previous_time,
-                current_time: time,
                 current_left_camera_to_previous_left_camera:
                     previous_left_camera_to_current_left_camera.inverse(),
             },
@@ -140,10 +139,11 @@ impl ProductionVisualOdometry {
         }
 
         VisualOdometryMeasurement {
-            delta,
+            delta: delta.clone(),
             odometer: VisualOdometer {
                 time,
                 epoch: self.epoch,
+                delta,
                 current_left_camera_to_visual_odometer: self
                     .pipeline
                     .current_left_camera_to_visual_odometer(),
@@ -221,7 +221,7 @@ fn rgba_to_nv12(rgba: &[u8]) -> Vec<u8> {
     assert_eq!(rgba.len(), (WIDTH * HEIGHT * 4) as usize);
     let pixel_count = (WIDTH * HEIGHT) as usize;
     let mut nv12 = vec![128; pixel_count * 3 / 2];
-    for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+    for (index, pixel) in rgba.as_chunks::<4>().0.iter().enumerate() {
         nv12[index] = luma(pixel[0], pixel[1], pixel[2]);
     }
     for y in (0..HEIGHT as usize).step_by(2) {
