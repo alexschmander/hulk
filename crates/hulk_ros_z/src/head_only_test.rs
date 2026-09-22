@@ -58,6 +58,9 @@ pub struct Args {
     /// Fixed hold pitch, in radians; used only by the hold pattern.
     #[arg(long, default_value_t = 0.7, allow_hyphen_values = true)]
     head_test_pitch: f32,
+    /// Head evaluation/output rate for this experiment (50, 100, or 200 Hz).
+    #[arg(long, requires = "head_only_test", value_parser = parse_rate)]
+    head_test_rate_hz: Option<u32>,
     /// Override only the active yaw proportional gain for this experiment.
     #[arg(long, requires = "head_only_test", value_parser = parse_gain)]
     head_test_yaw_kp: Option<f32>,
@@ -70,6 +73,13 @@ pub struct Args {
     /// Override only the active pitch derivative gain for this experiment.
     #[arg(long, requires = "head_only_test", value_parser = parse_gain)]
     head_test_pitch_kd: Option<f32>,
+}
+
+fn parse_rate(value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(rate @ (50 | 100 | 200)) => Ok(rate),
+        _ => Err("rate must be 50, 100, or 200 Hz".into()),
+    }
 }
 
 fn parse_gain(value: &str) -> Result<f32, String> {
@@ -141,6 +151,19 @@ pub fn prepare(
         overrides.join("head_motion.json5"),
         serde_json::to_vec_pretty(&head_overrides)?,
     )?;
+    if let Some(rate) = args.head_test_rate_hz {
+        ensure!([50, 100, 200].contains(&rate), "unsupported head rate");
+        let period = json!({"secs": 0, "nanos": 1_000_000_000 / rate});
+        for (key, field) in [
+            ("motion", "control_period"),
+            ("hardware_interface", "joint_control_message_interval"),
+        ] {
+            fs::write(
+                overrides.join(format!("{key}.json5")),
+                serde_json::to_vec_pretty(&json!({field: period}))?,
+            )?;
+        }
+    }
     let recording = mcap_recorder::McapRecorderParameters {
         enable: true,
         max_duration: None,
@@ -158,6 +181,7 @@ pub fn prepare(
             "hardware_interface/joint_command",
             hardware_interface::COMMAND_TIMING_TOPIC,
             head_motion::diagnostics::TOPIC,
+            motion::TIMING_TOPIC,
         ]
         .into_iter()
         .map(str::to_owned)
@@ -174,6 +198,7 @@ pub fn prepare(
             "head_motion": args.head_only_test.map(Pattern::head_motion),
             "seconds": args.head_test_seconds, "yaw": args.head_test_yaw, "pitch": args.head_test_pitch,
             "gain_overrides": gain_overrides,
+            "rate_hz_override": args.head_test_rate_hz,
             "hardware_id": hardware_id, "namespace": namespace,
             "arguments": std::env::args().collect::<Vec<_>>(), "source_parameter_layers": layers,
             "body": {"kp": 0, "kd": 1, "velocity": 0, "torque": 0},

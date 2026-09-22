@@ -73,6 +73,44 @@ maximum per waypoint). `look-around` remains an equivalent name.
 lost-ball search behavior itself is unchanged. Each experiment now also records
 its actual `head_motion`, so the two scan types can be distinguished explicitly.
 
+## Head update rate
+
+The default remains 50 Hz. Select 100 or 200 Hz per run without changing the
+packaged parameters or gains:
+
+```bash
+./scripts/head-only-test run 10.1.24.43 scan 30 --rate-hz 100
+./scripts/head-only-test run 10.1.24.43 scan 30 --rate-hz 200
+```
+
+For a comparison with the tuned yaw gains, run the same three holds and scan at
+50, 100, and 200 Hz (12 runs, 3.75 minutes active with the default durations):
+
+```bash
+./scripts/head-only-test campaign 10.1.24.43 --kp 12 --kd 1 --rate-hz 50 100 200 --dry-run
+./scripts/head-only-test campaign 10.1.24.43 --kp 12 --kd 1 --rate-hz 50 100 200
+```
+
+Pitch stays at kp=10/kd=1.2. The campaign manifest records each rate alongside its
+gains; each experiment records its rate override and the effective parameter
+layers. Leave the head untouched and keep the support identical across runs.
+
+`motion.control_period` selects 20, 10, or 5 ms and requires a process restart.
+The existing head service evaluates a new trajectory sample on each coordinator
+tick. The normal motion stack requests body inference every 20 ms and holds the
+complete body result between replies, including velocities, torque, and gains.
+Inference runs independently of head-service calls. A held body result retains
+its original request and sensor timestamps; fresh head output cannot extend its
+validity. Policy changes discard old results, and get-up still owns all joints.
+
+Hardware sends accepted RobotCommands immediately. Its existing
+`joint_control_message_interval` controls watchdog checks and protective output,
+not a second timer sampling active head targets. The run's rate override sets both
+periods together. Overruns skip missed ticks rather than publishing catch-up bursts.
+The motion services, RobotCommand topic, SDK command format, and trajectory limits
+are unchanged. Measure actual publication intervals in the recording: a selected
+rate is not a guarantee of delivery through the bridge or firmware.
+
 ## Gain campaign
 
 The campaign runs a fixed matrix for one selected joint. Defaults are:
@@ -89,7 +127,8 @@ For each pair, it holds center `(0, 0.7)`, left `(0.95, 0.5)`, and right
 That is 16 recordings and 5 minutes of active testing, plus startup/transfers and
 2 seconds in damping between runs. Every run starts a separate timed process and
 returns to firmware damping. The other head joint is explicitly fixed at kp=10,
-kd=1.2. Body damping, trajectory limits, and update rates remain unchanged.
+kd=1.2. Body damping and trajectory limits remain unchanged; the campaign uses 50 Hz unless
+`--rate-hz` is specified.
 
 Preview without contacting the robot or requiring a prepared kit:
 
@@ -180,10 +219,10 @@ recordings to their manifest. `experiment.json` records `gain_overrides`,
 The console logs sit beside each run directory as `.out` and `.err` files.
 
 The test records `inputs/low_state`, `joint_limits`, `behavior/motion_command`,
-`commands/robot_command`, `motion/execution`, `hardware_interface/status`,
+`commands/robot_command`, `motion/execution`, `motion/timing`, `hardware_interface/status`,
 `hardware_interface/joint_command`, `hardware_interface/command_timing`, and
 `head_motion/diagnostics`. Images and unrelated perception topics are omitted.
-The two new diagnostic topics are also included in the normal base recorder config.
+These diagnostic topics are also included in the normal base recorder config.
 
 Head diagnostics contain each request's observation, observation source and receipt
 times, evaluation times, reference position/velocity/acceleration, output commands,
@@ -191,6 +230,10 @@ arrival progress, scan phase/dwell/deadline state, constraints, reseeds, errors,
 the exact head parameters used. Hardware timing connects incoming RobotCommand
 source/receipt times to the raw SDK publish start/end times. These are host publish
 times; motor-controller receipt is not acknowledged by that transport.
+
+`motion/timing` records coordinator start/end times and the original request times
+of the held body result and any pending inference. This distinguishes expected
+body repetition from head repeats and from expired inference.
 
 Compare reference and final commanded trajectories against measured motion. Smooth
 references with uneven hardware publication point to dispatch timing. Regular final

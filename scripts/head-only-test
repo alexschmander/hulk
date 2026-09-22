@@ -15,6 +15,7 @@ Usage:
 prepare builds an ARM64 release and packages it locally; it does not contact a robot.
 run uploads the prepared kit, stops the normal HULK service, and runs a timed test.
 Default: zero angles for 10 seconds. Hold angles are radians (default 0, 0.7).
+Rate option: --rate-hz 50|100|200. Body inference stays at 50 Hz.
 Gain options: --yaw-kp VALUE, --yaw-kd VALUE, --pitch-kp VALUE, --pitch-kd VALUE.
 Only specified gains change, for that run; normal deployment parameters stay unchanged.
 scan/look-around: left -> center -> right -> center, including pitch changes.
@@ -73,6 +74,9 @@ case "$action" in
                 case "$1" in
                     --yaw-kp|--yaw-kd|--pitch-kp|--pitch-kd)
                         [[ "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'Gains must be nonnegative decimal numbers' >&2; exit 1; }
+                        ;;
+                    --rate-hz)
+                        [[ "${2:-}" =~ ^(50|100|200)$ ]] || { echo 'Rate must be 50, 100, or 200 Hz' >&2; exit 1; }
                         ;;
                     --run-id)
                         [[ "${2:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,120}$ ]] || { echo 'Invalid run ID' >&2; exit 1; }

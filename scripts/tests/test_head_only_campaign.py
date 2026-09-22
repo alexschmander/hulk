@@ -75,6 +75,16 @@ class CampaignTests(unittest.TestCase):
                              [(0, .7), (.95, .5), (-.95, .5)])
             self.assertEqual(steps[3]["pattern"], "scan")
 
+    def test_rate_campaign_keeps_gains_fixed_and_records_each_rate(self):
+        steps = campaign.plan(campaign.arguments([
+            "robot.test", "--kp", "12", "--kd", "1", "--rate-hz", "50", "100", "200"
+        ]), "rate-test")
+        self.assertEqual(len(steps), 12)
+        self.assertEqual([s["rate_hz"] for s in steps], [50] * 4 + [100] * 4 + [200] * 4)
+        self.assertTrue(all(s["gains"] == steps[0]["gains"] for s in steps))
+        for step in steps:
+            self.assertEqual(step["command"][step["command"].index("--rate-hz") + 1], str(step["rate_hz"]))
+
     def test_success_downloads_and_verifies_every_run(self):
         code, manifest = self.execute()
         self.assertEqual(code, 0)

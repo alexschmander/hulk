@@ -14,6 +14,7 @@ async fn timed_seated_test_records_and_returns_firmware_to_damping() {
     let args = Args {
         head_only_test: Some(Pattern::Scan),
         head_test_seconds: 1,
+        head_test_rate_hz: Some(200),
         head_test_yaw: 0.0,
         head_test_pitch: 0.7,
         head_test_yaw_kp: Some(12.0),
@@ -136,7 +137,11 @@ async fn timed_seated_test_records_and_returns_firmware_to_damping() {
     assert!(modes.contains(&3));
     assert_eq!(modes.last(), Some(&0));
     let sent = sent.lock().unwrap();
-    assert!(sent.iter().any(|c| c.motor_commands[0].kp > 0.0));
+    let active_count = sent.iter().filter(|c| c.motor_commands[0].kp > 0.0).count();
+    assert!(
+        active_count >= 140 && active_count <= 240,
+        "expected about 200 active commands: {active_count}"
+    );
     for command in sent.iter() {
         if command.motor_commands[0].kp > 0.0 {
             assert_eq!(command.motor_commands[0].kp, 12.0);
@@ -171,6 +176,7 @@ async fn timed_seated_test_records_and_returns_firmware_to_damping() {
         "inputs/low_state",
         "commands/robot_command",
         "head_motion/diagnostics",
+        "motion/timing",
         "hardware_interface/command_timing",
         "hardware_interface/joint_command",
     ] {
@@ -193,6 +199,7 @@ async fn timed_seated_test_records_and_returns_firmware_to_damping() {
         serde_json::from_slice(&fs::read(log.join("experiment.json")).unwrap()).unwrap();
     assert_eq!(experiment["gain_overrides"], json!({"kp": {"yaw": 12.0}}));
     assert_eq!(experiment["head_motion"], json!("LookAround"));
+    assert_eq!(experiment["rate_hz_override"], json!(200));
     ctx.shutdown().unwrap();
 }
 
@@ -219,6 +226,19 @@ fn gain_options_require_head_only_and_valid_values() {
             .is_err()
         );
     }
+    for value in ["0", "51", "400", "NaN"] {
+        assert!(
+            Cli::try_parse_from([
+                "test",
+                "--head-only-test",
+                "scan",
+                "--head-test-rate-hz",
+                value
+            ])
+            .is_err()
+        );
+    }
+    assert!(Cli::try_parse_from(["test", "--head-test-rate-hz", "200"]).is_err());
     let cli = Cli::try_parse_from([
         "test",
         "--head-only-test",

@@ -90,7 +90,14 @@ fn body_position(sensor: &LowState) -> Result<Joints<f32>> {
 pub(super) async fn run(ctx: Arc<Context>, head_only: bool) -> Result<()> {
     let node = ctx.create_node("motion").build().await?;
     let parameters = node.bind_parameter_as::<Parameters>("motion")?;
-    parameters.add_validation_hook(Parameters::validate)?;
+    let control_period = parameters.snapshot().typed().control_period;
+    parameters.add_validation_hook(move |p| {
+        p.validate()?;
+        if p.control_period != control_period {
+            return Err("changing the motion control period requires a restart".into());
+        }
+        Ok(())
+    })?;
     let qos = QosProfile {
         reliability: QosReliability::BestEffort,
         history: QosHistory::from_depth(1),
@@ -107,26 +114,72 @@ pub(super) async fn run(ctx: Arc<Context>, head_only: bool) -> Result<()> {
         .qos(qos)
         .build()
         .await?;
-    let mut motion = MotionState {
-        walk_inference_client: node
-            .service_client::<WalkInferenceService>(WALK_INFERENCE_SERVICE)
-            .qos(qos)
-            .build()
-            .await?,
-        kick_inference_client: node
-            .service_client::<KickInferenceService>(KICK_INFERENCE_SERVICE)
-            .qos(qos)
-            .build()
-            .await?,
-        get_up_inference_client: node
-            .service_client::<GetUpInferenceService>(GETUP_INFERENCE_SERVICE)
-            .qos(qos)
-            .build()
-            .await?,
+    let mut motion = motion_state(&node, qos).await?;
+    let timing = node
+        .publisher::<Timing>(TIMING_TOPIC)
+        .qos(qos)
+        .build()
+        .await?;
+    let mut sequence = 0;
+    let mut safety = ControlSafety::default();
+    let mut timer = node.create_timer(control_period);
+    loop {
+        timer.tick().await;
+        let started_at = node.clock().now();
+        let p = parameters.snapshot();
+        let command = if head_only {
+            cycle_head_only(&node, &inputs, &mut motion, &mut safety, p.typed()).await
+        } else {
+            cycle(&node, &inputs, &mut motion, &mut safety, p.typed()).await
+        };
+        let completed_at = node.clock().now();
+        outputs.publish(&command).await?;
+        sequence += 1;
+        timing
+            .publish(&Timing {
+                sequence,
+                started_at,
+                completed_at,
+                body_requested_at: motion.body.cached.as_ref().map(|body| body.requested_at),
+                body_pending_since: motion.body.pending_since,
+            })
+            .await?;
+        statuses
+            .publish(&safety.status(&command, &motion, node.clock().now()))
+            .await?;
+        // A slow service call or delayed wake must not cause an immediate burst
+        // of catch-up commands after this cycle's output.
+        if timer.deadline() <= node.clock().now() {
+            timer.reset();
+        }
+    }
+}
+
+pub(super) async fn motion_state(node: &Node, qos: QosProfile) -> Result<MotionState> {
+    Ok(MotionState {
+        walk_inference_client: Arc::new(
+            node.service_client::<WalkInferenceService>(WALK_INFERENCE_SERVICE)
+                .qos(qos)
+                .build()
+                .await?,
+        ),
+        kick_inference_client: Arc::new(
+            node.service_client::<KickInferenceService>(KICK_INFERENCE_SERVICE)
+                .qos(qos)
+                .build()
+                .await?,
+        ),
+        get_up_inference_client: Arc::new(
+            node.service_client::<GetUpInferenceService>(GETUP_INFERENCE_SERVICE)
+                .qos(qos)
+                .build()
+                .await?,
+        ),
         head_motion_client: node
             .service_client::<HeadMotionService>(HEAD_MOTION_SERVICE_TOPIC)
             .build()
             .await?,
+        body: body::BodySchedule::default(),
         generation: node.clock().now().as_nanos() as u64,
         active: false,
         last_policy: None,
@@ -134,22 +187,7 @@ pub(super) async fn run(ctx: Arc<Context>, head_only: bool) -> Result<()> {
             time: node.clock().now(),
             inner: UpperBodyJoints::fill(0.0),
         },
-    };
-    let mut safety = ControlSafety::default();
-    let mut timer = node.create_timer(Duration::from_millis(20));
-    loop {
-        timer.tick().await;
-        let p = parameters.snapshot();
-        let command = if head_only {
-            cycle_head_only(&node, &inputs, &mut motion, &mut safety, p.typed()).await
-        } else {
-            cycle(&node, &inputs, &mut motion, &mut safety, p.typed()).await
-        };
-        outputs.publish(&command).await?;
-        statuses
-            .publish(&safety.status(&command, &motion, node.clock().now()))
-            .await?;
-    }
+    })
 }
 
 #[derive(Default)]
@@ -432,6 +470,16 @@ async fn infer_and_validate(
                 RobotCommand::Damping
             },
         );
+    }
+    let fresh_plan = MotionPlan::from_motion_command(&fresh.command.received, &p.walking)?;
+    if std::mem::discriminant(&fresh_plan) != std::mem::discriminant(&plan)
+        || matches!((plan, fresh_plan),
+            (MotionPlan::GetUp { command: a }, MotionPlan::GetUp { command: b }) if a.fast != b.fast)
+        || matches!((plan, fresh_plan),
+            (MotionPlan::Kick { command: a, .. }, MotionPlan::Kick { command: b, .. }) if a.soft != b.soft)
+    {
+        motion.deactivate();
+        return Ok(RobotCommand::EnableCustom);
     }
     ensure!(
         fresh.hardware.received.fault.is_none()

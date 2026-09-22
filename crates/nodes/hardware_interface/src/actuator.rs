@@ -117,17 +117,17 @@ impl Actuator {
         }
         self.command = None;
     }
-    fn receive(&mut self, command: RobotCommand, source: Time, now: Time, p: &Parameters) {
+    fn receive(&mut self, command: RobotCommand, source: Time, now: Time, p: &Parameters) -> bool {
         if source > now || now.duration_since(source) > p.command_timeout {
             self.fail("expired robot command");
-            return;
+            return true;
         }
         if self
             .command
             .as_ref()
             .is_some_and(|(old, _, _)| source <= *old)
         {
-            return;
+            return false;
         }
         if self.fault.is_some() {
             match command {
@@ -136,10 +136,11 @@ impl Actuator {
                     self.fault = None;
                     self.saw_damping = false;
                 }
-                _ => return,
+                _ => return false,
             }
         }
         self.command = Some((source, now, command));
+        true
     }
     fn output(&mut self, now: Time, p: &Parameters) -> (ControlMode, LowCommand) {
         if self.command.as_ref().is_some_and(|(source, receipt, _)| {
@@ -311,13 +312,29 @@ pub(super) async fn run(
         tokio::select! {
             received=commands.recv_with_metadata()=> {
                 let r=received?;let time=r.source_time;
-                actuator.receive(r.into_message(),time,node.clock().now(),parameters.snapshot().typed());
+                let p = parameters.snapshot();
+                if actuator.receive(r.into_message(), time, node.clock().now(), p.typed()) {
+                    // Motion owns the active cadence: send each accepted complete
+                    // command immediately, without an independent sampling timer.
+                    actuator.tick(&node, p.typed(), &mut modes, &publisher, &output_publishers).await?;
+                }
             }
             received=limits.recv()=> {
                 let limits=received?;
                 match limits.validate() {Ok(())=>actuator.limits=Some(limits),Err(reason)=>{actuator.limits=None;actuator.fail(reason);}}
             }
-            _=timer.tick()=>actuator.tick(&node,parameters.snapshot().typed(),&mut modes,&publisher,&output_publishers).await?,
+            _=timer.tick()=> {
+                if timer.deadline() <= node.clock().now() {
+                    timer.reset();
+                }
+                let p = parameters.snapshot();
+                // Keep protective output/mode acknowledgement/watchdogs alive if
+                // Motion stops. Do not resample a healthy Custom command here.
+                let (desired, _) = actuator.output(node.clock().now(), p.typed());
+                if desired != ControlMode::Custom || modes.acknowledged() != Some(ControlMode::Custom) {
+                    actuator.tick(&node, p.typed(), &mut modes, &publisher, &output_publishers).await?;
+                }
+            },
         }
     }
 }

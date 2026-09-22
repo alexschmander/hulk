@@ -19,6 +19,7 @@ struct Bench {
     commands_enabled: Arc<AtomicBool>,
     custom_acknowledged: Arc<AtomicBool>,
     head_replies: Arc<AtomicBool>,
+    body_replies: Arc<AtomicBool>,
     outputs: Subscriber<RobotCommand>,
     statuses: Subscriber<MotionExecution>,
 }
@@ -95,12 +96,53 @@ impl Bench {
             .build()
             .await
             .unwrap();
+        let mut walk = node
+            .service_server::<WalkInferenceService>(WALK_INFERENCE_SERVICE)
+            .build()
+            .await
+            .unwrap();
+        let inference_status = node
+            .publisher::<motion_inference::node::Status>(motion_inference::node::STATUS_TOPIC)
+            .qos(QosProfile {
+                durability: QosDurability::TransientLocal,
+                ..qos
+            })
+            .build()
+            .await
+            .unwrap();
         let (request, requests) = watch::channel(MotionCommand::Damping);
         let sensors_enabled = Arc::new(AtomicBool::new(true));
         let commands_enabled = Arc::new(AtomicBool::new(true));
         let custom_acknowledged = Arc::new(AtomicBool::new(false));
         let head_replies = Arc::new(AtomicBool::new(true));
+        let body_replies = Arc::new(AtomicBool::new(true));
         let mut tasks = JoinSet::new();
+        let reply_body = body_replies.clone();
+        tasks.spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (request, reply) = walk.take_request_async().await.unwrap().into_parts();
+                if !reply_body.load(Ordering::Relaxed) {
+                    held.push(reply);
+                    continue;
+                }
+                reply
+                    .reply_async(&Ok(InferenceResponse {
+                        joints: Box::new(LowerBodyJoints::fill(MotorCommand {
+                            kp: 20.0,
+                            ..MotorCommand::damping()
+                        })),
+                        execution: PolicyExecution {
+                            policy: motion_inference::config::Policy::Walk,
+                            started_at: request.requested_at,
+                            sensor_time: request.requested_at,
+                            progress: None,
+                        },
+                    }))
+                    .await
+                    .unwrap();
+            }
+        });
         let enabled = head_replies.clone();
         tasks.spawn(async move {
             while let Ok(request) = head.take_request_async().await {
@@ -132,6 +174,13 @@ impl Bench {
             sample.imu_state.roll_pitch_yaw = vector![0.8, 0.6, 0.0];
             loop {
                 let now = node.clock().now();
+                inference_status
+                    .publish(&motion_inference::node::Status {
+                        time: now,
+                        state: motion_inference::node::State::Initialized,
+                    })
+                    .await
+                    .unwrap();
                 if sensor_flag.load(Ordering::Relaxed) {
                     sensors.publish(&sample).await.unwrap();
                 }
@@ -167,6 +216,7 @@ impl Bench {
             commands_enabled,
             custom_acknowledged,
             head_replies,
+            body_replies,
             outputs,
             statuses,
         };
@@ -324,4 +374,34 @@ async fn normal_runtime_rejects_head_only() {
         bench.outputs.recv().await.unwrap(),
         RobotCommand::Damping
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_body_inference_latches_normal_runtime_damping() {
+    let bench = Bench::new(false).await;
+    bench.custom_acknowledged.store(true, Ordering::Relaxed);
+    bench.request.send_replace(MotionCommand::Stand {
+        head: HeadMotion::LookAround,
+    });
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                bench.outputs.recv().await.unwrap(),
+                RobotCommand::Custom { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    bench.body_replies.store(false, Ordering::Relaxed);
+    let fault = bench.wait_phase(MotionPhase::Fault).await;
+    assert!(fault.fault.is_some());
+    for _ in 0..5 {
+        assert!(matches!(
+            bench.outputs.recv().await.unwrap(),
+            RobotCommand::Damping
+        ));
+    }
 }

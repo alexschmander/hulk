@@ -20,7 +20,7 @@ use motion_inference::{
     },
     locomotion::{KickRequest, leg},
     node::{
-        GETUP_INFERENCE_SERVICE, GetUpInferenceService, InferenceResult, KICK_INFERENCE_SERVICE,
+        GETUP_INFERENCE_SERVICE, GetUpInferenceService, KICK_INFERENCE_SERVICE,
         KickInferenceService, WALK_INFERENCE_SERVICE, WalkInferenceService,
     },
 };
@@ -44,10 +44,23 @@ use crate::{
     walking::{WalkingParameters, step_from_walk_command},
 };
 
+mod body;
 pub mod command;
 mod inputs;
 mod node;
 pub mod walking;
+
+pub const TIMING_TOPIC: &str = "motion/timing";
+
+/// Coordinator timing and the original age of the body result held between ticks.
+#[derive(Serialize, Deserialize, Message)]
+pub struct Timing {
+    pub sequence: u64,
+    pub started_at: ros_z::time::Time,
+    pub completed_at: ros_z::time::Time,
+    pub body_requested_at: Option<ros_z::time::Time>,
+    pub body_pending_since: Option<ros_z::time::Time>,
+}
 
 pub const ROBOT_COMMAND_TOPIC: &str = "commands/robot_command";
 
@@ -68,6 +81,8 @@ struct ArmParameters {
 
 #[derive(Serialize, Deserialize, Message)]
 struct Parameters {
+    /// Head evaluation period; body inference remains at 50 Hz. Restart to change.
+    control_period: Duration,
     arms: ArmParameters,
     walking: WalkingParameters,
     inference_timeout: Duration,
@@ -79,6 +94,12 @@ struct Parameters {
 
 impl Parameters {
     fn validate(&self) -> std::result::Result<(), String> {
+        if ![5, 10, 20]
+            .map(Duration::from_millis)
+            .contains(&self.control_period)
+        {
+            return Err("motion control_period must be 5, 10, or 20 ms".into());
+        }
         let a = &self.arms;
         let w = &self.walking;
         if [
@@ -125,15 +146,17 @@ pub fn run_head_only_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Res
 
 struct MotionState {
     head_motion_client: ServiceClient<HeadMotionService>,
-    walk_inference_client: ServiceClient<WalkInferenceService>,
-    kick_inference_client: ServiceClient<KickInferenceService>,
-    get_up_inference_client: ServiceClient<GetUpInferenceService>,
+    walk_inference_client: Arc<ServiceClient<WalkInferenceService>>,
+    kick_inference_client: Arc<ServiceClient<KickInferenceService>>,
+    get_up_inference_client: Arc<ServiceClient<GetUpInferenceService>>,
+    body: body::BodySchedule,
     generation: u64,
     active: bool,
     last_policy: Option<PolicyExecution>,
     last_arms: TimeWrapper<UpperBodyJoints<f32>>,
 }
 
+#[derive(Clone, Copy)]
 enum MotionPlan {
     HeadOnly {
         head: HeadMotion,
@@ -241,6 +264,7 @@ impl MotionState {
         }
         self.active = false;
         self.last_policy = None;
+        self.body.clear();
     }
 
     async fn infer(
@@ -279,131 +303,39 @@ impl MotionState {
             self.generation = self.generation.saturating_add(1);
             self.active = true;
         }
-        let now = clock.now();
-        let (joints_command, execution) = self
-            .infer_policy(motion_plan, now, clock, parameters, joint_limits)
-            .await?;
-        ensure!(
-            clock.now() < now + parameters.inference_timeout,
-            "motion inference deadline expired before dispatch"
-        );
-        let robot_command = RobotCommand::Custom { joints_command }.clamp(joint_limits)?;
-        if let RobotCommand::Custom { joints_command } = &robot_command {
-            self.last_arms = TimeWrapper {
-                time: now,
-                inner: joints_command.upper_body_as_ref().map(|j| j.position),
-            };
-        }
-        self.last_policy = Some(execution);
-        Ok(robot_command)
-    }
-
-    fn request<C>(
-        &self,
-        command: C,
-        now: ros_z::time::Time,
-        timeout: Duration,
-    ) -> InferenceRequest<C> {
-        InferenceRequest {
-            generation: self.generation,
-            requested_at: now,
-            valid_until: now + timeout,
-            command,
-        }
-    }
-
-    async fn infer_policy(
-        &self,
-        plan: MotionPlan,
-        now: ros_z::time::Time,
-        clock: &Clock,
-        p: &Parameters,
-        limits: &JointLimits,
-    ) -> Result<(Joints<MotorCommand>, PolicyExecution)> {
-        match plan {
+        let (body_command, head) = match motion_plan {
             MotionPlan::Walk {
                 command,
                 head_motion,
-            } => {
-                let request = self.request(command, now, p.inference_timeout);
-                let body = self
-                    .walk_inference_client
-                    .call_with_timeout_async(&request, p.inference_timeout);
-                self.infer_lower_body(
-                    body,
-                    head_motion,
-                    InferenceCommand::Walk(command).policy(),
-                    clock,
-                    p,
-                    limits,
-                )
-                .await
-            }
+            } => (InferenceCommand::Walk(command), Some(head_motion)),
             MotionPlan::Kick {
                 command,
                 head_motion,
-            } => {
-                let request = self.request(command, now, p.inference_timeout);
-                let body = self
-                    .kick_inference_client
-                    .call_with_timeout_async(&request, p.inference_timeout);
-                self.infer_lower_body(
-                    body,
-                    head_motion,
-                    InferenceCommand::Kick(command).policy(),
-                    clock,
-                    p,
-                    limits,
-                )
-                .await
-            }
-            MotionPlan::GetUp { command } => {
-                let request = self.request(command, now, p.inference_timeout);
-                let output = self
-                    .get_up_inference_client
-                    .call_with_timeout_async(&request, p.inference_timeout)
-                    .await??;
-                ensure!(
-                    output.execution.policy == InferenceCommand::GetUp(command).policy(),
-                    "inference returned the wrong policy"
-                );
-                Ok((*output.joints, output.execution))
-            }
-            MotionPlan::HeadOnly { .. } | MotionPlan::Damping | MotionPlan::Prepare => {
-                Err(eyre!("inference requires a body policy"))
-            }
+            } => (InferenceCommand::Kick(command), Some(head_motion)),
+            MotionPlan::GetUp { command } => (InferenceCommand::GetUp(command), None),
+            _ => unreachable!("non-policy plans handled above"),
+        };
+        self.update_body(body_command, clock, parameters, joint_limits)?;
+        let head = if let Some(head) = head {
+            Some(
+                self.head_motion_client
+                    .call_with_timeout_async(&head, parameters.head_motion_timeout)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        // Head service latency must not extend the lifetime of a held body result.
+        self.body.validate(clock.now(), parameters)?;
+        let Some(body) = &self.body.cached else {
+            // Custom handshake remains active while the first policy result is pending.
+            return Ok(RobotCommand::EnableCustom);
+        };
+        let mut joints_command = body.joints.clone();
+        if let Some(head) = head {
+            joints_command.head = head;
         }
-    }
-
-    async fn infer_lower_body(
-        &self,
-        body: impl std::future::Future<
-            Output = ros_z::Result<
-                InferenceResult<InferenceResponse<LowerBodyJoints<MotorCommand>>>,
-            >,
-        >,
-        head: HeadMotion,
-        policy: motion_inference::config::Policy,
-        clock: &Clock,
-        p: &Parameters,
-        limits: &JointLimits,
-    ) -> Result<(Joints<MotorCommand>, PolicyExecution)> {
-        let head = self
-            .head_motion_client
-            .call_with_timeout_async(&head, p.head_motion_timeout);
-        let (output, head) = tokio::join!(body, head);
-        let output = output??;
-        let head = head?;
-        ensure!(
-            output.execution.policy == policy,
-            "inference returned the wrong policy"
-        );
-        let legs = *output.joints;
-        let arms = self.generate_walking_arm_joints(&legs, clock, &p.arms, limits)?;
-        Ok((
-            Joints::from_head_and_body(head, BodyJoints::from_lower_and_upper(legs, arms)),
-            output.execution,
-        ))
+        RobotCommand::Custom { joints_command }.clamp(joint_limits)
     }
 
     fn generate_walking_arm_joints(

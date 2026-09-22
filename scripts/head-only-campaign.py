@@ -37,6 +37,7 @@ def arguments(argv=None):
     parser.add_argument("--joint", choices=["yaw", "pitch"], default="yaw")
     parser.add_argument("--kp", nargs="+", type=gain, default=["10", "12"])
     parser.add_argument("--kd", nargs="+", type=gain, default=["1.2", "1.4"])
+    parser.add_argument("--rate-hz", nargs="+", type=int, choices=[50, 100, 200], default=[50])
     parser.add_argument("--hold-seconds", type=seconds, default=15)
     parser.add_argument("--scan-seconds", type=seconds, default=30)
     parser.add_argument("--dry-run", action="store_true", help="print plan without contacting robot")
@@ -48,27 +49,28 @@ def arguments(argv=None):
 
 def plan(args, campaign_id):
     steps = []
-    for kd in args.kd:
-        for kp in args.kp:
-            gains = {"yaw_kp": "10", "yaw_kd": "1.2", "pitch_kp": "10", "pitch_kd": "1.2"}
-            gains[f"{args.joint}_kp"] = kp
-            gains[f"{args.joint}_kd"] = kd
-            # Same waypoints as the production LookAround path used by `scan`.
-            for label, pattern, duration, yaw, pitch in [
-                ("center", "hold", args.hold_seconds, "0", "0.7"),
-                ("left", "hold", args.hold_seconds, "0.95", "0.5"),
-                ("right", "hold", args.hold_seconds, "-0.95", "0.5"),
-                ("scan", "scan", args.scan_seconds, "0", "0.7"),
-            ]:
-                run_id = f"{campaign_id}-{len(steps) + 1:03d}-{label}"
-                command = [str(ROOT / "scripts/head-only-test"), "run", args.robot,
-                           pattern, str(duration), yaw, pitch, "--run-id", run_id]
-                for key, value in gains.items():
-                    command.extend(["--" + key.replace("_", "-"), value])
-                steps.append({"run_id": run_id, "pattern": pattern, "waypoint": label,
-                              "seconds": duration, "yaw": float(yaw), "pitch": float(pitch),
-                              "gains": {key: float(value) for key, value in gains.items()},
-                              "command": command, "status": "planned"})
+    for rate in args.rate_hz:
+        for kd in args.kd:
+            for kp in args.kp:
+                gains = {"yaw_kp": "10", "yaw_kd": "1.2", "pitch_kp": "10", "pitch_kd": "1.2"}
+                gains[f"{args.joint}_kp"] = kp
+                gains[f"{args.joint}_kd"] = kd
+                # Same waypoints as the production LookAround path used by `scan`.
+                for label, pattern, duration, yaw, pitch in [
+                    ("center", "hold", args.hold_seconds, "0", "0.7"),
+                    ("left", "hold", args.hold_seconds, "0.95", "0.5"),
+                    ("right", "hold", args.hold_seconds, "-0.95", "0.5"),
+                    ("scan", "scan", args.scan_seconds, "0", "0.7"),
+                ]:
+                    run_id = f"{campaign_id}-{len(steps) + 1:03d}-{label}"
+                    command = [str(ROOT / "scripts/head-only-test"), "run", args.robot,
+                               pattern, str(duration), yaw, pitch, "--run-id", run_id, "--rate-hz", str(rate)]
+                    for key, value in gains.items():
+                        command.extend(["--" + key.replace("_", "-"), value])
+                    steps.append({"run_id": run_id, "pattern": pattern, "waypoint": label,
+                                  "seconds": duration, "yaw": float(yaw), "pitch": float(pitch),
+                                  "rate_hz": rate, "gains": {key: float(value) for key, value in gains.items()},
+                                  "command": command, "status": "planned"})
     return steps
 
 
