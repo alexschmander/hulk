@@ -33,6 +33,7 @@ fn supported_head_moves_without_behavior_or_inference_and_stops_and_restarts() {
                 ],
                 launch_nodes: true,
                 head_only: true,
+                head_rate_hz: Some(200),
             },
             clock.clone(),
         )

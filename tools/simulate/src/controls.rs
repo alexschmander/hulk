@@ -1648,6 +1648,7 @@ mod tests {
                     ],
                     launch_nodes: false,
                     head_only: false,
+                    head_rate_hz: None,
                 },
                 Clock::logical(Time::zero()),
             )

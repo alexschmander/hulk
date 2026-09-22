@@ -56,6 +56,16 @@ struct Args {
     /// Run only head control with body damping and a supported torso, without behavior or inference.
     #[arg(long, conflicts_with = "no_robotics")]
     head_only: bool,
+    /// Head evaluation/output rate; body inference remains at 50 Hz.
+    #[arg(long, conflicts_with = "no_robotics", value_parser = parse_head_rate)]
+    head_rate_hz: Option<u32>,
+}
+
+fn parse_head_rate(value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(rate @ (50 | 100 | 200)) => Ok(rate),
+        _ => Err("head rate must be 50, 100, or 200 Hz".into()),
+    }
 }
 
 fn main() -> Result<()> {
@@ -111,6 +121,7 @@ fn main() -> Result<()> {
             parameter_layers,
             launch_nodes: !args.no_robotics,
             head_only: args.head_only,
+            head_rate_hz: args.head_rate_hz,
         },
         Clock::logical(RosTime::zero()),
     ))?;

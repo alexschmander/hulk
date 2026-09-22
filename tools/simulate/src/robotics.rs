@@ -35,6 +35,7 @@ pub struct StackConfiguration {
     pub parameter_layers: Vec<PathBuf>,
     pub launch_nodes: bool,
     pub head_only: bool,
+    pub head_rate_hz: Option<u32>,
 }
 
 #[derive(Resource)]
@@ -83,6 +84,19 @@ impl Robotics {
             overrides.path().join("behavior_node.json5"),
             r#"{control: {injected_motion_command: null, remote_control: {enable: false}}}"#,
         )?;
+        if let Some(rate) = configuration.head_rate_hz {
+            ensure!([50, 100, 200].contains(&rate), "unsupported head rate");
+            let period = serde_json::json!({"secs": 0, "nanos": 1_000_000_000 / rate});
+            for (key, field) in [
+                ("motion", "control_period"),
+                ("hardware_interface", "joint_control_message_interval"),
+            ] {
+                std::fs::write(
+                    overrides.path().join(format!("{key}.json5")),
+                    serde_json::to_vec_pretty(&serde_json::json!({field: period}))?,
+                )?;
+            }
+        }
         Self::with_overrides(runtime, configuration, clock, overrides).await
     }
 
@@ -656,6 +670,7 @@ mod tests {
                     ],
                     launch_nodes: true,
                     head_only: false,
+                    head_rate_hz: None,
                 },
                 clock.clone(),
             )
@@ -931,6 +946,7 @@ mod tests {
                     ],
                     launch_nodes: false,
                     head_only: false,
+                    head_rate_hz: None,
                 },
                 clock.clone(),
             )

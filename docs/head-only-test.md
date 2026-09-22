@@ -111,6 +111,16 @@ The motion services, RobotCommand topic, SDK command format, and trajectory limi
 are unchanged. Measure actual publication intervals in the recording: a selected
 rate is not a guarantee of delivery through the bridge or firmware.
 
+For the combined simulator branch:
+
+```bash
+./simulator --head-only --head-rate-hz 200
+```
+
+The rate is applied again on simulator reset. Physics advances on the simulator's
+logical clock; inspect recorded timing before treating a busy graphical run as a
+precise rate comparison with the robot.
+
 ## Gain campaign
 
 The campaign runs a fixed matrix for one selected joint. Defaults are:
