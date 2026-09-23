@@ -62,7 +62,8 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .await?;
 
     let mut last_support_foot = SoleSide::Left;
-    let mut last_maybe_support_side = None;
+    // Distinguish no publication yet from a published unavailable support side.
+    let mut last_maybe_support_side: Option<Option<Side>> = None;
 
     loop {
         let parameters = parameters.snapshot().typed().clone();
@@ -98,17 +99,23 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             None
         };
 
-        if support_foot != last_maybe_support_side {
-            let message = TimeWrapper {
-                time: imu_source_time,
-                inner: support_foot,
-            };
-
+        if let Some(message) =
+            support_update(&mut last_maybe_support_side, imu_source_time, support_foot)
+        {
             support_foot_pub.publish(&message).await?;
         }
-
-        last_maybe_support_side = support_foot;
     }
+}
+
+fn support_update(
+    previous: &mut Option<Option<Side>>,
+    time: ros_z::time::Time,
+    support: Option<Side>,
+) -> Option<TimeWrapper<Option<Side>>> {
+    (previous.replace(support) != Some(support)).then_some(TimeWrapper {
+        time,
+        inner: support,
+    })
 }
 
 fn estimate_support_foot(
@@ -160,6 +167,28 @@ mod tests {
     use linear_algebra::{IntoTransform, nalgebra, point};
 
     use super::*;
+
+    #[test]
+    fn publishes_initial_unavailable_support_and_subsequent_changes() {
+        let time = ros_z::time::Time::from_nanos(1);
+        let mut previous = None;
+        assert_eq!(
+            support_update(&mut previous, time, None).unwrap().inner,
+            None
+        );
+        assert!(support_update(&mut previous, time, None).is_none());
+        assert_eq!(
+            support_update(&mut previous, time, Some(Side::Left))
+                .unwrap()
+                .inner,
+            Some(Side::Left)
+        );
+        assert!(support_update(&mut previous, time, Some(Side::Left)).is_none());
+        assert_eq!(
+            support_update(&mut previous, time, None).unwrap().inner,
+            None
+        );
+    }
 
     fn parameters() -> Parameters {
         Parameters {
