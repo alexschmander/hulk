@@ -12,6 +12,7 @@
     "support_foot",
     "ground_to_robot",
     "camera_matrix",
+    "camera_geometry",
     "detected_objects",
     "detected_objects/announce",
     "behavior/motion_command",

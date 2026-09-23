@@ -8,8 +8,13 @@ use kinematics::{robot_dimensions::RobotDimensions, robot_kinematics::RobotKinem
 use linear_algebra::{IntoTransform, Isometry3, Rotation3, Vector3, vector};
 use projection::camera_matrix::CameraMatrix;
 use ros_z::prelude::*;
+use ros_z::qos::QosDurability;
 use ros2::sensor_msgs::camera_info::CameraInfo;
-use types::{parameters::CameraMatrixParameters, time_wrapper::TimeWrapper};
+use types::{
+    camera_geometry::{CAMERA_GEOMETRY_TOPIC, CameraGeometry, MAX_CAMERA_GEOMETRY_GAP},
+    parameters::CameraMatrixParameters,
+    time_wrapper::TimeWrapper,
+};
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(run(ctx))
@@ -20,18 +25,22 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
 
     let parameters =
         node.bind_parameter_as::<CameraMatrixParameters>("camera_matrix_calculator")?;
-    let robot_kinematics_cache = node
+    let robot_kinematics_sub = node
         .subscriber::<TimeWrapper<RobotKinematics>>("robot_kinematics")
-        .cache(10)
-        .with_stamp(|w: &TimeWrapper<RobotKinematics>| w.time)
         .build()
         .await?;
-    let robot_to_ground_sub = node
+    let robot_to_ground_cache = node
         .subscriber::<TimeWrapper<Option<Isometry3<Robot, Ground>>>>("robot_to_ground")
+        .cache(32)
+        .with_stamp(|w| w.time)
         .build()
         .await?;
     let camera_info_cache = node
         .subscriber::<CameraInfo>("inputs/camera_info")
+        .qos(QosProfile {
+            durability: QosDurability::TransientLocal,
+            ..Default::default()
+        })
         .cache(1)
         .build()
         .await?;
@@ -40,28 +49,39 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .publisher::<TimeWrapper<CameraMatrix>>("camera_matrix")
         .build()
         .await?;
+    let camera_geometry_pub = node
+        .publisher::<TimeWrapper<CameraGeometry>>(CAMERA_GEOMETRY_TOPIC)
+        .build()
+        .await?;
 
     loop {
         let parameters_snapshot = parameters.snapshot();
         let parameters = parameters_snapshot.typed();
 
-        let timed_robot_to_ground = robot_to_ground_sub.recv().await?;
-        let time_stamp = timed_robot_to_ground.time;
-        let maybe_robot_to_ground = timed_robot_to_ground.inner;
-        let Some(robot_to_ground) = maybe_robot_to_ground else {
+        let timed_robot_kinematics = robot_kinematics_sub.recv().await?;
+        let time_stamp = timed_robot_kinematics.time;
+        let Some(camera_info) = camera_info_cache.get_latest() else {
             continue;
         };
+        let ground = robot_to_ground_cache
+            .get_nearest(time_stamp)
+            .filter(|ground| ground.time.abs_diff(time_stamp) <= MAX_CAMERA_GEOMETRY_GAP);
+        let (geometry, matrix) = compute_cameras(
+            parameters,
+            &timed_robot_kinematics.inner,
+            &camera_info,
+            ground.as_ref().and_then(|ground| ground.inner.as_ref()),
+        );
+        camera_geometry_pub
+            .publish(&TimeWrapper {
+                time: time_stamp,
+                inner: geometry,
+            })
+            .await?;
 
-        let (Some(timed_robot_kinematics), Some(camera_info)) = (
-            robot_kinematics_cache.get_nearest(time_stamp),
-            camera_info_cache.get_nearest(time_stamp),
-        ) else {
+        let Some(camera_matrix) = matrix else {
             continue;
         };
-        let robot_kinematics = &timed_robot_kinematics.inner;
-
-        let camera_matrix =
-            compute_camera_matrix(parameters, robot_kinematics, &robot_to_ground, &camera_info);
 
         camera_matrix_pub
             .publish(&TimeWrapper {
@@ -72,24 +92,38 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
     }
 }
 
-fn compute_camera_matrix(
+fn compute_cameras(
     parameters: &CameraMatrixParameters,
     robot_kinematics: &RobotKinematics,
-    robot_to_ground: &Isometry3<Robot, Ground>,
     camera_info: &CameraInfo,
-) -> CameraMatrix {
+    robot_to_ground: Option<&Isometry3<Robot, Ground>>,
+) -> (CameraGeometry, Option<CameraMatrix>) {
     let image_size = vector![camera_info.width as f32, camera_info.height as f32];
+    let (robot_to_head, head_to_camera) = calibrated_transforms(parameters, robot_kinematics);
+
+    let geometry = CameraGeometry {
+        robot_to_camera: head_to_camera * robot_to_head,
+        intrinsics: projection::intrinsic::Intrinsic::from(camera_info),
+    };
+    let matrix = robot_to_ground.map(|ground| {
+        CameraMatrix::from_camera_info(
+            camera_info,
+            image_size,
+            ground.inverse(),
+            robot_to_head,
+            head_to_camera,
+        )
+    });
+    (geometry, matrix)
+}
+
+fn calibrated_transforms(
+    parameters: &CameraMatrixParameters,
+    robot_kinematics: &RobotKinematics,
+) -> (Isometry3<Robot, Head>, Isometry3<Head, Camera>) {
     let head_to_camera = head_to_camera(
         parameters.camera_to_head_pitch.to_radians(),
         RobotDimensions::HEAD_TO_CAMERA,
-    );
-
-    let uncorrected_camera_matrix = CameraMatrix::from_camera_info(
-        camera_info,
-        image_size,
-        robot_to_ground.inverse(),
-        robot_kinematics.head.head_to_robot.inverse(),
-        head_to_camera,
     );
 
     let correction_in_robot = Rotation3::from_euler_angles(
@@ -103,7 +137,10 @@ fn compute_camera_matrix(
         parameters.correction_in_camera.z(),
     );
 
-    uncorrected_camera_matrix.to_corrected(correction_in_robot, correction_in_camera)
+    (
+        robot_kinematics.head.head_to_robot.inverse() * correction_in_robot,
+        correction_in_camera * head_to_camera,
+    )
 }
 
 fn head_to_camera(camera_pitch: f32, head_to_camera: Vector3<Head>) -> Isometry3<Head, Camera> {
@@ -133,25 +170,31 @@ mod tests {
         let robot_to_ground = Isometry3::identity();
         let camera_info = camera_info();
 
-        let camera_matrix = compute_camera_matrix(
+        let (geometry, camera_matrix) = compute_cameras(
             &parameters,
             &robot_kinematics,
-            &robot_to_ground,
             &camera_info,
+            Some(&robot_to_ground),
         );
+        let camera_matrix = camera_matrix.unwrap();
+        let (without_ground, missing_matrix) =
+            compute_cameras(&parameters, &robot_kinematics, &camera_info, None);
+        assert_eq!(without_ground, geometry);
+        assert!(missing_matrix.is_none());
+        assert_eq!(CameraGeometry::from(&camera_matrix), geometry);
 
         let zero_parameters = CameraMatrixParameters {
             correction_in_robot: vector![0.0, 0.0, 0.0],
             correction_in_camera: vector![0.0, 0.0, 0.0],
             ..parameters
         };
-        let uncorrected_camera_matrix = compute_camera_matrix(
+        let (_, uncorrected_camera_matrix) = compute_cameras(
             &zero_parameters,
             &robot_kinematics,
-            &robot_to_ground,
             &camera_info,
+            Some(&robot_to_ground),
         );
-        let expected = uncorrected_camera_matrix.to_corrected(
+        let expected = uncorrected_camera_matrix.unwrap().to_corrected(
             Rotation3::from_euler_angles(0.1, -0.2, 0.3),
             Rotation3::from_euler_angles(-0.4, 0.5, -0.6),
         );
