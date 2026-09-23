@@ -335,9 +335,9 @@ mod factor_workload {
             duration: c(0.2),
             tau: c(0.5),
             robot_to_camera: Transform::wrap(Isometry3::identity()),
-            pixel_information_root: Matrix2::identity(),
+            angular_information_root: c(300.0),
             huber_threshold: c(2.0),
-            min_depth: c(0.01),
+            min_range: c(0.01),
         });
         for i in 0..100 {
             graph

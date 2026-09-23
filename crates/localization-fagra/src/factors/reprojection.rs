@@ -4,10 +4,10 @@ use fagra::{
     StateKey, StateStore,
 };
 use linear_algebra::{Isometry3, Point2, Point3};
-use nalgebra::{Matrix2, RealField, SMatrix};
+use nalgebra::{Matrix3, RealField, SMatrix};
 
 use super::common;
-use crate::variables::{CameraIntrinsics, FieldAlignment, PoseControl};
+use crate::variables::{CameraIntrinsics, FieldAlignment, PoseControl, rotation::scalar};
 
 /// A detected image point associated with a known, fixed field landmark.
 #[derive(Clone, Debug)]
@@ -16,16 +16,19 @@ pub struct ReprojectionObservation<R: RealField + Copy = f64> {
     pub detection: Point2<Pixel, R>,
 }
 
-/// A frame's reprojections share trajectory evaluation and camera geometry.
+/// A frame's monotone oriented-bearing residuals share trajectory and camera geometry.
 ///
-/// Transform the fixed field point into local coordinates using inverse field
-/// alignment (leaving z unchanged), then into the robot and optical camera frames.
-/// Raw residual: pinhole projection minus detected pixel coordinates. Whiten in
-/// pixel x/y order and apply Huber independently to each 2D observation.
+/// For predicted unit bearing `d`, observed unit bearing `b`, and `c = b.dot(d)`,
+/// the three-component residual is `sqrt(3 / (2 + c)) * (d - b) / sigma_theta`.
+/// Its least-squares cost is `3 * (1 - c) / ((2 + c) * sigma_theta^2)`, strictly
+/// increasing with angular error on `(0, pi)`. Evaluation is smooth across optical
+/// z=0 and behind the camera. Only zero/near-zero range and invalid inputs fail.
 ///
-/// Reject invalid associations before insertion. An active observation outside
-/// the valid projection domain returns `EvaluationError::InvalidEvaluation` in
-/// both cost and linearization; it must not become a zero-cost observation.
+/// Huber acts on the norm of each complete whitened 3D residual. Both the observed
+/// bearing and the directional weight are differentiated, including intrinsics.
+/// The exact antipode is a stationary maximum; this is not a global convergence
+/// guarantee. Final visibility and pixel-error checks belong to the caller.
+/// The historical type name is retained; this is NOT a pixel-reprojection likelihood.
 #[derive(Clone, Debug)]
 pub struct FrameReprojections<R: RealField + Copy = f64> {
     pub controls: [StateKey<PoseControl<R>>; 4],
@@ -35,11 +38,12 @@ pub struct FrameReprojections<R: RealField + Copy = f64> {
     pub tau: R,
     /// Optical convention: x right, y down, z forward, before perspective division.
     pub robot_to_camera: Isometry3<Robot, NormalizedDeviceCoordinates, R>,
-    pub pixel_information_root: Matrix2<R>,
+    /// Fixed inverse angular standard deviation (radians^-1), independent of the
+    /// optimized intrinsics. Isotropic angular noise, not anisotropic pixel noise.
+    pub angular_information_root: R,
     pub huber_threshold: R,
-    /// Positive minimum optical z in metres. Depth must be finite and strictly
-    /// greater than this value; otherwise evaluation fails.
-    pub min_depth: R,
+    /// Positive minimum camera-to-landmark range in metres, NOT optical depth.
+    pub min_range: R,
 }
 
 impl<R, S> FactorBatch<S> for FrameReprojections<R>
@@ -76,9 +80,9 @@ where
         )?;
         let mut cost = R::zero();
         for (_, observation) in factors {
-            let projection = geometry.project(observation, self.min_depth)?;
+            let projection = geometry.bearing(observation, self.min_range)?;
             cost += common::huber(
-                &(self.pixel_information_root * projection.error),
+                &(projection.error * self.angular_information_root),
                 self.huber_threshold,
             )?
             .0;
@@ -115,22 +119,19 @@ where
             .to_rotation_matrix()
             .into_inner();
         for (id, observation) in factors {
-            let projection = geometry.project(observation, self.min_depth)?;
-            let residual = self.pixel_information_root * projection.error;
+            let projection = geometry.bearing(observation, self.min_range)?;
+            let residual = projection.error * self.angular_information_root;
             let scale = common::huber(&residual, self.huber_threshold)?.1;
-            let z_inv = projection.camera.z.recip();
-            let x = projection.camera.x * z_inv;
-            let y = projection.camera.y * z_inv;
-            let j_projection = SMatrix::<R, 2, 3>::new(
-                geometry.fx * z_inv,
-                R::zero(),
-                -geometry.fx * x * z_inv,
-                R::zero(),
-                geometry.fy * z_inv,
-                -geometry.fy * y * z_inv,
-            );
-            let root = self.pixel_information_root * scale;
-            let camera = root * j_projection * robot_to_camera;
+            let d = projection.predicted;
+            let b = projection.observed;
+            let difference = d - b;
+            let denominator = scalar::<R>(2.0) + b.dot(&d);
+            let weight_derivative = scalar::<R>(0.5) / denominator;
+            let root = self.angular_information_root * scale * projection.weight;
+            let predicted_jacobian = (Matrix3::identity()
+                - difference * b.transpose() * weight_derivative)
+                * ((Matrix3::identity() - d * d.transpose()) / projection.range);
+            let camera = predicted_jacobian * root * robot_to_camera;
             let mut inverse_pose = SMatrix::<R, 3, 6>::zeros();
             inverse_pose
                 .fixed_view_mut::<3, 3>(0, 0)
@@ -153,17 +154,26 @@ where
                 R::zero(),
             );
             let alignment = camera * local_to_robot * alignment;
-            let intrinsics = root
-                * SMatrix::<R, 2, 4>::new(
-                    x,
-                    R::zero(),
-                    R::one(),
-                    R::zero(),
-                    R::zero(),
-                    y,
-                    R::zero(),
-                    R::one(),
-                );
+            let ray = projection.observed_ray;
+            let ray_jacobian = SMatrix::<R, 3, 4>::new(
+                -ray.x / geometry.fx,
+                R::zero(),
+                -geometry.fx.recip(),
+                R::zero(),
+                R::zero(),
+                -ray.y / geometry.fy,
+                R::zero(),
+                -geometry.fy.recip(),
+                R::zero(),
+                R::zero(),
+                R::zero(),
+                R::zero(),
+            );
+            let intrinsics = (-Matrix3::identity()
+                - difference * d.transpose() * weight_derivative)
+                * ((Matrix3::identity() - b * b.transpose()) / projection.ray_norm)
+                * ray_jacobian
+                * root;
             let blocks: [_; 6] = std::array::from_fn(|i| match i {
                 0..=3 => JacobianBlock::new(self.controls[i], &jacobians[i]),
                 4 => JacobianBlock::new(self.alignment, &alignment),
@@ -177,9 +187,10 @@ where
 
 impl<R: RealField + Copy> FrameReprojections<R> {
     fn validate(&self) -> Result<(), EvaluationError> {
-        common::positive(self.min_depth)?;
+        common::positive(self.min_range)?;
         common::positive(self.huber_threshold)?;
-        common::finite(self.pixel_information_root.iter())
+        common::positive(self.angular_information_root)?;
+        Ok(())
     }
 }
 
@@ -196,8 +207,13 @@ struct Geometry<R: RealField + Copy> {
 struct Projection<R: RealField + Copy> {
     local: nalgebra::Vector3<R>,
     robot: nalgebra::Vector3<R>,
-    camera: nalgebra::Vector3<R>,
-    error: nalgebra::Vector2<R>,
+    predicted: nalgebra::Vector3<R>,
+    observed: nalgebra::Vector3<R>,
+    observed_ray: nalgebra::Vector3<R>,
+    range: R,
+    ray_norm: R,
+    weight: R,
+    error: nalgebra::Vector3<R>,
 }
 
 impl<R: RealField + Copy> Geometry<R> {
@@ -240,10 +256,10 @@ impl<R: RealField + Copy> Geometry<R> {
         })
     }
 
-    fn project(
+    fn bearing(
         &self,
         observation: &ReprojectionObservation<R>,
-        min_depth: R,
+        min_range: R,
     ) -> Result<Projection<R>, EvaluationError> {
         common::finite(
             observation
@@ -259,19 +275,33 @@ impl<R: RealField + Copy> Geometry<R> {
         let robot = (self.local_to_robot * nalgebra::Point3::from(local)).coords;
         let camera = (self.robot_to_camera * nalgebra::Point3::from(robot)).coords;
         common::finite(camera.iter())?;
-        if camera.z <= min_depth {
+        let range = camera.norm();
+        if !range.is_finite() || range <= min_range {
             return Err(EvaluationError::InvalidEvaluation);
         }
-        let inverse_z = camera.z.recip();
-        let error = nalgebra::Vector2::new(
-            self.fx * camera.x * inverse_z + self.cx - observation.detection.inner.x,
-            self.fy * camera.y * inverse_z + self.cy - observation.detection.inner.y,
+        let predicted = camera / range;
+        let observed_ray = nalgebra::Vector3::new(
+            (observation.detection.inner.x - self.cx) / self.fx,
+            (observation.detection.inner.y - self.cy) / self.fy,
+            R::one(),
         );
+        let ray_norm = observed_ray.norm();
+        if !ray_norm.is_finite() {
+            return Err(EvaluationError::InvalidEvaluation);
+        }
+        let observed = observed_ray / ray_norm;
+        let weight = (scalar::<R>(3.0) / (scalar::<R>(2.0) + observed.dot(&predicted))).sqrt();
+        let error = (predicted - observed) * weight;
         common::finite(error.iter())?;
         Ok(Projection {
             local,
             robot,
-            camera,
+            predicted,
+            observed,
+            observed_ray,
+            range,
+            ray_norm,
+            weight,
             error,
         })
     }

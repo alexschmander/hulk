@@ -322,14 +322,19 @@ impl<const ROBUST: bool> TestFactorBatch for ReprojectionCase<ROBUST> {
                 Vector3::new(c(0.1), c(-0.2), c(0.3)).into(),
                 UnitQuaternion::from_euler_angles(c(0.1), c(-0.2), c(0.15)),
             )),
-            pixel_information_root: root::<R, 2>() * c::<R>(0.01),
+            angular_information_root: c(3.0),
             huber_threshold: c(if ROBUST { 2.0 } else { 1e6 }),
-            min_depth: c(0.01),
+            min_range: c(0.01),
         };
         let observations = [0.0, 0.5, -0.5]
             .into_iter()
             .map(|x| ReprojectionObservation {
-                field_point: Framed::wrap(nalgebra::Point3::new(c(x), c(self.0.values[6]), c(5.0))),
+                // Exercise front, side-plane and behind-camera configurations.
+                field_point: Framed::wrap(nalgebra::Point3::new(
+                    c(1.0 + x),
+                    c(self.0.values[6]),
+                    c(x * 10.0),
+                )),
                 detection: Framed::wrap(nalgebra::Point2::new(
                     c(if x < 0.0 { 800.0 } else { 160.0 }),
                     c(120.0),
@@ -385,6 +390,30 @@ impl<const ROBUST: bool> TestFactor for AdjacentCase<ROBUST> {
     }
 }
 
+#[derive(Debug)]
+struct KinematicCase<const N: usize, const ROBUST: bool>(Inputs);
+impl<const N: usize, const ROBUST: bool> TestFactor for KinematicCase<N, ROBUST> {
+    type Factor<R: RealField + Copy> = KinematicOdometry<R, N>;
+    fn cases() -> impl Strategy<Value = Self> {
+        Inputs::cases().prop_map(Self)
+    }
+    fn build<R: RealField + Copy>(&self, states: &mut TestStates<R>) -> Self::Factor<R> {
+        KinematicOdometry {
+            controls: self.0.controls(states),
+            duration: c(0.2),
+            previous_tau: c(0.4),
+            current_tau: c(0.7),
+            translation: nalgebra::Vector2::new(c(self.0.values[6]), c(self.0.values[7])),
+            information_root: root(),
+            huber_threshold: c(if ROBUST { 0.15 } else { 1e6 }),
+        }
+    }
+}
+
+fagra::factor_tests!(kinematic_f64, KinematicCase<4, false>, f64);
+fagra::factor_tests!(kinematic_f32, KinematicCase<4, false>, f32);
+fagra::factor_tests!(adjacent_kinematic_f64, KinematicCase<5, false>, f64);
+fagra::factor_tests!(adjacent_kinematic_f32, KinematicCase<5, false>, f32);
 fagra::factor_tests!(trajectory_f64, TrajectoryCase, f64);
 fagra::factor_tests!(trajectory_f32, TrajectoryCase, f32);
 fagra::factor_tests!(intrinsics_f64, IntrinsicsCase, f64);
@@ -410,6 +439,8 @@ fagra::factor_batch_tests!(odometry_raw_f32, OdometryCase<false>, f32);
 
 #[test]
 fn robust_local_models() {
+    testing::check_factor::<KinematicCase<4, true>, f64>(FactorProperty::LocalModel);
+    testing::check_factor::<KinematicCase<5, true>, f64>(FactorProperty::LocalModel);
     testing::check_factor_batch::<ReprojectionCase<true>, f64>(FactorProperty::LocalModel);
     testing::check_factor_batch::<ReprojectionCase<true>, f32>(FactorProperty::LocalModel);
     testing::check_factor_batch::<OdometryCase<true>, f64>(FactorProperty::LocalModel);
@@ -487,9 +518,9 @@ impl Scene {
             alignment: self.alignment,
             intrinsics: self.intrinsics,
             robot_to_camera: Transform::wrap(Isometry3::identity()),
-            pixel_information_root: nalgebra::Matrix2::identity(),
+            angular_information_root: 300.0,
             huber_threshold: 2.0,
-            min_depth: 0.01,
+            min_range: 0.01,
         }
     }
 }
@@ -710,11 +741,18 @@ fn relative_yaw_uses_the_observation_endpoint() {
 }
 
 #[test]
-fn projection_geometry_depth_and_robust_cost() {
+fn bearing_geometry_range_and_robust_cost() {
     let mut scene = Scene::new();
     let reprojections = scene.reprojections();
     let batch = scene.graph.add_batch(reprojections);
-    for (x, detection_x, expected) in [(0.0, 160.0, 0.0), (1.0, 220.0, 0.0), (0.0, 157.0, 4.0)] {
+    let cosine = 1.0 / (1.0_f64 + (3.0_f64 / 300.0).powi(2)).sqrt();
+    let raw_cost = 3.0 * 300.0_f64.powi(2) * (1.0 - cosine) / (2.0 + cosine);
+    let robust_cost = 2.0 * ((2.0 * raw_cost).sqrt() - 1.0);
+    for (x, detection_x, expected) in [
+        (0.0, 160.0, 0.0),
+        (1.0, 220.0, 0.0),
+        (0.0, 157.0, robust_cost),
+    ] {
         let key = scene
             .graph
             .add_factor_to(
@@ -725,9 +763,9 @@ fn projection_geometry_depth_and_robust_cost() {
                 },
             )
             .unwrap();
-        assert_eq!(scene.graph.factor_cost(key).unwrap(), expected);
+        assert!((scene.graph.factor_cost(key).unwrap() - expected).abs() < 1e-9);
     }
-    for z in [-1.0, 0.0, 0.01, f64::NAN] {
+    for z in [0.0, 0.01, -0.01, f64::NAN, f64::INFINITY] {
         let key = scene
             .graph
             .add_factor_to(
@@ -755,6 +793,52 @@ fn projection_geometry_depth_and_robust_cost() {
     invalid.focal_lengths.inner.x = 0.0;
     scene.graph.set(scene.intrinsics, invalid).unwrap();
     assert!(scene.graph.factor_cost(key).is_err());
+}
+
+#[test]
+fn bearing_cost_is_monotone_through_side_plane_and_behind_camera() {
+    for huber_threshold in [2.0, 1e6] {
+        let mut scene = Scene::new();
+        let mut factor = scene.reprojections();
+        factor.huber_threshold = huber_threshold;
+        let batch = scene.graph.add_batch(factor);
+        let mut previous = -1.0;
+        for index in 0..=360 {
+            let theta = index as f64 * std::f64::consts::PI / 360.0;
+            let key = scene
+                .graph
+                .add_factor_to(
+                    batch,
+                    ReprojectionObservation {
+                        field_point: Framed::wrap(nalgebra::Point3::new(
+                            5.0 * theta.sin(),
+                            0.0,
+                            5.0 * theta.cos(),
+                        )),
+                        detection: Framed::wrap(nalgebra::Point2::new(160.0, 120.0)),
+                    },
+                )
+                .unwrap();
+            let cost = scene.graph.factor_cost(key).unwrap();
+            let raw = 3.0 * 300.0_f64.powi(2) * (1.0 - theta.cos()) / (2.0 + theta.cos());
+            let norm = (2.0 * raw).sqrt();
+            let expected = if norm <= huber_threshold {
+                raw
+            } else {
+                huber_threshold * (norm - 0.5 * huber_threshold)
+            };
+            assert!(
+                (cost - expected).abs() < 1e-8,
+                "angle={theta}, cost={cost}, expected={expected}"
+            );
+            assert!(
+                cost > previous,
+                "angle={theta}, previous={previous}, cost={cost}"
+            );
+            previous = cost;
+            scene.graph.remove_factor(key).unwrap();
+        }
+    }
 }
 
 #[test]
