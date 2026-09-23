@@ -7,14 +7,15 @@ use std::{
 use color_eyre::{Result, eyre::Context as _};
 use coordinate_systems::{Camera, Robot};
 use linear_algebra::Isometry3;
-use projection::{camera_matrix::CameraMatrix, intrinsic::Intrinsic};
+use projection::intrinsic::Intrinsic;
 use ros_z::{
-    cache::Cache,
+    cache::{Cache, CacheInner},
     parameter::NodeParameters,
     pubsub::Publisher,
     time::{Clock, Time},
 };
 use types::{
+    camera_geometry::{CameraGeometry, camera_geometry_at},
     field_dimensions::FieldDimensions,
     localization::{LocalizationEstimate, LocalizationState3D, LocalizationStatus},
     object_detection::{Object, RobocupObjectLabel},
@@ -25,19 +26,17 @@ use types::{
 use crate::{
     api::{AssociationInput, associate_visual_features},
     parameters::FieldMarkAssociationParameters,
-    robot_to_camera,
 };
-
-const MAX_CAMERA_MATRIX_TIME_DISTANCE: Duration = Duration::from_millis(100);
 
 type DetectedObjects = TimeWrapper<Vec<Object<RobocupObjectLabel>>>;
 
 pub(crate) struct DetectionProcessingContext<'a> {
     pub(crate) parameters: &'a NodeParameters<FieldMarkAssociationParameters>,
-    pub(crate) camera_matrix_cache: &'a Cache<TimeWrapper<CameraMatrix>>,
+    pub(crate) camera_geometry_cache: &'a Cache<TimeWrapper<CameraGeometry>>,
     pub(crate) field_dimensions_cache: &'a Cache<FieldDimensions>,
     pub(crate) estimates: &'a Cache<LocalizationEstimate>,
     pub(crate) status: &'a Cache<LocalizationStatus>,
+    pub(crate) attitudes: std::sync::Mutex<CacheInner<TimeWrapper<nalgebra::UnitQuaternion<f32>>>>,
     pub(crate) tracking_reference: std::sync::Mutex<Option<LocalizationEstimate>>,
     pub(crate) associations_publisher: Arc<Publisher<TimeWrapper<VisualLocalizationFrame>>>,
     pub(crate) global_localization_publisher: Arc<Publisher<Option<GlobalLocalizationDebug>>>,
@@ -45,6 +44,30 @@ pub(crate) struct DetectionProcessingContext<'a> {
 }
 
 impl DetectionProcessingContext<'_> {
+    pub(crate) fn record_attitude(&self, time: Time, imu: &booster::ImuState) {
+        let rpy = imu.roll_pitch_yaw.inner;
+        if rpy.iter().all(|v| v.is_finite()) {
+            self.attitudes.lock().unwrap().insert(
+                time,
+                TimeWrapper {
+                    time,
+                    inner: nalgebra::UnitQuaternion::from_euler_angles(rpy.x, rpy.y, 0.0),
+                },
+            );
+        }
+    }
+
+    fn startup_geometry(
+        &self,
+        time: Time,
+        status: &LocalizationStatus,
+    ) -> Option<AssociationGeometry> {
+        let attitudes = self.attitudes.lock().unwrap();
+        let before = attitudes.get_before(time)?;
+        let after = attitudes.get_after(time)?;
+        startup_geometry(&before, &after, time, status.epoch)
+    }
+
     fn tracking_reference(
         &self,
         estimate: &LocalizationEstimate,
@@ -165,44 +188,86 @@ fn prepare_detection_frame(
     ctx: &DetectionProcessingContext<'_>,
 ) -> Option<PreparedDetectionFrame> {
     let image_time = objects.time;
-    let camera_matrix = ctx.camera_matrix_cache.get_nearest(image_time)?;
-    if camera_matrix.time.abs_diff(image_time) > MAX_CAMERA_MATRIX_TIME_DISTANCE {
-        return None;
-    }
+    let camera = camera_geometry_at(ctx.camera_geometry_cache, image_time)?;
     let field_dimensions = ctx.field_dimensions_cache.get_latest()?;
     let parameters = ctx.parameters.snapshot().typed.clone();
     let status = ctx.status.get_latest()?;
-    let latest_estimate = ctx.estimates.get_latest()?;
-    let reference = ctx.tracking_reference(&latest_estimate, &status);
-    let latest = TimeWrapper {
-        time: latest_estimate.time,
-        inner: AssociationGeometry::from_estimate(&latest_estimate, &status, reference.as_ref())?,
+    let geometry = if status.state == types::localization::LocalizationState::Startup {
+        ctx.startup_geometry(image_time, &status)?
+    } else {
+        let latest_estimate = ctx.estimates.get_latest()?;
+        let reference = ctx.tracking_reference(&latest_estimate, &status);
+        let latest = TimeWrapper {
+            time: latest_estimate.time,
+            inner: AssociationGeometry::from_estimate(
+                &latest_estimate,
+                &status,
+                reference.as_ref(),
+            )?,
+        };
+        let history: Vec<_> = ctx
+            .estimates
+            .get_interval(
+                image_time - parameters.max_pose_hint_age,
+                image_time + parameters.max_pose_hint_age,
+            )
+            .iter()
+            .filter_map(|estimate| {
+                Some(Arc::new(TimeWrapper {
+                    time: estimate.time,
+                    inner: AssociationGeometry::from_estimate(
+                        estimate,
+                        &status,
+                        reference.as_ref(),
+                    )?,
+                }))
+            })
+            .collect();
+        geometry_for_image(image_time, &history, &latest, parameters.max_pose_hint_age)?
     };
-    let history: Vec<_> = ctx
-        .estimates
-        .get_interval(
-            image_time - parameters.max_pose_hint_age,
-            image_time + parameters.max_pose_hint_age,
-        )
-        .iter()
-        .filter_map(|estimate| {
-            Some(Arc::new(TimeWrapper {
-                time: estimate.time,
-                inner: AssociationGeometry::from_estimate(estimate, &status, reference.as_ref())?,
-            }))
-        })
-        .collect();
-    let geometry = geometry_for_image(image_time, &history, &latest, parameters.max_pose_hint_age)?;
     let frame = PreparedDetectionFrame {
         image_time,
         objects: objects.inner,
-        robot_to_camera: robot_to_camera(&camera_matrix.inner),
-        camera_intrinsic: camera_matrix.inner.intrinsics,
+        robot_to_camera: camera.robot_to_camera,
+        camera_intrinsic: camera.intrinsics,
         geometry,
         field_dimensions,
         parameters,
     };
     frame_is_current(&frame, ctx, frame.parameters.max_pose_hint_age).then_some(frame)
+}
+
+fn startup_geometry(
+    before: &TimeWrapper<nalgebra::UnitQuaternion<f32>>,
+    after: &TimeWrapper<nalgebra::UnitQuaternion<f32>>,
+    time: Time,
+    epoch: u64,
+) -> Option<AssociationGeometry> {
+    if time < before.time || time > after.time {
+        return None;
+    }
+    let gap = after.time.duration_since(before.time);
+    if gap > types::camera_geometry::MAX_CAMERA_GEOMETRY_GAP {
+        return None;
+    }
+    let mut orientation = if gap.is_zero() {
+        before.inner
+    } else {
+        before.inner.slerp(
+            &after.inner,
+            time.duration_since(before.time).as_secs_f32() / gap.as_secs_f32(),
+        )
+    };
+    orientation.renormalize();
+    Some(AssociationGeometry {
+        epoch,
+        state: LocalizationState3D::Startup,
+        robot_to_local: Isometry3::wrap(nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::identity(),
+            orientation,
+        )),
+        local_to_field: None,
+    })
 }
 
 fn geometry_for_image(
@@ -236,6 +301,13 @@ fn frame_is_current(
             .is_none_or(|dimensions| !Arc::ptr_eq(&frame.field_dimensions, &dimensions))
     {
         return false;
+    }
+    if matches!(frame.geometry.state, LocalizationState3D::Startup) {
+        return frame.image_time.abs_diff(ctx.clock.now()) <= max_age
+            && ctx.status.get_latest().is_some_and(|status| {
+                status.epoch == frame.geometry.epoch
+                    && status.state == types::localization::LocalizationState::Startup
+            });
     }
     let latest = ctx
         .estimates
@@ -293,6 +365,33 @@ fn same_lifecycle(geometry: &AssociationGeometry, latest: &AssociationGeometry) 
 mod tests {
     use super::*;
     use types::localization::LocalizationEstimate3D;
+
+    #[test]
+    fn startup_uses_bracketed_imu_without_a_localization_estimate() {
+        let before = TimeWrapper {
+            time: Time::from_nanos(0),
+            inner: nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.0, 0.0),
+        };
+        let after = TimeWrapper {
+            time: Time::from_nanos(10_000_000),
+            inner: nalgebra::UnitQuaternion::from_euler_angles(0.2, 0.0, 0.0),
+        };
+        let time = Time::from_nanos(5_000_000);
+        let geometry = startup_geometry(&before, &after, time, 7).unwrap();
+        assert_eq!(geometry.epoch, 7);
+        assert!(matches!(geometry.state, LocalizationState3D::Startup));
+        assert_eq!(
+            geometry.robot_to_local.inner.translation.vector,
+            nalgebra::Vector3::zeros()
+        );
+        assert!((geometry.robot_to_local.inner.rotation.euler_angles().0 - 0.1).abs() < 1e-6);
+        assert!(startup_geometry(&before, &after, Time::from_nanos(11_000_000), 7).is_none());
+        let late = TimeWrapper {
+            time: Time::from_nanos(30_000_000),
+            ..after
+        };
+        assert!(startup_geometry(&before, &late, time, 7).is_none());
+    }
 
     #[test]
     fn pending_detection_keeps_only_the_newest_timestamp() {

@@ -28,6 +28,7 @@ pub struct AssociationInput<'a> {
 #[derive(Clone, Copy)]
 pub struct GlobalAssociationInput<'a> {
     pub visual_features: &'a DetectedVisualFeatures,
+    /// IMU-derived attitude in a leveled frame. Translation is ignored at startup.
     pub robot_to_local: Isometry3<Robot, Local>,
     pub robot_to_camera: Isometry3<Robot, Camera>,
     pub camera_intrinsic: Intrinsic,
@@ -80,8 +81,8 @@ pub fn associate_visual_features(
 /// The representative is chosen by landmark coordinates, not the robot's half. Localization
 /// seeding must resolve the remaining half-turn. No state, alignment, epoch or time is needed.
 /// Every retained detection must match; no subset is silently certified when a retained outlier exists.
-/// One well-conditioned, non-collinear seed is required, even when known height could make a
-/// collinear frame observable. This deliberately sacrifices recall for conservative certification.
+/// Startup fits camera height, planar translation and yaw from unit-height rays using IMU tilt.
+/// A non-collinear seed is required. Localizer translation and height are never consulted.
 /// Work-budget exhaustion rejects rather than returning a candidate with unproven uniqueness.
 pub fn associate_global_visual_features(input: GlobalAssociationInput<'_>) -> AssociationResult {
     solver::associate(input).unwrap_or_default()

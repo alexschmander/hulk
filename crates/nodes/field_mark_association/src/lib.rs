@@ -1,6 +1,5 @@
-use coordinate_systems::{Camera, Field, Robot};
-use linear_algebra::{Isometry3, Point2};
-use projection::camera_matrix::CameraMatrix;
+use coordinate_systems::Field;
+use linear_algebra::Point2;
 
 mod api;
 mod features;
@@ -44,10 +43,6 @@ pub fn field_feature_landmarks(
         .into_iter()
         .map(|(class, position)| FieldFeatureLandmark { class, position })
         .collect()
-}
-
-pub(crate) fn robot_to_camera(camera_matrix: &CameraMatrix) -> Isometry3<Robot, Camera> {
-    camera_matrix.head_to_camera * camera_matrix.robot_to_head
 }
 
 #[cfg(test)]

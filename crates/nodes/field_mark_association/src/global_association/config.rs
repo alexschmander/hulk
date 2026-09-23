@@ -10,7 +10,7 @@ pub(crate) const GLOBAL_LOCALIZER_MAX_DETECTIONS: usize = MAX_CERTIFIED_VISUAL_A
 pub(crate) const GLOBAL_LOCALIZER_MAX_INPUT_DETECTIONS: usize = 128;
 pub(crate) const SEED_POOL_SIZE: usize = 8;
 
-/// Gates for local-plane geometric invariants, not pose hypotheses.
+/// Startup similarity-fit gates and measurement noise shared with tracking.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize, Message)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalAssociationConfig {
@@ -22,7 +22,8 @@ pub struct GlobalAssociationConfig {
     pub detection_pixel_sigma: f32,
     /// Shared local roll/pitch uncertainty in radians.
     pub imu_tilt_sigma: f32,
-    /// Shared measured camera-height uncertainty in meters.
+    /// Height uncertainty floor for image-space tracking, in metres. Startup fits
+    /// height from landmarks and does not use this parameter.
     pub height_sigma: f32,
     /// Squared bound: global invariant gates use its square root; tracking uses it
     /// directly for 2D residuals and preserves its chi-square tail probability in
@@ -30,12 +31,11 @@ pub struct GlobalAssociationConfig {
     pub mahalanobis_gate: f32,
     /// Additional metric tolerance for map/detector systematic error.
     pub geometric_tolerance: f32,
-    /// Per-call search operations. Global search charges visits, attempts and pair/contrast checks;
+    /// Per-call search operations. Global search charges visits, attempts, pair checks and fit work;
     /// joint tracking (3..=5 features) charges every candidate extension, including duplicate IDs.
     /// Each complete joint assignment requires at most a 10D Gaussian evaluation.
     /// Exhaustion rejects the frame, even after finding a candidate; no truncated winner is emitted.
     /// Preprocessing is separately bounded by 128 inputs, 32 retained detections and 56 seed triples.
-    /// Post-seed chirality and three contrasts per non-anchor detection are precomputed once.
     pub max_work: usize,
 }
 

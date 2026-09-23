@@ -1,13 +1,13 @@
 use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
 
 use color_eyre::Result;
-use projection::camera_matrix::CameraMatrix;
 use ros_z::{
     context::Context,
     parameter::NodeParametersExt,
     qos::{QosDurability, QosHistory, QosProfile},
 };
 use types::{
+    camera_geometry::{CAMERA_GEOMETRY_TOPIC, CameraGeometry},
     field_dimensions::FieldDimensions,
     object_detection::{Object, RobocupObjectLabel},
     time_wrapper::TimeWrapper,
@@ -35,9 +35,9 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         node.bind_parameter_as::<FieldMarkAssociationParameters>("field_mark_association")?;
     parameters.add_validation_hook(FieldMarkAssociationParameters::validate)?;
 
-    let camera_matrix_cache = node
-        .subscriber::<TimeWrapper<CameraMatrix>>("camera_matrix")
-        .cache(128)
+    let camera_geometry_cache = node
+        .subscriber::<TimeWrapper<CameraGeometry>>(CAMERA_GEOMETRY_TOPIC)
+        .cache(1500)
         .with_stamp(|message| message.time)
         .build()
         .await?;
@@ -92,15 +92,21 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .await?;
     let processing_context = DetectionProcessingContext {
         parameters: &parameters,
-        camera_matrix_cache: &camera_matrix_cache,
+        camera_geometry_cache: &camera_geometry_cache,
         field_dimensions_cache: &field_dimensions_cache,
         estimates: &estimates,
         status: &status,
+        attitudes: std::sync::Mutex::new(ros_z::cache::CacheInner::new(1500)),
         tracking_reference: std::sync::Mutex::new(None),
         associations_publisher: Arc::new(associations_publisher),
         global_localization_publisher: Arc::new(global_localization_publisher),
         clock: node.clock(),
     };
+    let imu = node
+        .subscriber::<booster::ImuState>("inputs/imu_state")
+        .queue_capacity(NonZeroUsize::new(500).unwrap())
+        .build()
+        .await?;
     let mut pending_frame = None;
     loop {
         // A completion may win select while a newer payload is already in the subscriber queue.
@@ -110,7 +116,14 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         }
         let objects = match pending_frame.take() {
             Some(frame) => frame,
-            None => detected_objects.recv().await?,
+            None => tokio::select! {
+                sample = imu.recv_with_metadata() => {
+                    let sample = sample?;
+                    processing_context.record_attitude(sample.source_time, &sample.message);
+                    continue;
+                }
+                objects = detected_objects.recv() => objects?,
+            },
         };
         let image_time = objects.time;
         let processing = process_detected_objects(objects, &processing_context);
@@ -118,6 +131,10 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         // Keep receiving even while the solver or either publisher is waiting.
         loop {
             tokio::select! {
+                sample = imu.recv_with_metadata() => {
+                    let sample = sample?;
+                    processing_context.record_attitude(sample.source_time, &sample.message);
+                }
                 result = &mut processing => {
                     result?;
                     break;

@@ -7,9 +7,11 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+booster.workspace = true
 color-eyre = { workspace = true }
 coordinate_systems = { workspace = true }
 linear_algebra = { workspace = true }
+localization-fagra.workspace = true
 linear_sum_assignment = { workspace = true }
 nalgebra = { workspace = true }
 ndarray = { workspace = true }

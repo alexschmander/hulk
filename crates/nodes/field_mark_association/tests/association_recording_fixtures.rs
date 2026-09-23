@@ -39,7 +39,7 @@ struct ExpectedAssociation {
 }
 
 #[test]
-fn real_recording_startup_rejects_uncertifiable_chirality() {
+fn real_recording_startup_fits_height_and_rejects_excessive_uncertainty() {
     for fixture in fixtures() {
         let features = find_detected_visual_features(&fixture.detections);
         assert_eq!(features.supported_feature_count(), fixture.expected.len());
@@ -59,18 +59,36 @@ fn real_recording_startup_rejects_uncertifiable_chirality() {
                     .iter()
                     .all(|(area, gate)| area.is_finite() && gate - area.abs() > 0.3)
             );
-            assert!(
-                associate_global_visual_features(GlobalAssociationInput {
-                    visual_features: &features,
-                    robot_to_local: robot_to_local(&fixture.camera_matrix),
-                    robot_to_camera: robot_to_camera(&fixture.camera_matrix),
-                    camera_intrinsic: fixture.camera_matrix.intrinsics,
-                    field_dimensions: &FieldDimensions::SPL_2025,
-                    parameters: &config,
-                })
-                .associations
-                .is_empty()
-            );
+            let result = associate_global_visual_features(GlobalAssociationInput {
+                visual_features: &features,
+                robot_to_local: robot_to_local(&fixture.camera_matrix),
+                robot_to_camera: robot_to_camera(&fixture.camera_matrix),
+                camera_intrinsic: fixture.camera_matrix.intrinsics,
+                field_dimensions: &FieldDimensions::SPL_2025,
+                parameters: &config,
+            });
+            if config.detection_pixel_sigma == 2.0 {
+                assert_eq!(result.associations.len(), fixture.expected.len());
+                assert!(
+                    [1.0, -1.0]
+                        .into_iter()
+                        .any(|sign| result.associations.iter().all(|a| {
+                            fixture.expected.iter().any(|expected| {
+                                (a.detection.x() - expected.detection[0]).abs() < 1e-3
+                                    && (a.detection.y() - expected.detection[1]).abs() < 1e-3
+                                    && (sign * a.field_point.x() - expected.landmark[0]).abs()
+                                        < 1e-3
+                                    && (sign * a.field_point.y() - expected.landmark[1]).abs()
+                                        < 1e-3
+                            })
+                        })),
+                    "{}: {:?}",
+                    fixture.name,
+                    result.associations
+                );
+            } else {
+                assert!(result.associations.is_empty());
+            }
         }
     }
 }

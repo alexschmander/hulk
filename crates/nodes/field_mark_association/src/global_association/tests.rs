@@ -311,24 +311,24 @@ fn collinear_and_duplicate_seeds_do_not_certify() {
 }
 
 #[test]
-fn measured_local_height_is_used_not_fitted() {
+fn startup_matching_ignores_uninitialized_translation_and_height_uncertainty() {
     let geometry = geometry();
     let features = project(stationary_three(), &geometry, Isometry2::identity());
-    let config = calibrated_parameters().global_localizer;
+    let mut config = calibrated_parameters().global_localizer;
     let mut wrong = geometry.clone();
-    wrong.robot_to_local.inner.translation.vector.z += 0.3;
-    assert!(
-        associate_global_visual_features(global_input(input(&features, &wrong), &config))
-            .associations
-            .is_empty()
-    );
-    let (_, projected) =
-        solver::preprocess(global_input(input(&features, &geometry), &config)).unwrap();
-    for detection in projected {
-        let expected = stationary_three().into_iter().find(|(class, point)| {
-            *class == detection.class && (point.coords().inner - detection.xy).norm() < 1.0e-4
-        });
-        assert!(expected.is_some());
+    let expected =
+        associate_global_visual_features(global_input(input(&features, &geometry), &config));
+    assert_eq!(expected.associations.len(), 3);
+    for height in [0.0, 0.55, 4.0, -1.0, f32::NAN] {
+        wrong.robot_to_local.inner.translation.vector = vector![100.0, -50.0, height];
+        config.height_sigma = 0.2;
+        let result =
+            associate_global_visual_features(global_input(input(&features, &wrong), &config));
+        assert_eq!(result.associations.len(), expected.associations.len());
+        for (actual, expected) in result.associations.iter().zip(&expected.associations) {
+            assert_eq!(actual.detection, expected.detection);
+            assert_eq!(actual.field_point, expected.field_point);
+        }
     }
 }
 
@@ -461,13 +461,13 @@ fn invalid_geometry_and_input_caps_fail_closed() {
             .len(),
         32
     );
-    geometry.robot_to_local.inner.translation.vector.z = -1.0;
+    geometry.robot_to_local.inner.rotation = UnitQuaternion::from_euler_angles(f32::NAN, 0.0, 0.0);
     assert!(
         associate_global_visual_features(global_input(input(&features, &geometry), &config))
             .associations
             .is_empty()
     );
-    geometry.robot_to_local.inner.translation.vector.z = 0.45;
+    geometry.robot_to_local.inner.rotation = UnitQuaternion::identity();
     features.goalposts = vec![features.goalposts[0]; 129];
     assert!(
         associate_global_visual_features(global_input(input(&features, &geometry), &config))
@@ -504,7 +504,10 @@ fn global_is_invariant_under_local_translation_yaw_and_detection_order() {
                         .iter()
                         .find(|d| d.pixel == association.detection)
                         .unwrap();
-                    let field = local_to_field.inner * nalgebra::Point2::from(detection.xy);
+                    let camera_to_local = geometry.robot_to_local * robot_to_camera().inverse();
+                    let origin = camera_to_local.inner.translation.vector;
+                    let field = local_to_field.inner
+                        * nalgebra::Point2::from(origin.xy() + origin.z * detection.xy);
                     (field.coords, association.field_point.xy().coords().inner)
                 })
                 .collect::<Vec<_>>();

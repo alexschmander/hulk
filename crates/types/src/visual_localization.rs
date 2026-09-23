@@ -73,7 +73,8 @@ impl AssociationGeometry {
 pub struct VisualLocalizationFrame {
     pub epoch: u64,
     pub robot_to_camera: Isometry3<Robot, Camera>,
-    /// Local geometry used for association and localization-owned bootstrap seeding.
+    /// In startup only the IMU-derived attitude is meaningful; bootstrap fits height
+    /// from landmarks. During tracking this is the localizer's pose used for association.
     pub robot_to_local: Isometry3<Robot, Local>,
     pub camera_intrinsic: projection::intrinsic::Intrinsic,
     pub associations: Vec<FieldMarkAssociation>,
