@@ -7,6 +7,55 @@ use nalgebra::RealField;
 
 use crate::{finite, variables::rotation::scalar};
 
+/// Fit `field = translation + height * rotation * unit_ground_point`.
+/// Unit-ground points are intersections of leveled rays with a plane one metre below
+/// the camera. Translation is the camera's field XY; scale is camera height.
+pub fn fit_ground_similarity<R: RealField + Copy>(
+    correspondences: impl ExactSizeIterator<Item = (nalgebra::Vector2<R>, Point2<Field, R>)> + Clone,
+) -> Result<(Isometry2<Local, Field, R>, R), EvaluationError> {
+    if correspondences.len() < 3 {
+        return Err(EvaluationError::InvalidEvaluation);
+    }
+    let count = scalar::<R>(correspondences.len() as f64);
+    let (mut q_mean, mut p_mean) = (
+        nalgebra::Vector2::<R>::zeros(),
+        nalgebra::Vector2::<R>::zeros(),
+    );
+    for (q, p) in correspondences.clone() {
+        finite(q.iter().chain(p.inner.coords.iter()))?;
+        q_mean += q;
+        p_mean += p.inner.coords;
+    }
+    q_mean /= count;
+    p_mean /= count;
+    let (mut dot, mut cross, mut variance) = (R::zero(), R::zero(), R::zero());
+    let mut scatter = nalgebra::Matrix2::<R>::zeros();
+    for (q, p) in correspondences {
+        let q = q - q_mean;
+        let p = p.inner.coords - p_mean;
+        dot += q.dot(&p);
+        cross += q.x * p.y - q.y * p.x;
+        variance += q.norm_squared();
+        scatter += q * q.transpose();
+    }
+    if variance <= scalar(1.0e-12)
+        || scatter.determinant() <= scalar::<R>(1.0e-10) * variance * variance
+    {
+        return Err(EvaluationError::InvalidEvaluation);
+    }
+    let height = dot.hypot(cross) / variance;
+    if !height.is_finite() || height <= scalar(1.0e-6) {
+        return Err(EvaluationError::InvalidEvaluation);
+    }
+    let rotation = nalgebra::UnitComplex::new(cross.atan2(dot));
+    let translation = p_mean - rotation * q_mean * height;
+    finite(translation.iter())?;
+    Ok((
+        nalgebra::Isometry2::from_parts(translation.into(), rotation).framed_transform(),
+        height,
+    ))
+}
+
 /// Intersect camera rays with Local z=0 and fit a rigid Local-to-Field alignment.
 /// Height and tilt stay fixed. At least two nondegenerate correspondences are
 /// required; certification counts and field-side selection belong to the caller.
@@ -73,6 +122,34 @@ pub fn fit_ground_alignment<R: RealField + Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn similarity_recovers_height_yaw_and_position_and_rejects_degeneracy() {
+        let expected = nalgebra::Isometry2::new(nalgebra::Vector2::new(-2.0, 1.0), 0.7);
+        for height in [0.4_f64, 0.9, 2.0] {
+            let points = [(-1.0, -1.0), (1.0, -1.0), (0.0, 1.0), (0.3, 0.7)].map(|(x, y)| {
+                let q = nalgebra::Vector2::new(x, y);
+                (
+                    q,
+                    Point2::wrap(expected * nalgebra::Point2::from(q * height)),
+                )
+            });
+            for count in [3, 4] {
+                let (pose, fitted_height) =
+                    fit_ground_similarity(points[..count].iter().copied()).unwrap();
+                assert!((fitted_height - height).abs() < 1e-10);
+                assert!((pose.inner.to_homogeneous() - expected.to_homogeneous()).norm() < 1e-10);
+            }
+            assert!(fit_ground_similarity([points[0]; 3].into_iter()).is_err());
+        }
+        let line = [0.0, 1.0, 2.0].map(|x| {
+            (
+                nalgebra::Vector2::new(x, 0.0),
+                Point2::wrap(nalgebra::Point2::new(x, 0.0)),
+            )
+        });
+        assert!(fit_ground_similarity(line.into_iter()).is_err());
+    }
 
     #[test]
     fn ground_fit_recovers_rigid_transform_and_rejects_undefined_geometry() {
