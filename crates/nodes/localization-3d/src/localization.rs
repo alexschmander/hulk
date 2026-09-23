@@ -9,8 +9,8 @@ use booster::ImuState;
 use coordinate_systems::{Local, Robot};
 use kinematics::robot_kinematics::RobotKinematics;
 use linear_algebra::Isometry3;
-use projection::camera_matrix::CameraMatrix;
 use ros_z::time::Time;
+use types::camera_geometry::CameraGeometry;
 use types::{
     field_dimensions::FieldDimensions,
     localization::{LocalizationEstimate, LocalizationState, LocalizationStatus},
@@ -48,7 +48,7 @@ impl Localization {
         epoch: u64,
         parameters: &Localization3dParameters,
         field: &FieldDimensions,
-        camera: &CameraMatrix,
+        camera: &CameraGeometry,
         initial_pose: Isometry3<Robot, Local>,
     ) -> Result<Self> {
         parameters.validate().map_err(|message| eyre!(message))?;
@@ -129,11 +129,18 @@ impl Localization {
         self.estimator.ingest_kinematics(sample)
     }
 
+    pub fn ingest_kinematic_odometry(
+        &mut self,
+        sample: types::odometry::KinematicOdometryDelta,
+    ) -> Result<bool> {
+        self.estimator.ingest_kinematic_odometry(sample)
+    }
+
     pub fn ingest_visual_odometry(
         &mut self,
         sample: VisualOdometer,
-        previous: Option<&CameraMatrix>,
-        current: Option<&CameraMatrix>,
+        previous: Option<&CameraGeometry>,
+        current: Option<&CameraGeometry>,
     ) -> Result<bool> {
         self.estimator
             .ingest_visual_odometry(sample, previous, current)

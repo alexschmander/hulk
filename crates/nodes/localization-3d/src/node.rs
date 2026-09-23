@@ -1,6 +1,5 @@
 use crate::{
     Localization, Localization3dParameters, SolveDiagnostics,
-    camera::fresh_camera_matrix,
     inputs::{Inputs, Measurement},
     pose::initial_robot_to_local_from_imu,
 };
@@ -18,6 +17,7 @@ use std::{
     time::Duration,
 };
 use types::{
+    camera_geometry::MAX_CAMERA_GEOMETRY_GAP,
     field_dimensions::FieldDimensions,
     localization::{
         LOCALIZATION_ESTIMATE_TOPIC, LOCALIZATION_STATUS_TOPIC, LocalizationEstimate,
@@ -106,7 +106,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         };
         let samples = inputs.drain(first).await?;
         let now = node.clock().now();
-        let mut inserted = false;
+        let mut needs_solve = false;
         for sample in samples {
             let time = sample.time();
             if time < epoch_start || time > now {
@@ -125,6 +125,8 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                     "measurement gap exceeds window; resetting localization epoch"
                 );
                 active = None;
+                // Measurements inserted before the reset belonged to the old estimator.
+                needs_solve = false;
                 epoch_start = time;
                 status = LocalizationStatus {
                     time,
@@ -133,11 +135,17 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 };
                 statuses.publish(&status).await?;
             }
-            if active.is_none() {
+            let localization = if let Some(localization) = active.as_mut() {
+                localization
+            } else {
                 let Measurement::Imu(_, imu) = &sample else {
                     continue;
                 };
-                let Some(camera) = fresh_camera_matrix(&inputs.cameras, time) else {
+                let Some(camera) = inputs
+                    .cameras
+                    .get_nearest(time)
+                    .filter(|camera| camera.time.abs_diff(time) <= MAX_CAMERA_GEOMETRY_GAP)
+                else {
                     continue;
                 };
                 let Some(kinematics) = inputs.robot_kinematics.get_nearest(time) else {
@@ -157,22 +165,25 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                     &camera.inner,
                     initial_robot_to_local_from_imu(imu, &kinematics.inner),
                 );
-                match initialized {
-                    Ok(localization) => active = Some(localization),
+                let localization = match initialized {
+                    Ok(localization) => active.insert(localization),
                     Err(error) => {
                         tracing::warn!(%error, "discarding invalid initialization sample");
                         continue;
                     }
-                }
-                status = active.as_ref().unwrap().status();
+                };
+                status = localization.status();
                 statuses.publish(&status).await?;
-            }
-            inserted |= inputs.ingest(active.as_mut().unwrap(), sample)?;
+                localization
+            };
+            needs_solve |= inputs.ingest(localization, sample)?;
         }
-        if !inserted {
+        if !needs_solve {
             continue;
         }
-        let localization = active.as_mut().unwrap();
+        let Some(localization) = active.as_mut() else {
+            continue;
+        };
         let output = tokio::task::block_in_place(|| localization.solve(node.clock().now()));
         // Advance lifecycle after the potentially expensive solve, before publishing.
         localization.advance_time(node.clock().now());

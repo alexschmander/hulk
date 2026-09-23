@@ -1,4 +1,8 @@
 {
+  kinematic_odometry_noise: {
+    position_sigma: [0.005, 0.005],
+    translation_variance_per_second: [0.001, 0.001],
+  },
   accelerometer_process_noise_variance: 10.0,
   visual_feature_noise_variance: 10000.0,
   field_containment_sigma: 1.0,

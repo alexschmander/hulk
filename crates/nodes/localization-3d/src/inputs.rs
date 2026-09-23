@@ -1,8 +1,7 @@
-use crate::{Localization, camera::fresh_camera_matrix};
+use crate::Localization;
 use booster::ImuState;
 use color_eyre::Result;
 use kinematics::robot_kinematics::RobotKinematics;
-use projection::camera_matrix::CameraMatrix;
 use ros_z::{
     cache::Cache,
     node::Node,
@@ -10,7 +9,9 @@ use ros_z::{
     time::Time,
 };
 use std::num::NonZeroUsize;
+use types::camera_geometry::{CAMERA_GEOMETRY_TOPIC, CameraGeometry, camera_geometry_at};
 use types::{
+    odometry::{KINEMATIC_ODOMETRY_TOPIC, KinematicOdometryDelta},
     time_wrapper::TimeWrapper,
     visual_localization::{VISUAL_LOCALIZATION_TOPIC, VisualLocalizationFrame},
     visual_odometry::VisualOdometer,
@@ -21,6 +22,7 @@ pub(crate) enum Measurement {
     Kinematics(Box<TimeWrapper<RobotKinematics>>),
     Visual(TimeWrapper<VisualLocalizationFrame>),
     Odometry(VisualOdometer),
+    KinematicOdometry(KinematicOdometryDelta),
 }
 
 impl Measurement {
@@ -30,6 +32,7 @@ impl Measurement {
             Self::Kinematics(v) => v.time,
             Self::Visual(v) => v.time,
             Self::Odometry(v) => v.time,
+            Self::KinematicOdometry(v) => v.time,
         }
     }
 }
@@ -39,13 +42,20 @@ pub(crate) struct Inputs {
     kinematics: Subscriber<TimeWrapper<RobotKinematics>>,
     visual: Subscriber<TimeWrapper<VisualLocalizationFrame>>,
     odometry: Subscriber<VisualOdometer>,
-    pub(crate) cameras: Cache<TimeWrapper<CameraMatrix>>,
+    kinematic_odometry: Subscriber<KinematicOdometryDelta>,
+    pub(crate) cameras: Cache<TimeWrapper<CameraGeometry>>,
     pub(crate) robot_kinematics: Cache<TimeWrapper<RobotKinematics>>,
 }
 
 impl Inputs {
     pub(crate) async fn new(node: &Node) -> Result<Self> {
         Ok(Self {
+            kinematic_odometry: node
+                .subscriber(KINEMATIC_ODOMETRY_TOPIC)
+                .queue_capacity(NonZeroUsize::new(60).unwrap())
+                .queue_overflow_reporting(QueueOverflowReporting::Warn)
+                .build()
+                .await?,
             imu: node
                 .subscriber("inputs/imu_state")
                 .queue_capacity(NonZeroUsize::new(500).unwrap())
@@ -71,8 +81,8 @@ impl Inputs {
                 .build()
                 .await?,
             cameras: node
-                .subscriber::<TimeWrapper<CameraMatrix>>("camera_matrix")
-                .cache(128)
+                .subscriber::<TimeWrapper<CameraGeometry>>(CAMERA_GEOMETRY_TOPIC)
+                .cache(1500)
                 .with_stamp(|v| v.time)
                 .build()
                 .await?,
@@ -91,19 +101,21 @@ impl Inputs {
             v = self.kinematics.recv() => Measurement::Kinematics(Box::new(v?)),
             v = self.visual.recv() => Measurement::Visual(v?),
             v = self.odometry.recv() => Measurement::Odometry(v?),
+            v = self.kinematic_odometry.recv() => Measurement::KinematicOdometry(v?),
         })
     }
 
     /// A transient work batch, not another queue. Samples arriving during this
     /// pass or the solve stay in the bounded ROSZ queues until the next pass.
     pub(crate) async fn drain(&self, first: Measurement) -> Result<Vec<Measurement>> {
-        let [imu, feet, visual, vo] = [
+        let [imu, feet, visual, vo, ko] = [
             self.imu.queued_len(),
             self.kinematics.queued_len(),
             self.visual.queued_len(),
             self.odometry.queued_len(),
+            self.kinematic_odometry.queued_len(),
         ];
-        let mut samples = Vec::with_capacity(1 + imu + feet + visual + vo);
+        let mut samples = Vec::with_capacity(1 + imu + feet + visual + vo + ko);
         samples.push(first);
         for _ in 0..imu {
             let v = self.imu.recv_with_metadata().await?;
@@ -120,6 +132,11 @@ impl Inputs {
         for _ in 0..vo {
             samples.push(Measurement::Odometry(self.odometry.recv().await?));
         }
+        for _ in 0..ko {
+            samples.push(Measurement::KinematicOdometry(
+                self.kinematic_odometry.recv().await?,
+            ));
+        }
         samples.sort_by_key(Measurement::time);
         Ok(samples)
     }
@@ -133,17 +150,14 @@ impl Inputs {
             Measurement::Imu(time, imu) => localization.ingest_imu(time, imu),
             Measurement::Kinematics(v) => localization.ingest_kinematics(*v),
             Measurement::Visual(v) => localization.ingest_visual_localization_frame(v),
+            Measurement::KinematicOdometry(v) => localization.ingest_kinematic_odometry(v),
             Measurement::Odometry(v) => {
                 let previous = v
                     .delta
                     .as_ref()
-                    .and_then(|d| fresh_camera_matrix(&self.cameras, d.previous_time));
-                let current = fresh_camera_matrix(&self.cameras, v.time);
-                localization.ingest_visual_odometry(
-                    v,
-                    previous.as_deref().map(|v| &v.inner),
-                    current.as_deref().map(|v| &v.inner),
-                )
+                    .and_then(|d| camera_geometry_at(&self.cameras, d.previous_time));
+                let current = camera_geometry_at(&self.cameras, v.time);
+                localization.ingest_visual_odometry(v, previous.as_ref(), current.as_ref())
             }
         }
     }

@@ -27,10 +27,25 @@ The own-half assumption (robot field X below zero) is used only when localizatio
 startup alignment seed. Tracking and recovery retain the established field orientation, including
 in the opponent half. Leaving damping resets the estimator and starts a new startup epoch.
 Association returns correspondences, not a fitted field pose. Localization alone seeds and
-optimizes alignment. Its production geometry uses Local, Robot, and camera transforms rather than
-Ground-frame output corrections; initial height comes from sole kinematics and IMU tilt.
+optimizes alignment. Startup association uses exposure-time IMU tilt and calibrated camera geometry,
+without requiring a localization pose. Rays intersect a unit-height plane; a closed-form similarity
+fit to landmark coordinates estimates camera height, planar position and yaw. Camera extrinsics
+convert this to body height. The backend uses the same fit to replace its unlocalized startup
+trajectory and height prior at the image timestamp. Sole kinematics only seed the provisional
+local trajectory before landmark initialization; that height is not used for global matching.
 
-Global matching requires a nondegenerate seed and agreement of every retained detection. It rejects
+Localization and association consume `camera_geometry`: calibrated robot-to-camera transforms
+and intrinsics stamped with head kinematics time. This stream remains available without a ground
+transform or a selected support foot. Image-time lookups interpolate bracketing camera-to-body
+poses across gaps of at most 20 ms, rejecting extrapolation and changes in intrinsics. Geometry
+caches hold 1500 samples (three seconds at 500 Hz). Ground-projection consumers still use
+`camera_matrix`, which requires a fresh ground transform. The simulator supplies the same
+ground-independent camera geometry directly to localization.
+
+Global matching requires a non-collinear seed and agreement of every retained detection. Search
+propagates a common scale interval through pairwise distances, then validates full similarity fits
+in image space. `height_sigma` is a tracking uncertainty floor, not a startup matching parameter.
+It rejects
 ambiguous landmark assignments and exhausted search budgets rather than certifying an arbitrary
 subset. Tracking propagates the full pose covariance into image space. Recovery never falls back
 to global startup: predictions older than `tracking.max_age` remain lost until explicit restart.
@@ -64,6 +79,12 @@ poses, to that path. Known-correspondence mode remains available explicitly for 
 Its synchronous runner shares the production loss and visual-acknowledgement checks.
 
 ### Live Tuning
+
+Visual factors use a [monotone oriented-bearing residual](localization_visual_residual.md),
+including outside the image and behind the predicted camera. The existing pixel-noise
+parameter is converted to fixed isotropic angular noise at insertion; final tracking
+acceptance still checks positive depth and pixel reprojection RMS. See the linked
+contract for the formula, derivatives, monotonicity proof, and antipodal limitation.
 
 The `localization3d` parameter API updates the running node without resetting its pose, alignment,
 or epoch. Timeout changes take effect immediately, including shortening an already armed deadline.

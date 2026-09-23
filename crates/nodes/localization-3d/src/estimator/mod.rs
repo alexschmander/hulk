@@ -10,16 +10,16 @@ use fagra::{BatchKey, GaussNewton, OptimizeOptions, Problem, SolverError, StateK
 use linear_algebra::{Framed, Isometry3, Vector2, Vector3, vector};
 use localization_fagra::{
     factors::{
-        AdjacentVisualOdometry, CameraIntrinsicsPrior, FieldContainment, FootGround,
-        FootObservation, FrameReprojections, ImuKinematics, ImuObservation, MotionPrior,
-        ReprojectionObservation, RollPitchPrior, TrajectoryPrior, VisualOdometry,
-        VisualOdometryObservation,
+        AdjacentKinematicOdometry, AdjacentVisualOdometry, CameraIntrinsicsPrior, FieldContainment,
+        FootGround, FootObservation, FrameReprojections, ImuKinematics, ImuObservation,
+        KinematicOdometry, MotionPrior, ReprojectionObservation, RollPitchPrior, TrajectoryPrior,
+        VisualOdometry, VisualOdometryObservation,
     },
     variables::{CameraIntrinsics, FieldAlignment, PoseControl, TrajectoryState},
 };
 use nalgebra::SMatrix;
-use projection::camera_matrix::CameraMatrix;
 use ros_z::time::Time;
+use types::camera_geometry::CameraGeometry;
 use types::{
     field_dimensions::FieldDimensions, localization::LocalizationEstimate,
     time_wrapper::TimeWrapper, visual_localization::VisualLocalizationFrame,
@@ -32,10 +32,12 @@ pub(crate) const OPTIMIZATION_WINDOW: Duration = Duration::from_secs(2);
 const WINDOW_NS: i64 = OPTIMIZATION_WINDOW.as_nanos() as i64;
 const HUBER_THRESHOLD: f64 = 2.0;
 const MIN_REPROJECTION_DEPTH: f64 = 0.01;
+const MIN_LANDMARK_RANGE: f64 = 0.01;
 
 mod attitude;
 mod covariance;
 mod inertial;
+mod kinematic_odometry;
 mod vision;
 mod window;
 
@@ -56,6 +58,8 @@ fagra::factors! {
         yaw: localization_fagra::factors::RelativeYaw,
         containment: FieldContainment,
         adjacent_odometry: AdjacentVisualOdometry,
+        kinematic_odometry: KinematicOdometry,
+        adjacent_kinematic_odometry: AdjacentKinematicOdometry,
         imu: Batch<ImuKinematics, ImuObservation>,
         feet: Batch<FootGround, FootObservation>,
         reprojections: Batch<FrameReprojections, ReprojectionObservation>,
@@ -86,6 +90,7 @@ pub(crate) struct Estimator {
     intrinsics: StateKey<CameraIntrinsics<f64>>,
     latest_time: Time,
     latest_vo_epoch: Option<u64>,
+    latest_kinematic_time: Option<Time>,
     measurements: BTreeMap<i64, usize>,
     latest_visual_frame: Option<TimeWrapper<VisualLocalizationFrame>>,
     attitudes: BTreeMap<Time, nalgebra::UnitQuaternion<f64>>,
@@ -93,6 +98,7 @@ pub(crate) struct Estimator {
     current_yaw: Option<fagra::FactorKey<localization_fagra::factors::RelativeYaw>>,
     parameters: Localization3dParameters,
     field_half_extents: Vector2<Field, f64>,
+    field: FieldDimensions,
 }
 
 impl Estimator {
@@ -100,7 +106,7 @@ impl Estimator {
         origin: Time,
         epoch: u64,
         initial_pose: Isometry3<Robot, Local>,
-        camera: &CameraMatrix,
+        camera: &CameraGeometry,
         parameters: Localization3dParameters,
         field: &FieldDimensions,
     ) -> Result<Self> {
@@ -161,12 +167,14 @@ impl Estimator {
             intrinsics,
             latest_time: origin,
             latest_vo_epoch: None,
+            latest_kinematic_time: None,
             measurements: BTreeMap::new(),
             latest_visual_frame: None,
             attitudes: BTreeMap::new(),
             yaw_factors: BTreeMap::new(),
             current_yaw: None,
             parameters,
+            field: *field,
             field_half_extents: vector![
                 field.length as f64 * 0.5 + field.border_strip_width as f64,
                 field.width as f64 * 0.5 + field.border_strip_width as f64,
@@ -349,7 +357,7 @@ mod tests {
     use super::*;
 
     fn estimator() -> Estimator {
-        let camera = CameraMatrix {
+        let camera = CameraGeometry {
             intrinsics: Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]),
             ..Default::default()
         };
@@ -359,6 +367,7 @@ mod tests {
             nalgebra::Isometry3::identity().framed_transform(),
             &camera,
             Localization3dParameters {
+                kinematic_odometry_noise: Default::default(),
                 accelerometer_process_noise_variance: 10.0,
                 visual_feature_noise_variance: 100.0,
                 field_containment_sigma: 1.0,
@@ -435,6 +444,118 @@ mod tests {
     }
 
     #[test]
+    fn kinematic_odometry_stops_blind_motion_and_survives_marginalization() {
+        use types::odometry::KinematicOdometryDelta;
+        let run = |observe_stop: bool| {
+            let mut estimator = estimator();
+            let origin = estimator.origin;
+            let mut last_delta = None;
+            for index in 0..=80 {
+                let time = origin + Duration::from_millis(index * 50);
+                estimator.ingest_imu(time, ImuState::default()).unwrap();
+                if index > 0 && (index <= 20 || observe_stop) {
+                    let delta = KinematicOdometryDelta {
+                        previous_time: time - Duration::from_millis(50),
+                        time,
+                        current_to_previous: linear_algebra::Isometry2::from_parts(
+                            vector![if index <= 20 { 0.02 } else { 0.0 }, 0.0],
+                            0.0,
+                        ),
+                    };
+                    assert!(estimator.ingest_kinematic_odometry(delta).unwrap());
+                    last_delta = Some(delta);
+                }
+                if index == 0 {
+                    continue;
+                }
+                let solved = estimator.solve();
+                assert!(
+                    solved.diagnostics.failure.is_none(),
+                    "{:?}",
+                    solved.diagnostics
+                );
+            }
+            assert!(
+                !estimator
+                    .ingest_kinematic_odometry(last_delta.unwrap())
+                    .unwrap()
+            );
+            let (segment, tau) = estimator.segment_and_tau(estimator.latest_time).unwrap();
+            let controls = control_keys(&estimator.controls, segment).unwrap();
+            estimator.spline(controls).unwrap().state(tau).unwrap()
+        };
+        let stopped = run(true);
+        assert!(stopped.velocity.norm() < 0.02, "{stopped:?}");
+        assert!(
+            (stopped.pose.inner.translation.vector.x - 0.4).abs() < 0.05,
+            "{stopped:?}"
+        );
+        let unobserved = run(false);
+        assert!(unobserved.velocity.x() > 0.2, "{unobserved:?}");
+        assert!(
+            unobserved.pose.inner.translation.vector.x > 1.0,
+            "{unobserved:?}"
+        );
+    }
+
+    #[test]
+    fn head_motion_odometry_does_not_move_stationary_body_without_ground_geometry() {
+        use types::visual_odometry::{VisualOdometer, VisualOdometryDelta};
+
+        let mut estimator = estimator();
+        let camera = |angle| CameraGeometry {
+            robot_to_camera: Isometry3::wrap(
+                nalgebra::Isometry3::from_parts(
+                    nalgebra::Translation3::new(0.05, 0.0, 0.25),
+                    nalgebra::UnitQuaternion::from_euler_angles(0.0, angle, 0.0),
+                )
+                .inverse(),
+            ),
+            ..Default::default()
+        };
+        let mut previous = camera(0.0);
+        for index in 0..100 {
+            let time = Time::from_nanos(1_000_000_000 + index * 2_000_000);
+            estimator.ingest_imu(time, ImuState::default()).unwrap();
+            if index > 0 {
+                let current = camera(index as f32 * 0.005);
+                let delta =
+                    previous.robot_to_camera.inner * current.robot_to_camera.inner.inverse();
+                assert!(
+                    estimator
+                        .ingest_visual_odometry(
+                            VisualOdometer {
+                                time,
+                                epoch: 0,
+                                delta: Some(VisualOdometryDelta {
+                                    previous_time: time - Duration::from_millis(2),
+                                    current_left_camera_to_previous_left_camera: delta,
+                                }),
+                                current_left_camera_to_visual_odometer: current
+                                    .robot_to_camera
+                                    .inner
+                                    .inverse(),
+                            },
+                            Some(&previous),
+                            Some(&current),
+                        )
+                        .unwrap()
+                );
+                previous = current;
+            }
+        }
+        let result = estimator.solve();
+        assert!(
+            result.diagnostics.failure.is_none(),
+            "{:?}",
+            result.diagnostics
+        );
+        let pose = result.estimate.unwrap().robot_to_local.pose.inner;
+        assert!(pose.translation.vector.norm() < 1e-5, "{pose:?}");
+        assert!(pose.rotation.angle() < 1e-5, "{pose:?}");
+    }
+
+    #[test]
     fn covariance_remains_observable_across_knot_boundary() {
         let mut estimator = estimator();
         for index in 0..=100 {
@@ -495,5 +616,136 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(estimator.latest_time, Time::from_nanos(1_000_000_000));
+    }
+
+    #[test]
+    fn startup_replaces_drifted_height_prior_with_landmark_fit() {
+        use types::visual_localization::FieldMarkAssociation;
+        let camera = CameraGeometry {
+            robot_to_camera: Isometry3::wrap(
+                nalgebra::Isometry3::from_parts(
+                    nalgebra::Translation3::new(0.12, -0.04, 0.2),
+                    nalgebra::UnitQuaternion::from_euler_angles(std::f32::consts::PI, 0.0, 0.0),
+                )
+                .inverse(),
+            ),
+            intrinsics: Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]),
+        };
+        let truth = nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(-2.0, 1.0, 0.55),
+            nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 0.4),
+        );
+        let associations: Vec<_> = [
+            point![-3.0, 0.0, 0.0],
+            point![-1.0, 0.0, 0.0],
+            point![-2.0, 2.0, 0.0],
+        ]
+        .into_iter()
+        .map(|field_point| {
+            let p = camera.robot_to_camera.inner * truth.inverse() * field_point.inner;
+            FieldMarkAssociation {
+                field_point,
+                detection: camera.intrinsics.project(Vector3::wrap(p.coords)),
+            }
+        })
+        .collect();
+        for wrong_height in [0.55, 4.0] {
+            let mut estimator = estimator();
+            let wrong_pose = Isometry3::wrap(nalgebra::Isometry3::from_parts(
+                nalgebra::Translation3::new(100.0, -50.0, wrong_height),
+                nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 0.0),
+            ));
+            estimator = Estimator::new(
+                estimator.origin,
+                estimator.epoch,
+                wrong_pose,
+                &camera,
+                estimator.parameters.clone(),
+                &estimator.field,
+            )
+            .unwrap();
+            estimator
+                .ingest_imu(Time::from_nanos(1_800_000_000), ImuState::default())
+                .unwrap();
+            let time = Time::from_nanos(1_100_000_000);
+            assert!(
+                estimator
+                    .ingest_visual(TimeWrapper {
+                        time,
+                        inner: VisualLocalizationFrame {
+                            epoch: 7,
+                            robot_to_local: wrong_pose,
+                            robot_to_camera: camera.robot_to_camera,
+                            camera_intrinsic: camera.intrinsics,
+                            associations: associations.clone(),
+                        }
+                    })
+                    .unwrap()
+            );
+            assert_eq!(estimator.origin, time);
+            let controls = control_keys(&estimator.controls, 0).unwrap();
+            let seeded = estimator.spline(controls).unwrap().pose(0.0).unwrap();
+            assert!((seeded.inner.translation.vector.z - 0.55).abs() < 1e-5);
+            for index in 0..100 {
+                estimator
+                    .ingest_imu(
+                        time + Duration::from_millis(index * 2),
+                        ImuState {
+                            roll_pitch_yaw: Vector3::wrap(nalgebra::Vector3::new(0.1, -0.05, 0.0)),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            let solved = estimator.solve();
+            assert!(
+                solved.diagnostics.failure.is_none(),
+                "{:?}",
+                solved.diagnostics
+            );
+            let field = solved.estimate.unwrap().robot_to_field.unwrap().pose.inner;
+            assert!(
+                (field.translation.vector - truth.translation.vector.cast::<f64>()).norm() < 1e-4
+            );
+            assert!(field.rotation.angle_to(&truth.rotation.cast::<f64>()) < 1e-4);
+            assert!(estimator.visual_rms().unwrap() < 0.01);
+        }
+    }
+
+    #[test]
+    fn visual_ingestion_accepts_behind_camera_predictions_but_not_zero_range() {
+        use types::visual_localization::FieldMarkAssociation;
+        let mut estimator = estimator();
+        estimator.alignment = Some(estimator.graph.add(FieldAlignment {
+            local_to_field: nalgebra::Isometry2::identity().framed_transform(),
+        }));
+        let time = Time::from_nanos(1_000_000_000);
+        let mut frame = TimeWrapper {
+            time,
+            inner: VisualLocalizationFrame {
+                epoch: 7,
+                robot_to_local: Isometry3::identity(),
+                robot_to_camera: Isometry3::from_translation(0.0, 0.0, -1.0),
+                camera_intrinsic: Intrinsic::new(
+                    nalgebra::vector![300.0, 300.0],
+                    point![160.0, 120.0],
+                ),
+                associations: [
+                    (point![-1.0, -1.0, 0.0], point![150.0, 110.0]),
+                    (point![1.0, -1.0, 0.0], point![170.0, 110.0]),
+                    (point![0.0, 0.0, 0.0], point![160.0, 130.0]),
+                ]
+                .map(|(field_point, detection)| FieldMarkAssociation {
+                    field_point,
+                    detection,
+                })
+                .to_vec(),
+            },
+        };
+        assert!(estimator.ingest_visual(frame.clone()).unwrap());
+        // A finite bearing objective does not authorize a physically invalid tracking result.
+        assert!(estimator.visual_rms().is_none());
+        frame.inner.robot_to_camera = Isometry3::identity();
+        assert!(!estimator.ingest_visual(frame).unwrap());
     }
 }

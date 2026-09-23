@@ -5,13 +5,35 @@ use serde::{Deserialize, Serialize};
 
 const MAX_TRACKING_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
+#[derive(Clone, Debug, Deserialize, Serialize, Message)]
+#[serde(deny_unknown_fields)]
+pub struct KinematicOdometryNoise {
+    /// Forward/lateral displacement noise floor, in metres.
+    pub position_sigma: nalgebra::Vector2<f64>,
+    /// Forward/lateral displacement variance growth, in m²/s.
+    pub translation_variance_per_second: nalgebra::Vector2<f64>,
+}
+
+impl Default for KinematicOdometryNoise {
+    fn default() -> Self {
+        Self {
+            position_sigma: nalgebra::Vector2::repeat(0.005),
+            translation_variance_per_second: nalgebra::Vector2::repeat(0.001),
+        }
+    }
+}
+
 /// Runtime parameters for the 3D localization node.
 #[derive(Clone, Debug, Deserialize, Serialize, Message)]
 #[serde(deny_unknown_fields)]
 pub struct Localization3dParameters {
+    #[serde(default)]
+    pub kinematic_odometry_noise: KinematicOdometryNoise,
     /// Translational white-noise-on-acceleration spectral density.
     pub accelerometer_process_noise_variance: f64,
-    /// Pixel residual variance for accepted visual feature associations.
+    /// Pixel-noise variance used to set isotropic angular noise for accepted visual
+    /// associations: sigma_theta = sqrt(variance) / sqrt(fx * fy), using the frame's
+    /// fixed calibration. This is a near-axis approximation, not a pixel likelihood.
     pub visual_feature_noise_variance: f64,
     /// Soft field containment sigma in meters outside field plus border strip.
     pub field_containment_sigma: f64,
@@ -29,6 +51,15 @@ fn default_tracking_timeout() -> Duration {
 
 impl Localization3dParameters {
     pub(crate) fn validate(&self) -> std::result::Result<(), String> {
+        let noise = &self.kinematic_odometry_noise;
+        if !noise
+            .position_sigma
+            .iter()
+            .chain(noise.translation_variance_per_second.iter())
+            .all(|v| valid_scale(*v) && (*v * *v).is_finite())
+        {
+            return Err("kinematic odometry noise must be finite and > 0".into());
+        }
         if !valid_scale(self.accelerometer_process_noise_variance) {
             return Err("accelerometer_process_noise_variance must be finite and > 0".to_string());
         }
@@ -61,6 +92,7 @@ mod tests {
     #[test]
     fn live_tuning_rejects_unusable_whitening_and_timer_ranges_before_commit() {
         let parameters = Localization3dParameters {
+            kinematic_odometry_noise: Default::default(),
             accelerometer_process_noise_variance: 10.0,
             visual_feature_noise_variance: 10000.0,
             field_containment_sigma: 1.0,

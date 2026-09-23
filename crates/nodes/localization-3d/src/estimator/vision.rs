@@ -1,10 +1,8 @@
 use super::{
-    Estimator, HUBER_THRESHOLD, MIN_REPROJECTION_DEPTH, WINDOW_NS, control_keys, seconds_per_knot,
+    Estimator, HUBER_THRESHOLD, MIN_LANDMARK_RANGE, MIN_REPROJECTION_DEPTH, WINDOW_NS,
+    control_keys, seconds_per_knot,
 };
-use crate::{
-    alignment::{seed_alignment, valid_visual_frame},
-    camera::robot_to_camera,
-};
+use crate::alignment::{seed_alignment, valid_visual_frame};
 use color_eyre::Result;
 use linear_algebra::{IntoTransform, Point2, Point3};
 use localization_fagra::{
@@ -14,8 +12,8 @@ use localization_fagra::{
     },
     variables::FieldAlignment,
 };
-use nalgebra::{Matrix2, SMatrix};
-use projection::camera_matrix::CameraMatrix;
+use nalgebra::SMatrix;
+use types::camera_geometry::CameraGeometry;
 use types::{
     time_wrapper::TimeWrapper, visual_localization::VisualLocalizationFrame,
     visual_odometry::VisualOdometer,
@@ -56,17 +54,15 @@ impl Estimator {
         frame: TimeWrapper<VisualLocalizationFrame>,
     ) -> Result<bool> {
         let time = frame.time;
-        let Some((segment, tau)) = self.check_time(time, "visual localization")? else {
+        let Some(_) = self.check_time(time, "visual localization")? else {
             return Ok(false);
         };
         let mut frame = frame.inner;
         if frame.epoch != self.epoch || !valid_visual_frame(&frame) {
             return Ok(false);
         }
-        let controls = self.ensure_segment(segment)?;
-        let pose = self.spline(controls)?.pose(tau)?;
         let candidate = if self.alignment.is_none() {
-            let Some(seed) = seed_alignment(
+            let Some((initial_pose, seed)) = seed_alignment(
                 frame.robot_to_local,
                 frame.robot_to_camera,
                 frame.camera_intrinsic,
@@ -74,12 +70,31 @@ impl Estimator {
             ) else {
                 return Ok(false);
             };
+            // Discard the unlocalized trajectory and its fixed-height gauge prior.
+            // Bootstrap at the exposure timestamp, retaining the lifecycle epoch.
+            let camera = CameraGeometry {
+                robot_to_camera: frame.robot_to_camera,
+                intrinsics: frame.camera_intrinsic,
+            };
+            let initialized = Self::new(
+                time,
+                self.epoch,
+                initial_pose,
+                &camera,
+                self.parameters.clone(),
+                &self.field,
+            )?;
+            *self = initialized;
+            frame.robot_to_local = initial_pose;
             Some(FieldAlignment {
                 local_to_field: seed.inner.cast().framed_transform(),
             })
         } else {
             None
         };
+        let (segment, tau) = self.segment_and_tau(time)?;
+        let controls = self.ensure_segment(segment)?;
+        let pose = self.spline(controls)?.pose(tau)?;
         let alignment = match &candidate {
             Some(value) => value,
             None => self
@@ -91,9 +106,9 @@ impl Estimator {
             * alignment.local_to_field.to_3d().inner.inverse();
         if frame.associations.iter().any(|a| {
             let p = field_to_camera * a.field_point.inner.cast::<f64>();
-            !p.iter().all(|v| v.is_finite()) || p.z <= MIN_REPROJECTION_DEPTH
+            !p.iter().all(|v| v.is_finite()) || p.coords.norm() <= MIN_LANDMARK_RANGE
         }) {
-            tracing::warn!(?time, "discarding visual frame outside projection domain");
+            tracing::warn!(?time, "discarding visual frame with invalid landmark range");
             return Ok(false);
         }
         if let Some(candidate) = candidate {
@@ -109,10 +124,14 @@ impl Estimator {
             duration: seconds_per_knot(),
             tau,
             robot_to_camera: frame.robot_to_camera.inner.cast().framed_transform(),
-            pixel_information_root: Matrix2::identity()
+            // Fixed calibration-based conversion; do not let optimized focal lengths
+            // change measurement strength during a solve.
+            angular_information_root: (f64::from(frame.camera_intrinsic.focals.x)
+                * f64::from(frame.camera_intrinsic.focals.y))
+            .sqrt()
                 / self.parameters.visual_feature_noise_variance.sqrt(),
             huber_threshold: HUBER_THRESHOLD,
-            min_depth: MIN_REPROJECTION_DEPTH,
+            min_range: MIN_LANDMARK_RANGE,
         });
         for association in &frame.associations {
             self.graph.add_factor_to(
@@ -139,8 +158,8 @@ impl Estimator {
     pub(crate) fn ingest_visual_odometry(
         &mut self,
         sample: VisualOdometer,
-        previous_camera: Option<&CameraMatrix>,
-        current_camera: Option<&CameraMatrix>,
+        previous_camera: Option<&CameraGeometry>,
+        current_camera: Option<&CameraGeometry>,
     ) -> Result<bool> {
         if self.check_time(sample.time, "visual odometry")?.is_none() {
             return Ok(false);
@@ -194,14 +213,15 @@ impl Estimator {
             tracing::warn!("discarding visual odometry outside optimization window");
             return Ok(false);
         }
-        let transform = robot_to_camera(previous_camera)
+        let transform = previous_camera
+            .robot_to_camera
             .inner
             .cast::<f64>()
             .inverse()
             * delta
                 .current_left_camera_to_previous_left_camera
                 .cast::<f64>()
-            * robot_to_camera(current_camera).inner.cast::<f64>();
+            * current_camera.robot_to_camera.inner.cast::<f64>();
         let observation = VisualOdometryObservation {
             previous_tau,
             current_tau,

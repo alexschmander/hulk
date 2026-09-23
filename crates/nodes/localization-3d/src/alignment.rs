@@ -1,6 +1,6 @@
 use coordinate_systems::{Camera, Field, Local, Robot};
-use linear_algebra::{IntoTransform, Isometry2, Isometry3, Point2, Vector3};
-use localization_fagra::alignment::fit_ground_alignment;
+use linear_algebra::{IntoTransform, Isometry2, Isometry3, Point2};
+use localization_fagra::alignment::fit_ground_similarity;
 use projection::intrinsic::Intrinsic;
 use types::visual_localization::FieldMarkAssociation;
 
@@ -39,39 +39,66 @@ pub(crate) fn valid_visual_frame(
         })
 }
 
-/// Seed planar field alignment by intersecting associated camera rays with local z=0.
+/// Fit startup camera height and field alignment from IMU tilt and bearings.
+/// The incoming local translation is deliberately ignored.
 pub(crate) fn seed_alignment(
     robot_to_local: Isometry3<Robot, Local>,
     robot_to_camera: Isometry3<Robot, Camera>,
     intrinsic: Intrinsic,
     associations: &mut [FieldMarkAssociation],
-) -> Option<Isometry2<Local, Field>> {
-    let camera_to_local = (robot_to_local * robot_to_camera.inverse())
-        .inner
-        .cast::<f64>()
-        .framed_transform();
-    let mut alignment = fit_ground_alignment(
-        &camera_to_local,
-        associations.iter().map(|association| {
-            (
-                Vector3::wrap(intrinsic.bearing(association.detection).inner.cast::<f64>()),
-                Point2::wrap(
-                    association
-                        .field_point
-                        .inner
-                        .coords
-                        .xy()
-                        .cast::<f64>()
-                        .into(),
-                ),
-            )
-        }),
-        MIN_REPROJECTION_DEPTH,
+) -> Option<(Isometry3<Robot, Local>, Isometry2<Local, Field>)> {
+    let rotation = robot_to_local.inner.rotation.cast::<f64>();
+    let camera_to_robot = robot_to_camera.inner.cast::<f64>().inverse();
+    let camera_rotation = rotation * camera_to_robot.rotation;
+    let mut points = Vec::with_capacity(associations.len());
+    for a in associations.iter() {
+        let ray = camera_rotation * intrinsic.bearing(a.detection).inner.cast::<f64>();
+        if !ray.iter().all(|v| v.is_finite()) || ray.z >= -1e-6 {
+            return None;
+        }
+        points.push((
+            -ray.xy() / ray.z,
+            Point2::wrap(a.field_point.inner.coords.xy().cast::<f64>().into()),
+        ));
+    }
+    let (camera_alignment, height) = fit_ground_similarity(points.into_iter()).ok()?;
+    let offset = rotation * camera_to_robot.translation.vector;
+    let body_height = height - offset.z;
+    if body_height <= 0.0 {
+        return None;
+    }
+    let pose: Isometry3<Robot, Local> = nalgebra::Isometry3::from_parts(
+        nalgebra::Translation3::new(0.0, 0.0, body_height),
+        rotation,
     )
-    .ok()?
-    .inner;
-    let robot_xy = robot_to_local.inner.translation.vector.xy().cast::<f64>();
-    if (alignment * nalgebra::Point2::from(robot_xy)).x > 0.0 {
+    .cast()
+    .framed_transform();
+    let mut alignment = nalgebra::Isometry2::from_parts(
+        (camera_alignment.inner.translation.vector - camera_alignment.inner.rotation * offset.xy())
+            .into(),
+        camera_alignment.inner.rotation,
+    );
+    let framed_alignment: Isometry2<Local, Field, f64> = alignment.framed_transform();
+    let field_to_camera = robot_to_camera.inner.cast::<f64>()
+        * pose.inner.cast::<f64>().inverse()
+        * framed_alignment.to_3d().inner.inverse();
+    let mut squared = 0.0;
+    for a in associations.iter() {
+        let p = field_to_camera * a.field_point.inner.cast::<f64>();
+        if p.z <= MIN_REPROJECTION_DEPTH {
+            return None;
+        }
+        let pixel = nalgebra::Vector2::new(
+            intrinsic.focals.x as f64 * p.x / p.z + intrinsic.optical_center.x() as f64,
+            intrinsic.focals.y as f64 * p.y / p.z + intrinsic.optical_center.y() as f64,
+        );
+        squared += (pixel - a.detection.inner.coords.cast::<f64>()).norm_squared();
+    }
+    let rms = (squared / associations.len() as f64).sqrt();
+    if !rms.is_finite() || rms > 10.0 {
+        return None;
+    }
+    if alignment.translation.vector.x > 0.0 {
         alignment =
             nalgebra::Isometry2::new(nalgebra::Vector2::zeros(), std::f64::consts::PI) * alignment;
         for association in associations {
@@ -84,5 +111,5 @@ pub(crate) fn seed_alignment(
         .to_homogeneous()
         .iter()
         .all(|value| value.is_finite())
-        .then(|| alignment.framed_transform())
+        .then(|| (pose, alignment.framed_transform()))
 }

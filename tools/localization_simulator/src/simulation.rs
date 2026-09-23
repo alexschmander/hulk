@@ -11,6 +11,7 @@ use localization_3d::{Localization, SolveDiagnostics};
 use nalgebra::{Isometry3, Point2, Translation3, UnitQuaternion, Vector3};
 use projection::camera_matrix::CameraMatrix;
 use ros_z::time::Time;
+use types::camera_geometry::CameraGeometry;
 use types::{
     field_dimensions::FieldDimensions,
     localization::{LocalizationState, LocalizationState3D},
@@ -96,7 +97,7 @@ pub struct LocalizationSimulation {
     field_dimensions: FieldDimensions,
     association_parameters: FieldMarkAssociationParameters,
     step_index: usize,
-    previous_camera_matrix: Option<CameraMatrix>,
+    previous_camera_geometry: Option<CameraGeometry>,
     latest_diagnostics: Option<SolveDiagnostics>,
     production_visual_odometry: Option<ProductionVisualOdometry>,
 }
@@ -130,7 +131,7 @@ impl LocalizationSimulation {
             0,
             &localization_parameters,
             &field_dimensions,
-            &initial_camera_matrix,
+            &CameraGeometry::from(&initial_camera_matrix),
             initial_robot_to_local,
         )?;
         Ok(Self {
@@ -142,7 +143,7 @@ impl LocalizationSimulation {
             field_dimensions,
             association_parameters,
             step_index: 0,
-            previous_camera_matrix: None,
+            previous_camera_geometry: None,
             latest_diagnostics: None,
             tracking_reference: None,
             initial_geometry: TimeWrapper {
@@ -269,8 +270,8 @@ impl LocalizationSimulation {
         self.localization.advance_time(time);
         self.localization.ingest_visual_odometry(
             visual_odometry.odometer.clone(),
-            self.previous_camera_matrix.as_ref(),
-            Some(&current_camera_matrix),
+            self.previous_camera_geometry.as_ref(),
+            Some(&CameraGeometry::from(&current_camera_matrix)),
         )?;
         let mut landmark_frame = None;
         if self
@@ -357,7 +358,7 @@ impl LocalizationSimulation {
             visual_odometry_delta: visual_odometry.delta,
             production_vo_diagnostics: visual_odometry.production_diagnostics,
         };
-        self.previous_camera_matrix = Some(current_camera_matrix);
+        self.previous_camera_geometry = Some(CameraGeometry::from(&current_camera_matrix));
         self.step_index += 1;
         self.history.push(sample);
         Ok(true)
@@ -632,7 +633,8 @@ mod tests {
             transitions,
             vec![
                 (0, "Startup"),
-                (3_000_000_000, "Tracking"),
+                // The freshly seeded graph receives its next IMU/VO samples before solving.
+                (3_020_000_000, "Tracking"),
                 (7_900_000_000, "LostTrack"),
                 (9_000_000_000, "Tracking"),
             ]
@@ -1033,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn production_association_uses_estimator_geometry_not_truth() {
+    fn production_startup_recovers_height_from_pixels_despite_bad_localizer_height() {
         let mut simulation = LocalizationSimulation::new(
             Scenario::stationary(),
             SimulationConfig {
@@ -1044,8 +1046,7 @@ mod tests {
             },
         )
         .unwrap();
-        // A deliberately wrong startup height tests the association input, without
-        // relying on the removed live-VO output propagation to corrupt a pose.
+        // The provisional localizer height must not determine startup projection scale.
         simulation
             .initial_geometry
             .inner
@@ -1061,7 +1062,7 @@ mod tests {
             0,
             &production_localization_parameters().unwrap(),
             &simulation.field_dimensions,
-            &camera_matrix(&truth),
+            &CameraGeometry::from(&camera_matrix(&truth)),
             simulation.initial_geometry.inner.robot_to_local,
         )
         .unwrap();
@@ -1075,20 +1076,15 @@ mod tests {
         let last = simulation.history.last().unwrap();
         let counts = last.landmark_frame.as_ref().unwrap();
         assert!(counts.emitted_detections >= 3);
-        assert!(
-            simulation
-                .association_geometry()
-                .unwrap()
-                .inner
-                .robot_to_local
-                .translation()
-                .z()
-                > 5.0
-        );
-        assert_eq!(
-            counts.associated, 0,
-            "truth geometry would still match the stationary landmarks"
-        );
+        let fitted_height = simulation
+            .association_geometry()
+            .unwrap()
+            .inner
+            .robot_to_local
+            .translation()
+            .z();
+        assert!((fitted_height - truth.translation.vector.z).abs() < 0.01);
+        assert!(counts.associated >= 3);
     }
 
     #[test]
