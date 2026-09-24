@@ -18,7 +18,7 @@ use eframe::{
 };
 use layout::{FocusDirection, TwixLayout};
 use log::{error, warn};
-use panels::{AudioPanel, BehaviorTreePanel, ImagePanel, MapPanel, ParameterPanel, TextPanel};
+use panels::{AudioPanel, BehaviorTreePanel, ImagePanel, MapPanel, ParameterPanel, PlotPanel, TextPanel};
 use repository::{Repository, inspect_version::check_for_update};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use visuals::Visuals;
@@ -34,6 +34,7 @@ mod panels;
 mod presets;
 mod repaint;
 mod selectable_panel_macro;
+mod topic_source;
 mod visuals;
 
 impl_selectable_panel!(
@@ -42,6 +43,7 @@ impl_selectable_panel!(
     MapPanel,
     ParameterPanel,
     AudioPanel,
+    PlotPanel,
     BehaviorTreePanel
 );
 
@@ -166,6 +168,9 @@ impl App for TwixApp {
                     if context.keybind_pressed(action) {
                         layout.focus(direction, &context);
                     }
+                }
+                if context.keybind_pressed(KeybindAction::FocusTopic) {
+                    layout.focus_topic(&context);
                 }
                 if context.keybind_pressed(KeybindAction::OpenSplit) {
                     layout.open_split(&self.backend, &context);
