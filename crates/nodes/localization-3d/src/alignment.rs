@@ -39,13 +39,15 @@ pub(crate) fn valid_visual_frame(
         })
 }
 
-/// Fit startup camera height and field alignment from IMU tilt and bearings.
+/// Fit camera height and field alignment from IMU tilt and bearings.
 /// The incoming local translation is deliberately ignored.
+/// Startup canonicalizes the field half; recovery selects it from trusted heading.
 pub(crate) fn seed_alignment(
     robot_to_local: Isometry3<Robot, Local>,
     robot_to_camera: Isometry3<Robot, Camera>,
     intrinsic: Intrinsic,
     associations: &mut [FieldMarkAssociation],
+    canonicalize: bool,
 ) -> Option<(Isometry3<Robot, Local>, Isometry2<Local, Field>)> {
     let rotation = robot_to_local.inner.rotation.cast::<f64>();
     let camera_to_robot = robot_to_camera.inner.cast::<f64>().inverse();
@@ -98,7 +100,7 @@ pub(crate) fn seed_alignment(
     if !rms.is_finite() || rms > 10.0 {
         return None;
     }
-    if alignment.translation.vector.x > 0.0 {
+    if canonicalize && alignment.translation.vector.x > 0.0 {
         alignment =
             nalgebra::Isometry2::new(nalgebra::Vector2::zeros(), std::f64::consts::PI) * alignment;
         for association in associations {

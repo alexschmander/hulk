@@ -2,12 +2,11 @@ use coordinate_systems::Pixel;
 use linear_algebra::Point2;
 use localization_fagra::alignment::fit_ground_similarity;
 use nalgebra::{Matrix2, Matrix2x3, Vector2, Vector3};
-use types::visual_localization::{FieldMarkAssociation, GlobalLocalizationDebug};
-
-use super::{
-    GLOBAL_LOCALIZER_MAX_DETECTIONS, GlobalAssociationConfig,
-    config::{GLOBAL_LOCALIZER_MAX_INPUT_DETECTIONS, SEED_POOL_SIZE},
+use types::visual_localization::{
+    FieldMarkAssociation, GlobalLocalizationDebug, VisualAssociationSource,
 };
+
+use super::GlobalAssociationConfig;
 use crate::{
     AssociationResult, DetectedVisualFeature, GlobalAssociationInput, VisualFeatureClass,
     features::raw_detections, map::LandmarkMap,
@@ -39,7 +38,7 @@ pub(crate) fn preprocess(
 ) -> Option<(LandmarkMap, Vec<Detection>)> {
     let config = *input.parameters;
     config.validate().ok()?;
-    if input.visual_features.supported_feature_count() > GLOBAL_LOCALIZER_MAX_INPUT_DETECTIONS
+    if input.visual_features.supported_feature_count() > config.max_input_detections
         || !input.camera_intrinsic.is_valid()
         || !input
             .robot_to_camera
@@ -80,11 +79,12 @@ pub(crate) fn preprocess(
     let mut retained = Vec::<Detection>::new();
     for detection in detections {
         if retained.iter().any(|other| {
-            other.class == detection.class && (other.pixel - detection.pixel).inner.norm() <= 1.0
+            other.class == detection.class
+                && (other.pixel - detection.pixel).inner.norm() <= config.duplicate_pixel_distance
         }) {
             continue;
         }
-        if retained.len() == GLOBAL_LOCALIZER_MAX_DETECTIONS {
+        if retained.len() == config.max_retained_detections {
             return None;
         }
         retained.push(detection);
@@ -109,7 +109,9 @@ fn project_detection(
     let ray_z_sigma = config.detection_pixel_sigma * pixel_rays[0].z.hypot(pixel_rays[1].z)
         + config.imu_tilt_sigma * ray.xy().norm();
     if !ray.iter().all(|x| x.is_finite())
-        || -ray.z <= (config.mahalanobis_gate.sqrt() * ray_z_sigma).max(1.0e-4 * ray.norm())
+        || -ray.z
+            <= (config.mahalanobis_gate.sqrt() * ray_z_sigma)
+                .max(config.min_downward_ray_fraction * ray.norm())
     {
         return None;
     }
@@ -131,7 +133,7 @@ fn project_detection(
         pixel_covariance: config.detection_pixel_sigma.powi(2)
             * pixel_jacobian
             * pixel_jacobian.transpose()
-            + Matrix2::identity() * 1.0e-8,
+            + Matrix2::identity() * config.projected_covariance_floor,
         tilt_jacobian: Matrix2::from_columns(
             &[Vector3::x(), Vector3::y()].map(|axis| ray_jacobian * axis.cross(&ray)),
         ),
@@ -158,17 +160,17 @@ fn cross(a: Vector2<f32>, b: Vector2<f32>) -> f32 {
     a.x * b.y - a.y * b.x
 }
 
-fn select_seed(detections: &[Detection]) -> Option<[usize; 3]> {
+fn select_seed(detections: &[Detection], config: GlobalAssociationConfig) -> Option<[usize; 3]> {
     let mut seed = None;
     let mut best: f32 = 0.0;
     // A bounded seed pool changes only search order. Every retained detection must match.
-    for a in 0..detections.len().min(SEED_POOL_SIZE) {
-        for b in a + 1..detections.len().min(SEED_POOL_SIZE) {
-            for c in b + 1..detections.len().min(SEED_POOL_SIZE) {
+    for a in 0..detections.len().min(config.seed_pool_size) {
+        for b in a + 1..detections.len().min(config.seed_pool_size) {
+            for c in b + 1..detections.len().min(config.seed_pool_size) {
                 let u = detections[b].xy - detections[a].xy;
                 let v = detections[c].xy - detections[a].xy;
                 let quality = cross(u, v).abs() / (u.norm_squared() + v.norm_squared()).max(1e-12);
-                if quality > best.max(1e-5) {
+                if quality > best.max(config.min_seed_quality) {
                     best = quality;
                     seed = Some([a, b, c]);
                 }
@@ -308,7 +310,7 @@ impl Search<'_> {
             let xy = pose.inner.rotation.inverse() * (field - pose.inner.translation.vector);
             let leveled = Vector3::new(xy.x, xy.y, -height);
             let camera = camera_to_level.inverse() * leveled;
-            if camera.z <= 0.01 {
+            if camera.z <= f64::from(config.min_reprojection_depth) {
                 return None;
             }
             let pixel = Vector2::new(
@@ -398,7 +400,7 @@ pub(crate) fn associate(input: GlobalAssociationInput<'_>) -> Option<Association
     if detections.len() < input.parameters.min_inliers || detections.len() > map.landmarks.len() {
         return None;
     }
-    let seed = select_seed(&detections)?;
+    let seed = select_seed(&detections, *input.parameters)?;
     let order = seed
         .into_iter()
         .chain((0..detections.len()).filter(|i| !seed.contains(i)))
@@ -425,6 +427,7 @@ pub(crate) fn associate(input: GlobalAssociationInput<'_>) -> Option<Association
                 field_point: map.landmarks[m].xy.extend(0.0),
             })
             .collect(),
+        source: VisualAssociationSource::Global,
         debug: Some(GlobalLocalizationDebug {
             association_count: pairs.len(),
             pairwise_distance_rms: rms,

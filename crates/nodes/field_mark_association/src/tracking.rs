@@ -12,10 +12,7 @@ use types::{
 
 use crate::{
     AssociationInput, AssociationResult, DetectedVisualFeature, DetectedVisualFeatures,
-    FieldMarkAssociationParameters, VisualFeatureClass,
-    features::raw_detections,
-    global_association::{GLOBAL_LOCALIZER_MAX_DETECTIONS, GLOBAL_LOCALIZER_MAX_INPUT_DETECTIONS},
-    map::LandmarkMap,
+    FieldMarkAssociationParameters, VisualFeatureClass, features::raw_detections, map::LandmarkMap,
 };
 
 #[derive(Clone, Copy)]
@@ -54,7 +51,7 @@ pub(crate) fn associate(
         return None;
     }
     let config = parameters.global_localizer;
-    let detections = filter_detections(input.visual_features, &map, config.confidence_threshold)?;
+    let detections = filter_detections(input.visual_features, &map, config)?;
     if detections.len() < config.min_inliers {
         return None;
     }
@@ -91,7 +88,9 @@ fn validated_prior(
         ),
     };
     let alignment = input.geometry.local_to_field?;
-    if !valid_geometry(input, estimate) || !valid_covariance(estimate.covariance) {
+    if !valid_geometry(input, estimate, parameters.global_localizer)
+        || !valid_covariance(estimate.covariance)
+    {
         return None;
     }
     if input.time < last_successful_solve {
@@ -109,7 +108,11 @@ fn validated_prior(
     })
 }
 
-fn valid_geometry(input: AssociationInput<'_>, estimate: LocalizationEstimate3D) -> bool {
+fn valid_geometry(
+    input: AssociationInput<'_>,
+    estimate: LocalizationEstimate3D,
+    config: crate::GlobalLocalizerParameters,
+) -> bool {
     let Some(alignment) = input.geometry.local_to_field else {
         return false;
     };
@@ -127,7 +130,7 @@ fn valid_geometry(input: AssociationInput<'_>, estimate: LocalizationEstimate3D)
         .iter()
         .any(|matrix| matrix.iter().any(|x| !x.is_finite()))
         || !intrinsic.is_valid()
-        || input.visual_features.supported_feature_count() > GLOBAL_LOCALIZER_MAX_INPUT_DETECTIONS
+        || input.visual_features.supported_feature_count() > config.max_input_detections
     {
         return false;
     }
@@ -203,11 +206,11 @@ fn project_predictions(
 fn filter_detections(
     features: &DetectedVisualFeatures,
     map: &LandmarkMap,
-    confidence_threshold: f32,
+    config: crate::GlobalLocalizerParameters,
 ) -> Option<Vec<(VisualFeatureClass, DetectedVisualFeature)>> {
     let mut detections = raw_detections(features)
         .filter(|(_, feature)| {
-            (confidence_threshold..=1.0).contains(&feature.confidence)
+            (config.confidence_threshold..=1.0).contains(&feature.confidence)
                 && feature.pixel.coords().inner.iter().all(|x| x.is_finite())
         })
         .collect::<Vec<_>>();
@@ -217,11 +220,12 @@ fn filter_detections(
     let mut retained: Vec<(VisualFeatureClass, DetectedVisualFeature)> = Vec::new();
     for (class, detection) in detections {
         if retained.iter().any(|(other_class, other)| {
-            *other_class == class && (other.pixel - detection.pixel).inner.norm() <= 1.0
+            *other_class == class
+                && (other.pixel - detection.pixel).inner.norm() <= config.duplicate_pixel_distance
         }) {
             continue;
         }
-        if retained.len() == GLOBAL_LOCALIZER_MAX_DETECTIONS {
+        if retained.len() == config.max_retained_detections {
             return None;
         }
         retained.push((class, detection));
@@ -512,6 +516,7 @@ fn certify(
                 field_point: map.landmarks[column].xy.extend(0.0),
             })
             .collect(),
+        source: types::visual_localization::VisualAssociationSource::Tracking,
         // GlobalLocalizationDebug has a metric residual, not an image-space residual.
         debug: None,
     })

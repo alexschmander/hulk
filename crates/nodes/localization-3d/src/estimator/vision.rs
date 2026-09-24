@@ -52,6 +52,7 @@ impl Estimator {
     pub(crate) fn ingest_visual(
         &mut self,
         frame: TimeWrapper<VisualLocalizationFrame>,
+        trusted_alignment_yaw: Option<f64>,
     ) -> Result<bool> {
         let time = frame.time;
         let Some(_) = self.check_time(time, "visual localization")? else {
@@ -61,12 +62,14 @@ impl Estimator {
         if frame.epoch != self.epoch || !valid_visual_frame(&frame) {
             return Ok(false);
         }
-        let candidate = if self.alignment.is_none() {
+        let recovering = trusted_alignment_yaw.is_some();
+        let candidate = if self.alignment.is_none() || recovering {
             let Some((initial_pose, seed)) = seed_alignment(
                 frame.robot_to_local,
                 frame.robot_to_camera,
                 frame.camera_intrinsic,
                 &mut frame.associations,
+                !recovering,
             ) else {
                 return Ok(false);
             };
@@ -84,11 +87,42 @@ impl Estimator {
                 self.parameters.clone(),
                 &self.field,
             )?;
+            let mut alignment: FieldAlignment<f64> = FieldAlignment {
+                local_to_field: seed.inner.cast().framed_transform(),
+            };
+            if let Some(expected) = trusted_alignment_yaw {
+                let heading = alignment.local_to_field.inner.rotation.angle();
+                let error = |heading: f64| {
+                    let difference = heading - expected;
+                    difference.sin().atan2(difference.cos()).abs()
+                };
+                if error(heading + std::f64::consts::PI) < error(heading) {
+                    alignment.local_to_field.inner =
+                        nalgebra::Isometry2::new(nalgebra::Vector2::zeros(), std::f64::consts::PI)
+                            * alignment.local_to_field.inner;
+                    for association in &mut frame.associations {
+                        association.field_point.inner.x = -association.field_point.inner.x;
+                        association.field_point.inner.y = -association.field_point.inner.y;
+                    }
+                }
+                if error(alignment.local_to_field.inner.rotation.angle())
+                    >= std::f64::consts::FRAC_PI_2
+                {
+                    return Ok(false);
+                }
+            }
+            let field_to_camera = frame.robot_to_camera.inner.cast::<f64>()
+                * initial_pose.inner.cast::<f64>().inverse()
+                * alignment.local_to_field.to_3d().inner.inverse();
+            if frame.associations.iter().any(|association| {
+                let p = field_to_camera * association.field_point.inner.cast::<f64>();
+                !p.iter().all(|v| v.is_finite()) || p.coords.norm() <= MIN_LANDMARK_RANGE
+            }) {
+                return Ok(false);
+            }
             *self = initialized;
             frame.robot_to_local = initial_pose;
-            Some(FieldAlignment {
-                local_to_field: seed.inner.cast().framed_transform(),
-            })
+            Some(alignment)
         } else {
             None
         };

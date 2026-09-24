@@ -24,7 +24,10 @@ use types::{
 };
 
 use crate::{
-    api::{AssociationInput, associate_visual_features},
+    api::{
+        AssociationInput, GlobalAssociationInput, associate_global_visual_features,
+        associate_visual_features,
+    },
     parameters::FieldMarkAssociationParameters,
 };
 
@@ -130,17 +133,27 @@ pub(crate) async fn process_detected_objects(
     let started = Instant::now();
     let (frame, localization) = tokio::task::spawn_blocking(move || {
         let visual_features = crate::find_detected_visual_features(&frame.objects);
-        let localization = associate_visual_features(
-            AssociationInput {
+        let input = AssociationInput {
+            visual_features: &visual_features,
+            robot_to_camera: frame.robot_to_camera,
+            geometry: &frame.geometry,
+            camera_intrinsic: frame.camera_intrinsic,
+            field_dimensions: &frame.field_dimensions,
+            time: frame.image_time,
+        };
+        let mut localization = associate_visual_features(input, &frame.parameters);
+        if localization.associations.is_empty()
+            && matches!(frame.geometry.state, LocalizationState3D::LostTrack { .. })
+        {
+            localization = associate_global_visual_features(GlobalAssociationInput {
                 visual_features: &visual_features,
+                robot_to_local: frame.geometry.robot_to_local,
                 robot_to_camera: frame.robot_to_camera,
-                geometry: &frame.geometry,
                 camera_intrinsic: frame.camera_intrinsic,
                 field_dimensions: &frame.field_dimensions,
-                time: frame.image_time,
-            },
-            &frame.parameters,
-        );
+                parameters: &frame.parameters.global_localizer,
+            });
+        }
         (frame, localization)
     })
     .await
@@ -158,6 +171,7 @@ pub(crate) async fn process_detected_objects(
             time: frame.image_time,
             inner: VisualLocalizationFrame {
                 epoch: frame.geometry.epoch,
+                source: localization.source,
                 robot_to_camera: frame.robot_to_camera,
                 robot_to_local: frame.geometry.robot_to_local,
                 camera_intrinsic: frame.camera_intrinsic,

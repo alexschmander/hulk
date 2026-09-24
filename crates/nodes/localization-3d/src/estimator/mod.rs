@@ -600,19 +600,23 @@ mod tests {
         let mut estimator = estimator();
         assert!(
             !estimator
-                .ingest_visual(TimeWrapper {
-                    time: Time::from_nanos(2_000_000_000),
-                    inner: VisualLocalizationFrame {
-                        epoch: 7,
-                        robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
-                        robot_to_local: nalgebra::Isometry3::identity().framed_transform(),
-                        camera_intrinsic: Intrinsic::new(
-                            nalgebra::vector![300.0, 300.0],
-                            point![160.0, 120.0],
-                        ),
-                        associations: Vec::new(),
+                .ingest_visual(
+                    TimeWrapper {
+                        time: Time::from_nanos(2_000_000_000),
+                        inner: VisualLocalizationFrame {
+                            epoch: 7,
+                            source: types::visual_localization::VisualAssociationSource::Tracking,
+                            robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
+                            robot_to_local: nalgebra::Isometry3::identity().framed_transform(),
+                            camera_intrinsic: Intrinsic::new(
+                                nalgebra::vector![300.0, 300.0],
+                                point![160.0, 120.0],
+                            ),
+                            associations: Vec::new(),
+                        },
                     },
-                })
+                    None
+                )
                 .unwrap()
         );
         assert_eq!(estimator.latest_time, Time::from_nanos(1_000_000_000));
@@ -670,16 +674,21 @@ mod tests {
             let time = Time::from_nanos(1_100_000_000);
             assert!(
                 estimator
-                    .ingest_visual(TimeWrapper {
-                        time,
-                        inner: VisualLocalizationFrame {
-                            epoch: 7,
-                            robot_to_local: wrong_pose,
-                            robot_to_camera: camera.robot_to_camera,
-                            camera_intrinsic: camera.intrinsics,
-                            associations: associations.clone(),
-                        }
-                    })
+                    .ingest_visual(
+                        TimeWrapper {
+                            time,
+                            inner: VisualLocalizationFrame {
+                                epoch: 7,
+                                source:
+                                    types::visual_localization::VisualAssociationSource::Tracking,
+                                robot_to_local: wrong_pose,
+                                robot_to_camera: camera.robot_to_camera,
+                                camera_intrinsic: camera.intrinsics,
+                                associations: associations.clone(),
+                            }
+                        },
+                        None
+                    )
                     .unwrap()
             );
             assert_eq!(estimator.origin, time);
@@ -713,6 +722,90 @@ mod tests {
     }
 
     #[test]
+    fn global_recovery_reseeds_the_trusted_symmetry_branch() {
+        use types::visual_localization::{FieldMarkAssociation, VisualAssociationSource};
+        let camera = CameraGeometry {
+            robot_to_camera: Isometry3::wrap(
+                nalgebra::Isometry3::from_parts(
+                    nalgebra::Translation3::new(0.12, -0.04, 0.2),
+                    nalgebra::UnitQuaternion::from_euler_angles(std::f32::consts::PI, 0.0, 0.0),
+                )
+                .inverse(),
+            ),
+            intrinsics: Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]),
+        };
+        let truth = nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(-2.0, 1.0, 0.55),
+            nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 0.4),
+        );
+        let field_points: [linear_algebra::Point3<coordinate_systems::Field>; 3] = [
+            point![-3.0, 0.0, 0.0],
+            point![-1.0, 0.0, 0.0],
+            point![-2.0, 2.0, 0.0],
+        ];
+        let associations = field_points
+            .into_iter()
+            .map(|field_point| {
+                let p = camera.robot_to_camera.inner * truth.inverse() * field_point.inner;
+                // The global matcher is free to emit the half-turned representative.
+                FieldMarkAssociation {
+                    field_point: point![-field_point.x(), -field_point.y(), 0.0],
+                    detection: camera.intrinsics.project(Vector3::wrap(p.coords)),
+                }
+            })
+            .collect();
+        let mut estimator = estimator();
+        estimator.alignment = Some(estimator.graph.add(FieldAlignment {
+            local_to_field: nalgebra::Isometry2::identity().framed_transform(),
+        }));
+        let time = Time::from_nanos(1_100_000_000);
+        assert!(
+            estimator
+                .ingest_visual(
+                    TimeWrapper {
+                        time,
+                        inner: VisualLocalizationFrame {
+                            epoch: 7,
+                            source: VisualAssociationSource::Global,
+                            robot_to_local: Isometry3::wrap(nalgebra::Isometry3::from_parts(
+                                nalgebra::Translation3::new(10.0, -5.0, 4.0),
+                                nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 2.0),
+                            )),
+                            robot_to_camera: camera.robot_to_camera,
+                            camera_intrinsic: camera.intrinsics,
+                            associations,
+                        },
+                    },
+                    Some(-1.6),
+                )
+                .unwrap()
+        );
+        for index in 1..=20 {
+            estimator
+                .ingest_imu(
+                    time + Duration::from_millis(index * 2),
+                    ImuState {
+                        roll_pitch_yaw: Vector3::wrap(nalgebra::Vector3::new(0.1, -0.05, 2.0)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let recovered = estimator
+            .solve()
+            .estimate
+            .unwrap()
+            .robot_to_field
+            .unwrap()
+            .pose
+            .inner;
+        assert!(
+            (recovered.translation.vector - truth.translation.vector.cast::<f64>()).norm() < 1e-4
+        );
+        assert!(recovered.rotation.angle_to(&truth.rotation.cast::<f64>()) < 1e-4);
+    }
+
+    #[test]
     fn visual_ingestion_accepts_behind_camera_predictions_but_not_zero_range() {
         use types::visual_localization::FieldMarkAssociation;
         let mut estimator = estimator();
@@ -724,6 +817,7 @@ mod tests {
             time,
             inner: VisualLocalizationFrame {
                 epoch: 7,
+                source: types::visual_localization::VisualAssociationSource::Tracking,
                 robot_to_local: Isometry3::identity(),
                 robot_to_camera: Isometry3::from_translation(0.0, 0.0, -1.0),
                 camera_intrinsic: Intrinsic::new(
@@ -742,10 +836,10 @@ mod tests {
                 .to_vec(),
             },
         };
-        assert!(estimator.ingest_visual(frame.clone()).unwrap());
+        assert!(estimator.ingest_visual(frame.clone(), None).unwrap());
         // A finite bearing objective does not authorize a physically invalid tracking result.
         assert!(estimator.visual_rms().is_none());
         frame.inner.robot_to_camera = Isometry3::identity();
-        assert!(!estimator.ingest_visual(frame).unwrap());
+        assert!(!estimator.ingest_visual(frame, None).unwrap());
     }
 }

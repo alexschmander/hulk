@@ -15,7 +15,7 @@ use types::{
     field_dimensions::FieldDimensions,
     localization::{LocalizationEstimate, LocalizationState, LocalizationStatus},
     time_wrapper::TimeWrapper,
-    visual_localization::VisualLocalizationFrame,
+    visual_localization::{VisualAssociationSource, VisualLocalizationFrame},
     visual_odometry::VisualOdometer,
 };
 
@@ -34,6 +34,7 @@ pub struct Localization {
     latest_visual: Option<Time>,
     pending_visual: Option<Time>,
     last_solve: Option<Time>,
+    trusted_alignment_yaw: Option<f64>,
 }
 
 impl Localization {
@@ -80,6 +81,7 @@ impl Localization {
             latest_visual: None,
             pending_visual: None,
             last_solve: None,
+            trusted_alignment_yaw: None,
         })
     }
 
@@ -155,7 +157,19 @@ impl Localization {
         if self.status.state == LocalizationState::LostTrack && time <= self.status.time {
             return Ok(false);
         }
-        let inserted = self.estimator.ingest_visual(frame)?;
+        let recovery_alignment_yaw = (frame.inner.source == VisualAssociationSource::Global
+            && self.status.state == LocalizationState::LostTrack)
+            .then_some(self.trusted_alignment_yaw)
+            .flatten();
+        if frame.inner.source == VisualAssociationSource::Global
+            && self.status.state == LocalizationState::LostTrack
+            && recovery_alignment_yaw.is_none()
+        {
+            return Ok(false);
+        }
+        let inserted = self
+            .estimator
+            .ingest_visual(frame, recovery_alignment_yaw)?;
         if inserted && self.latest_visual.is_none_or(|old| time > old) {
             self.pending_visual = Some(self.pending_visual.map_or(time, |old| old.max(time)));
         }
@@ -186,6 +200,10 @@ impl Localization {
                         ..self.status
                     };
                 }
+                let field = estimate.robot_to_field.expect("field_valid checked").pose;
+                let local = estimate.robot_to_local.pose;
+                self.trusted_alignment_yaw =
+                    Some((field * local.inverse()).inner.rotation.euler_angles().2);
             }
             if self.status.state == LocalizationState::Startup {
                 estimate.robot_to_field = None;

@@ -312,6 +312,7 @@ impl LocalizationSimulation {
             if !associations.is_empty() {
                 let frame = VisualLocalizationFrame {
                     epoch: geometry.inner.epoch,
+                    source: types::visual_localization::VisualAssociationSource::Tracking,
                     robot_to_camera,
                     robot_to_local: geometry.inner.robot_to_local,
                     camera_intrinsic: current_camera_matrix.intrinsics,

@@ -5,7 +5,9 @@ use ros_z::time::Time;
 use types::{
     field_dimensions::FieldDimensions,
     localization::LocalizationState3D,
-    visual_localization::{AssociationGeometry, FieldMarkAssociation, GlobalLocalizationDebug},
+    visual_localization::{
+        AssociationGeometry, FieldMarkAssociation, GlobalLocalizationDebug, VisualAssociationSource,
+    },
 };
 
 use crate::{
@@ -40,12 +42,14 @@ pub struct GlobalAssociationInput<'a> {
 #[derive(Default)]
 pub struct AssociationResult {
     pub associations: Vec<FieldMarkAssociation>,
+    pub source: VisualAssociationSource,
     /// Global-only metric diagnostics. Image-space tracking leaves this unset.
     pub debug: Option<GlobalLocalizationDebug>,
 }
 
 /// Stateless dispatch by `geometry.state`; previous calls never influence association.
-/// Tracking and LostTrack require `geometry.local_to_field` and never fall back to global matching.
+/// Tracking and LostTrack require `geometry.local_to_field`. The node may run an explicit global
+/// fallback after a LostTrack failure; it tags that result for branch-safe recovery downstream.
 /// They project map landmarks into the image, carrying the last solve's full right-tangent covariance.
 /// Frames with 3..=5 features compare every gated distinct assignment using the joint pixel Gaussian,
 /// including shared anchor/process correlations and uncertainty volume. The full residual keeps
@@ -70,9 +74,18 @@ pub fn associate_visual_features(
             field_dimensions: input.field_dimensions,
             parameters: &parameters.global_localizer,
         }),
-        LocalizationState3D::Tracking { .. } | LocalizationState3D::LostTrack { .. } => {
-            tracking::associate(input, parameters).unwrap_or_default()
-        }
+        LocalizationState3D::Tracking { .. } => tracking::associate(input, parameters)
+            .map(|mut result| {
+                result.source = VisualAssociationSource::Tracking;
+                result
+            })
+            .unwrap_or_default(),
+        LocalizationState3D::LostTrack { .. } => tracking::associate(input, parameters)
+            .map(|mut result| {
+                result.source = VisualAssociationSource::Tracking;
+                result
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -85,5 +98,10 @@ pub fn associate_visual_features(
 /// A non-collinear seed is required. Localizer translation and height are never consulted.
 /// Work-budget exhaustion rejects rather than returning a candidate with unproven uniqueness.
 pub fn associate_global_visual_features(input: GlobalAssociationInput<'_>) -> AssociationResult {
-    solver::associate(input).unwrap_or_default()
+    solver::associate(input)
+        .map(|mut result| {
+            result.source = VisualAssociationSource::Global;
+            result
+        })
+        .unwrap_or_default()
 }

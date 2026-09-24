@@ -1,13 +1,21 @@
 {
   global_localizer: {
+    max_input_detections: 128,
+    max_retained_detections: 32,
+    seed_pool_size: 8,
     min_inliers: 3,
     confidence_threshold: 0.35,
+    duplicate_pixel_distance: 1.0,
     min_detection_baseline: 0.25,
+    min_downward_ray_fraction: 0.0001,
+    min_seed_quality: 0.00001,
     detection_pixel_sigma: 2.0,
+    projected_covariance_floor: 0.00000001,
     imu_tilt_sigma: 0.02,
     height_sigma: 0.02,
     mahalanobis_gate: 9.21,
     geometric_tolerance: 0.03,
+    min_reprojection_depth: 0.01,
     // Global search only; exhaustion rejects even if a candidate was already found.
     max_work: 100000,
   },

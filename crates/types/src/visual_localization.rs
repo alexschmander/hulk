@@ -8,6 +8,15 @@ pub const GLOBAL_LOCALIZATION_DEBUG_TOPIC: &str = "debug/global_localization";
 pub const MIN_CERTIFIED_VISUAL_ASSOCIATIONS: usize = 3;
 pub const MAX_CERTIFIED_VISUAL_ASSOCIATIONS: usize = 32;
 
+/// How associations were obtained. Global recovery must preserve the existing
+/// field-symmetry branch before its correspondences enter localization.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, Message, PartialEq, Eq)]
+pub enum VisualAssociationSource {
+    #[default]
+    Tracking,
+    Global,
+}
+
 /// Internal association input assembled from estimate and lifecycle messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssociationGeometry {
@@ -72,6 +81,7 @@ impl AssociationGeometry {
 #[derive(Debug, Clone, Serialize, Deserialize, Message)]
 pub struct VisualLocalizationFrame {
     pub epoch: u64,
+    pub source: VisualAssociationSource,
     pub robot_to_camera: Isometry3<Robot, Camera>,
     /// In startup only the IMU-derived attitude is meaningful; bootstrap fits height
     /// from landmarks. During tracking this is the localizer's pose used for association.
