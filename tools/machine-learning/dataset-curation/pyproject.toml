@@ -1,0 +1,32 @@
+[project]
+name = "dataset-curation"
+version = "0.1.0"
+description = "Frame extraction and visual calibration for detection datasets"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "huggingface-hub==0.36.2",
+    "mcap==1.3.1",
+    "numpy==2.5.3",
+    "opencv-python-headless==4.14.0.94",
+    "pillow==12.3.0",
+    "torch==2.8.0",
+    "transformers==4.57.6",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

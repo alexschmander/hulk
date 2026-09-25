@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  />
+  <title>__TITLE__</title>
+  <style>
+    :root {
+      font:
+        16px/1.45 system-ui,
+        sans-serif;
+      color: #e5edf5;
+      background: #111821;
+      color-scheme: dark;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      max-width: 1450px;
+      margin: auto;
+      padding: 24px;
+    }
+    h1 {
+      font-size: 30px;
+      margin: 0 0 5px;
+    }
+    p {
+      color: #bdcbd9;
+      margin: 8px 0;
+    }
+    header {
+      border-bottom: 1px solid #334052;
+      padding-bottom: 18px;
+    }
+    .bar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 16px 0;
+    }
+    button,
+    select {
+      font: inherit;
+      background: #1f2c3b;
+      border: 1px solid #4b6178;
+      color: #eef5ff;
+      border-radius: 6px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    button.active {
+      background: #225982;
+      border-color: #78bbeb;
+    }
+    button:focus-visible,
+    select:focus-visible {
+      outline: 3px solid #d2b465;
+    }
+    small,
+    .muted {
+      color: #a2b2c4;
+      font-size: 13px;
+    }
+    .notice {
+      background: #233040;
+      padding: 12px;
+      border-radius: 8px;
+      margin: 12px 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: #1b2633;
+      border: 1px solid #344659;
+      border-radius: 9px;
+      padding: 12px;
+      overflow: hidden;
+    }
+    .card img {
+      width: 100%;
+      display: block;
+      object-fit: contain;
+      background: #111821;
+      aspect-ratio: 544/448;
+    }
+    .card a {
+      color: #88cbff;
+    }
+    .card h2 {
+      font-size: 15px;
+      margin: 8px 0;
+      overflow-wrap: anywhere;
+    }
+    .choices {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .choices button {
+      font-size: 13px;
+      padding: 6px 8px;
+    }
+    .choices button.chosen {
+      background: #22614c;
+      border-color: #70c5a0;
+    }
+    .pairgrid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 18px;
+    }
+    .pairimages {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .pairimages img {
+      aspect-ratio: auto;
+    }
+    .tag {
+      border-radius: 4px;
+      background: #324459;
+      padding: 2px 5px;
+      font-size: 12px;
+    }
+    .range {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .range input {
+      width: 150px;
+    }
+    details {
+      margin-top: 7px;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    #counts {
+      margin-left: auto;
+    }
+    #status {
+      color: #85d5b0;
+    }
+    #pagination {
+      justify-content: center;
+    }
+    .disabled {
+      opacity: 0.5;
+    }
+    @media (max-width: 1000px) {
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+    @media (max-width: 620px) {
+      body {
+        padding: 12px;
+      }
+      .grid,
+      .pairimages {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+  <header>
+    <h1>__TITLE__</h1>
+    <p id="subtitle"></p>
+    <p>
+      Judge whether objects and keypoints can be labelled reliably. For pairs,
+      decide whether another image adds meaningful training variety.
+    </p>
+    <div class="bar">
+      <button onclick="exportReview()">Export review JSON</button
+      ><button onclick="document.getElementById('import').click()">
+        Import review JSON</button
+      ><input id="import" type="file" accept=".json" hidden /><span
+        id="status"
+      ></span
+      ><span id="counts"></span>
+    </div>
+    <small
+      >Decisions are saved in this browser. Export JSON to preserve and apply
+      them. Original source images are unchanged.</small
+    >
+  </header>
+  <div class="notice" id="model"></div>
+  <div class="bar" id="tabs">
+    <button data-tab="blur" onclick="setTab('blur')">
+      Image quality</button
+    ><button data-tab="pairs" onclick="setTab('pairs')">Similarity pairs</button
+    ><button data-tab="eligibility" onclick="setTab('eligibility')">
+      Eligibility</button
+    ><button data-tab="all" onclick="setTab('all')">All images</button>
+  </div>
+  <div class="bar">
+    <label
+      >Source
+      <select
+        id="source"
+        onchange="
+          page = 0;
+          render();
+        "
+      >
+        <option value="">All sources</option>
+      </select></label
+    ><label
+      >Review
+      <select
+        id="filter"
+        onchange="
+          page = 0;
+          render();
+        "
+      >
+        <option value="all">All</option>
+        <option value="unreviewed">Unreviewed</option>
+        <option value="reviewed">Reviewed</option>
+      </select></label
+    ><label
+      >Order
+      <select
+        id="order"
+        onchange="
+          page = 0;
+          render();
+        "
+      >
+        <option value="default">Recording / frame</option>
+        <option value="low">Lowest score first</option>
+        <option value="high">Highest score first</option>
+      </select></label
+    ><label class="range"
+      >Cosine guide
+      <input
+        id="threshold"
+        type="range"
+        min="0.70"
+        max="1"
+        step="0.005"
+        value="0.95"
+        oninput="
+          document.getElementById('tau').textContent = this.value;
+          render();
+        "
+      /><span id="tau">0.95</span></label
+    >
+  </div>
+  <p id="description"></p>
+  <main id="cards"></main>
+  <div class="bar" id="pagination"></div>
+  <script>
+    const DATA = __DATA__;
+    for (const source of DATA.sources) {
+      document.getElementById("source").add(new Option(source, source));
+    }
+    document.querySelector('[data-tab="blur"]').textContent =
+      "Image quality · " + DATA.blur.length;
+    const lookup = Object.fromEntries(DATA.rows.map((r) => [r.id, r]));
+    const key =
+      "dataset-curation-" +
+      DATA.manifest_sha256 +
+      "-" +
+      (DATA.model?.revision || "pending");
+    let review = { images: DATA.initial_review?.images || {}, pairs: DATA.initial_review?.pairs || {} },
+      tab = "blur",
+      page = 0;
+    try {
+      review = JSON.parse(localStorage.getItem(key)) || review;
+    } catch (e) {}
+    const escapeHTML = (s) =>
+      String(s ?? "").replace(
+        /[&<>"']/g,
+        (c) =>
+          ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          })[c],
+      );
+    document.getElementById("subtitle").textContent =
+      DATA.summary.pilot_count +
+      " images · " +
+      DATA.summary.recording_count +
+      " recordings · " + (DATA.summary.note || "Calibration sample; final selection is pending.");
+    document.getElementById("model").textContent = DATA.model
+      ? DATA.model.model +
+        " · " +
+        DATA.model.image_size +
+        " px full-image embedding · " +
+        DATA.model.wall_images_per_second.toFixed(1) +
+        " images/s measured · similarity thresholds are provisional."
+      : "Embeddings are pending. Blur and eligibility review are ready; similarity pairs will follow.";
+    function save() {
+      try {
+        localStorage.setItem(key, JSON.stringify(review));
+        document.getElementById("status").textContent = "Saved in this browser";
+      } catch (e) {
+        document.getElementById("status").textContent =
+          "Browser storage unavailable: export JSON now";
+      }
+      updateCount();
+    }
+    function updateCount() {
+      document.getElementById("counts").textContent =
+        Object.keys(review.images).length +
+        " images marked · " +
+        Object.keys(review.pairs).length +
+        " pairs marked";
+    }
+    function imageDecision(id, field, value) {
+      review.images[id] ??= {};
+      review.images[id][field] = value;
+      save();
+      render();
+    }
+    function pairDecision(id, value) {
+      review.pairs[id] = value;
+      save();
+      render();
+    }
+    function setTab(value) {
+      tab = value;
+      page = 0;
+      render();
+    }
+    function buttons(id, field, options) {
+      return (
+        '<div class="choices">' +
+        options
+          .map(
+            ([value, label]) =>
+              '<button class="' +
+              (review.images[id]?.[field] === value ? "chosen" : "") +
+              '" onclick="imageDecision(\'' +
+              id +
+              "','" +
+              field +
+              "','" +
+              value +
+              "')\">" +
+              label +
+              "</button>",
+          )
+          .join("") +
+        "</div>"
+      );
+    }
+    function imageMarkup(row) {
+      return (
+        '<a href="' +
+        escapeHTML(row.url) +
+        '" target="_blank" rel="noopener"><img loading="lazy" src="' +
+        escapeHTML(row.url) +
+        '" alt="' +
+        escapeHTML(row.source + " " + (row.review_number || row.filename)) +
+        '"></a><h2>' +
+        (row.review_number ? "#" + row.review_number + " · " : "") +
+        escapeHTML(row.source) +
+        (row.batch ? " · " + escapeHTML(row.batch) : "") +
+        (row.split ? " / " + escapeHTML(row.split) : "") +
+        "</h2><small>" +
+        escapeHTML(
+          row.recording_name ||
+            row.filename ||
+            row.source_path.split("/").slice(-3, -1).join("/"),
+        ) +
+        "</small>"
+      );
+    }
+    function card(row) {
+      return (
+        '<article class="card">' +
+        imageMarkup(row) +
+        '<p class="muted">Sharpness ' +
+        row.quality.laplacian.toFixed(1) +
+        " · lower half " +
+        row.quality.lower_half_laplacian.toFixed(1) +
+        "</p>" +
+        buttons(row.id, "quality", [
+          ["usable", "Usable"],
+          ["blur", "Excessive blur"],
+          ["scene", "Unusable scene"],
+          ["unsure", "Unsure"],
+        ]) +
+        (row.eligibility_question
+          ? '<p class="muted">' +
+            escapeHTML(row.eligibility_question) +
+            "</p>" +
+            buttons(row.id, "eligibility", [
+              ["visible", "Yes"],
+              ["absent", "No"],
+              ["unsure", "Unsure"],
+            ])
+          : "") +
+        "<details><summary>Source and identity</summary>" +
+        escapeHTML(row.source_path) +
+        "<br>" +
+        escapeHTML(row.id) +
+        "</details></article>"
+      );
+    }
+    function pairCard(pair) {
+      let above =
+        pair.cosine >= Number(document.getElementById("threshold").value);
+      return (
+        '<article class="card"><div class="bar"><strong>' +
+        pair.id +
+        " · cosine " +
+        pair.cosine.toFixed(4) +
+        '</strong><span class="tag">' +
+        escapeHTML(pair.kind) +
+        '</span><span class="tag">' +
+        pair.calibration_partition +
+        '</span><span class="muted">' +
+        (above ? "Above" : "Below") +
+        ' guide</span></div><div class="pairimages"><div>' +
+        imageMarkup(lookup[pair.a]) +
+        "</div><div>" +
+        imageMarkup(lookup[pair.b]) +
+        '</div></div><div class="choices">' +
+        [
+          ["redundant", "Redundant: keep one"],
+          ["distinct", "Useful variation: keep both"],
+          ["unsure", "Unsure"],
+        ]
+          .map(
+            ([v, label]) =>
+              '<button class="' +
+              (review.pairs[pair.id] === v ? "chosen" : "") +
+              '" onclick="pairDecision(\'' +
+              pair.id +
+              "','" +
+              v +
+              "')\">" +
+              label +
+              "</button>",
+          )
+          .join("") +
+        "</div></article>"
+      );
+    }
+    function render() {
+      document
+        .querySelectorAll("[data-tab]")
+        .forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+      let source = document.getElementById("source").value,
+        filter = document.getElementById("filter").value,
+        order = document.getElementById("order").value;
+      let items;
+      if (tab === "pairs") {
+        items = DATA.pairs.filter(
+          (p) =>
+            !source ||
+            lookup[p.a].source === source ||
+            lookup[p.b].source === source,
+        );
+        items = items.filter(
+          (p) =>
+            filter === "all" ||
+            (filter === "reviewed"
+              ? !!review.pairs[p.id]
+              : !review.pairs[p.id]),
+        );
+        if (order !== "default")
+          items.sort(
+            (a, b) => (a.cosine - b.cosine) * (order === "low" ? 1 : -1),
+          );
+      } else {
+        items = DATA.rows.filter(
+          (r) =>
+            r.source !== "existing" &&
+            (!source || r.source === source) &&
+            (tab !== "eligibility" || r.eligibility_question) &&
+            (tab !== "blur" || DATA.blur.includes(r.id)),
+        );
+        items = items.filter((r) => {
+          let marked =
+            tab === "eligibility"
+              ? review.images[r.id]?.eligibility
+              : review.images[r.id]?.quality;
+          return (
+            filter === "all" || (filter === "reviewed" ? !!marked : !marked)
+          );
+        });
+        if (order !== "default")
+          items.sort(
+            (a, b) =>
+              (a.quality.laplacian - b.quality.laplacian) *
+              (order === "low" ? 1 : -1),
+          );
+      }
+      let size = tab === "pairs" ? 6 : 24,
+        total = Math.max(1, Math.ceil(items.length / size));
+      page = Math.min(page, total - 1);
+      document.getElementById("description").textContent =
+        tab === "pairs"
+          ? "Whole-scene similarity can miss small objects. Keep both only when the change matters for annotation or training. The cosine slider is a visual guide; it does not reject images."
+          : tab === "eligibility"
+            ? "Answer the eligibility question for each image. Inspect the original image when uncertain."
+            : "Sharpness measures texture as well as blur. Inspect field features and small objects; click an image for native resolution.";
+      let target = document.getElementById("cards");
+      target.className = tab === "pairs" ? "pairgrid" : "grid";
+      target.innerHTML =
+        items
+          .slice(page * size, (page + 1) * size)
+          .map(tab === "pairs" ? pairCard : card)
+          .join("") || "<p>No matching examples.</p>";
+      document.getElementById("pagination").innerHTML =
+        '<button onclick="page=Math.max(0,page-1);render();window.scrollTo(0,0)">Previous</button><span>Page ' +
+        (page + 1) +
+        " / " +
+        total +
+        " · " +
+        items.length +
+        ' examples</span><button onclick="page++;render();window.scrollTo(0,0)">Next</button>';
+      updateCount();
+    }
+    function exportReview() {
+      let value = {
+        schema_version: 1,
+        manifest_sha256: DATA.manifest_sha256,
+        model: DATA.model,
+        exported_at: new Date().toISOString(),
+        ...review,
+      };
+      let url = URL.createObjectURL(
+        new Blob([JSON.stringify(value, null, 2)], {
+          type: "application/json",
+        }),
+      );
+      let a = document.createElement("a");
+      a.href = url;
+      a.download = "dataset-curation-review.json";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    document
+      .getElementById("import")
+      .addEventListener("change", async (event) => {
+        try {
+          const value = JSON.parse(await event.target.files[0].text());
+          if (value.manifest_sha256 !== DATA.manifest_sha256)
+            throw Error("Review belongs to another pilot manifest");
+          if (
+            (value.model?.revision || null) !== (DATA.model?.revision || null)
+          )
+            throw Error("Review uses a different embedding revision");
+          if (!value.images || !value.pairs) throw Error("Invalid review file");
+          review = { images: value.images, pairs: value.pairs };
+          save();
+          render();
+        } catch (error) {
+          alert(error.message);
+        }
+      });
+    render();
+  </script>
+</html>
