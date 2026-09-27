@@ -1,5 +1,10 @@
 # Localization perf profile — robot 43, 2026-09-27
 
+**Latest iteration:** [100 ms preintegration results](localization_preintegration.md)
+compare against the final batched baseline below: 80.6% / 80.1% lower CPU time on
+stationary / moving tracking replays. The profiles and raw/averaged-IMU implementation
+descriptions in this document are historical stages of that comparison.
+
 ## Main findings
 
 The current LM + dense Cholesky + online IMU-bias estimator spends most CPU work evaluating

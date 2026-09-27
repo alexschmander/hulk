@@ -4,8 +4,7 @@ use color_eyre::Result;
 use coordinate_systems::{ImuReference, Robot};
 use kinematics::robot_kinematics::RobotKinematics;
 use linear_algebra::{Orientation3, Point3, Vector3};
-use localization_fagra::factors::{FootGround, FootObservation, ImuKinematics, ImuObservation};
-use nalgebra::Matrix3;
+use localization_fagra::factors::{FootGround, FootObservation};
 use ros_z::time::Time;
 use types::time_wrapper::TimeWrapper;
 
@@ -31,71 +30,9 @@ impl Estimator {
             time,
             angular_velocity,
             attitude,
+            force: Vector3::wrap(imu.linear_acceleration.inner.cast()),
         })?;
-        if let Some(parameters) = &self.parameters.accelerometer {
-            let means = self.acceleration.observe(
-                time,
-                attitude,
-                angular_velocity,
-                Vector3::wrap(imu.linear_acceleration.inner.cast()),
-                parameters,
-                self.origin,
-            );
-            for mut mean in means {
-                let Some(attitude) = self.attitude_at(mean.time) else {
-                    continue;
-                };
-                let inverse = attitude.inner.inverse().to_rotation_matrix().into_inner();
-                mean.bias.accelerometer_weights =
-                    mean.bias.accelerometer_weights.map(|w| inverse * w);
-                for sample in &mut mean.bias.lever_samples {
-                    sample.weight = inverse * sample.weight;
-                }
-                self.accept_motion(MotionRecord::Acceleration {
-                    time: mean.time,
-                    force: attitude.rotation::<Robot>().inverse() * mean.force,
-                    information_root: mean.information_root,
-                    bias: mean.bias,
-                })?;
-            }
-        }
         Ok(true)
-    }
-
-    pub(super) fn insert_acceleration(
-        &mut self,
-        time: Time,
-        force: Vector3<Robot, f64>,
-        root: f64,
-        bias: localization_fagra::factors::ForceBias,
-    ) -> Result<()> {
-        let (segment, tau) = self.segment_and_tau(time)?;
-        let controls = self.ensure_segment(segment)?;
-        let (biases, bias_tau) = self.ensure_biases(time)?;
-        let batch = *self.acceleration_batches.entry(segment).or_insert_with(|| {
-            self.graph.add_batch(ImuKinematics {
-                controls,
-                biases,
-                duration: seconds_per_knot(),
-                gravity_compensation: Vector3::wrap(nalgebra::Vector3::new(0.0, 0.0, 9.81)),
-                gyroscope_information_root: Matrix3::zeros(),
-                tilt_information_root: Matrix3::zeros(),
-            })
-        });
-        self.graph.add_factor_to(
-            batch,
-            ImuObservation {
-                tau,
-                bias_tau,
-                angular_velocity: Vector3::zeros(),
-                measured_up: None,
-                specific_force: Some(force),
-                accelerometer_information_root: Matrix3::identity() * root,
-                force_bias: Some(bias),
-            },
-        )?;
-        *self.measurements.entry(segment).or_default() += 1;
-        Ok(())
     }
 
     pub(super) fn insert_imu(
@@ -103,34 +40,13 @@ impl Estimator {
         time: Time,
         angular_velocity: Vector3<Robot, f64>,
         orientation: Orientation3<ImuReference, f64>,
+        force: Vector3<Robot, f64>,
     ) -> Result<()> {
-        let (segment, tau) = self.segment_and_tau(time)?;
-        let controls = self.ensure_segment(segment)?;
-        let (biases, bias_tau) = self.ensure_biases(time)?;
-        let batch = *self.imu_batches.entry(segment).or_insert_with(|| {
-            self.graph.add_batch(ImuKinematics {
-                controls,
-                biases,
-                duration: seconds_per_knot(),
-                gravity_compensation: Vector3::wrap(nalgebra::Vector3::new(0.0, 0.0, 9.81)),
-                gyroscope_information_root: Matrix3::identity() * 10.0,
-                tilt_information_root: Matrix3::identity() * 10.0,
-            })
-        });
-        self.graph.add_factor_to(
-            batch,
-            ImuObservation {
-                tau,
-                bias_tau,
-                angular_velocity,
-                measured_up: Some(Vector3::wrap(
-                    orientation.inner.inverse() * nalgebra::Vector3::z(),
-                )),
-                specific_force: None,
-                accelerometer_information_root: Matrix3::zeros(),
-                force_bias: None,
-            },
-        )?;
+        let (segment, _) = self.segment_and_tau(time)?;
+        self.ensure_segment(segment)?;
+        self.ensure_biases(time)?;
+        self.preintegration
+            .insert(self.origin, time, angular_velocity, force);
         self.attitudes.insert(time, orientation);
         *self.measurements.entry(segment).or_default() += 1;
         Ok(())

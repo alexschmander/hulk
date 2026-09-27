@@ -1,5 +1,9 @@
 # Robot 43: stationary drift and slow estimation (2026-09-27)
 
+This records the deployed configuration and earlier raw/averaged-IMU experiments.
+For the current local implementation and matched 60-second calibration comparison,
+see [100 ms preintegration](localization_preintegration.md).
+
 ## Evidence
 
 The user confirmed the robot was stationary. The running executable on `10.1.24.43`

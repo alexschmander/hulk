@@ -1,6 +1,14 @@
 {
   // Leg odometry assumes a stationary support foot. Enable only with justified stance evidence.
   kinematic_odometry_noise: null,
+  imu_preintegration: {
+    gyroscope_noise_density: 0.00447213595499958,
+    integration_noise_density: 0.0001,
+    tilt_sigma: 0.02,
+    terminal_gyroscope_sigma: 0.1,
+    gyroscope_reintegration_threshold: 0.01,
+    accelerometer_reintegration_threshold: 0.1,
+  },
   // Residual Robot-frame offsets are optimized at independent 5-second knots,
   // linearly interpolated. Drift densities are per sqrt(second).
   imu_bias: {
@@ -15,7 +23,6 @@
     // K1 simulation model value; verify the physical mounting offset/calibration on hardware.
     position: [0.0, 0.0, 0.0],
     noise_density: 0.3,
-    averaging_interval: { secs: 0, nanos: 10000000 },
   },
   initial_height_sigma: 1.0,
   initial_velocity_sigma: 5.0,

@@ -25,16 +25,12 @@ pub(super) struct MotionCheckpoint {
 /// Accepted, normalized observations. Replay bypasses stream admission, not factor construction.
 #[derive(Clone)]
 pub(super) enum MotionRecord {
-    Acceleration {
-        time: Time,
-        force: Vector3<Robot, f64>,
-        information_root: f64,
-        bias: localization_fagra::factors::ForceBias,
-    },
     Imu {
         time: Time,
         angular_velocity: Vector3<Robot, f64>,
         attitude: linear_algebra::Orientation3<coordinate_systems::ImuReference, f64>,
+        /// Raw specific force; calibration is applied when rebuilding intervals.
+        force: Vector3<Robot, f64>,
     },
     Feet {
         time: Time,
@@ -57,9 +53,7 @@ pub(super) enum MotionRecord {
 impl MotionRecord {
     fn start(&self) -> Time {
         match self {
-            Self::Imu { time, .. } | Self::Feet { time, .. } | Self::Acceleration { time, .. } => {
-                *time
-            }
+            Self::Imu { time, .. } | Self::Feet { time, .. } => *time,
             Self::Kinematic { previous_time, .. } | Self::Visual { previous_time, .. } => {
                 *previous_time
             }
@@ -72,23 +66,17 @@ impl MotionRecord {
             | Self::Feet { time, .. }
             | Self::Kinematic { time, .. }
             | Self::Visual { time, .. } => *time,
-            Self::Acceleration { time, .. } => *time,
         }
     }
 
     fn insert(self, estimator: &mut Estimator) -> Result<()> {
         match self {
-            Self::Acceleration {
-                time,
-                force,
-                information_root,
-                bias,
-            } => estimator.insert_acceleration(time, force, information_root, bias),
             Self::Imu {
                 time,
                 angular_velocity,
                 attitude,
-            } => estimator.insert_imu(time, angular_velocity, attitude),
+                force,
+            } => estimator.insert_imu(time, angular_velocity, attitude, force),
             Self::Feet { time, left, right } => estimator.insert_feet(time, left, right),
             Self::Kinematic {
                 previous_time,
@@ -297,7 +285,11 @@ impl Estimator {
             record.insert(&mut candidate)?;
         }
         candidate.attitudes.clone_from(&self.attitudes);
-        candidate.acceleration = self.acceleration.clone();
+        candidate.preintegration.restore_boundary(
+            self.origin,
+            self.history_start,
+            &self.preintegration,
+        );
         candidate.motion_history.clone_from(&self.motion_history);
         candidate.history_start = self.history_start;
         candidate.latest_time = self.latest_time;

@@ -182,6 +182,7 @@ fn main() -> color_eyre::Result<()> {
         let mut max_displacement = 0.0_f64;
         let mut max_after_learning = 0.0_f64;
         let mut converged = 0;
+        let mut terminations = BTreeMap::<String, usize>::new();
         let mut estimates = 0;
         let mut cycles = Vec::new();
         let mut pending = Duration::ZERO;
@@ -228,6 +229,9 @@ fn main() -> color_eyre::Result<()> {
             cycles.push(pending + solved.diagnostics.estimation_duration);
             pending = Duration::ZERO;
             converged += usize::from(solved.diagnostics.termination == "GradientTolerance");
+            *terminations
+                .entry(solved.diagnostics.termination.clone())
+                .or_default() += 1;
             if let Some(value) = solved.diagnostics.imu_bias {
                 bias = Some(value);
             }
@@ -253,7 +257,7 @@ fn main() -> color_eyre::Result<()> {
         cycles.sort_unstable();
         println!(
             "{}",
-            serde_json::json!({"mode":mode,"cycles":cycles.len(),"estimates":estimates,"converged":converged,
+            serde_json::json!({"mode":mode,"cycles":cycles.len(),"estimates":estimates,"converged":converged,"terminations":terminations,
             "compute_s":total.as_secs_f64(),"p50_ms":cycles[cycles.len()/2].as_secs_f64()*1000.0,
             "p95_ms":cycles[(cycles.len()*95/100).min(cycles.len()-1)].as_secs_f64()*1000.0,
             "max_displacement_m":max_displacement,"max_after_10s_m":max_after_learning,"final_translation":last.translation.vector,"bias":bias})

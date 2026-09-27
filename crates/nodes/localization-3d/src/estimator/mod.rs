@@ -15,7 +15,7 @@ use localization_fagra::{
     factors::{
         AdjacentKinematicOdometry, AdjacentVisualOdometry, CameraIntrinsicsPrior, FieldContainment,
         FootGround, FootObservation, FrameReprojections, ImuBiasPrior, ImuBiasWalk, ImuKinematics,
-        ImuObservation, KinematicOdometry, MotionPrior, ReprojectionObservation, TrajectoryPrior,
+        KinematicOdometry, MotionPrior, PreintegratedImu, ReprojectionObservation, TrajectoryPrior,
         VisualOdometry, VisualOdometryObservation,
     },
     variables::{CameraIntrinsics, FieldAlignment, ImuBias, PoseControl, TrajectoryState},
@@ -38,12 +38,12 @@ const HUBER_THRESHOLD: f64 = 2.0;
 const MIN_REPROJECTION_DEPTH: f64 = 0.01;
 const MIN_LANDMARK_RANGE: f64 = 0.01;
 
-mod acceleration;
 mod attitude;
 mod bias;
 mod covariance;
 mod inertial;
 mod kinematic_odometry;
+mod preintegration;
 mod recovery;
 mod vision;
 mod window;
@@ -69,7 +69,8 @@ fagra::factors! {
         adjacent_odometry: AdjacentVisualOdometry,
         kinematic_odometry: KinematicOdometry,
         adjacent_kinematic_odometry: AdjacentKinematicOdometry,
-        imu: Batch<ImuKinematics, ImuObservation>,
+        imu: ImuKinematics,
+        preintegrated_imu: PreintegratedImu,
         feet: Batch<FootGround, FootObservation>,
         reprojections: Batch<FrameReprojections, ReprojectionObservation>,
         odometry: Batch<VisualOdometry, VisualOdometryObservation>,
@@ -95,9 +96,7 @@ pub(crate) struct Estimator {
     generation: u64,
     controls: BTreeMap<i64, StateKey<PoseControl<f64>>>,
     biases: BTreeMap<i64, StateKey<ImuBias>>,
-    imu_batches: BTreeMap<i64, BatchKey<ImuKinematics<f64>>>,
-    acceleration_batches: BTreeMap<i64, BatchKey<ImuKinematics<f64>>>,
-    acceleration: acceleration::AccelerationIntegrator,
+    preintegration: preintegration::ImuIntervals,
     foot_batches: BTreeMap<i64, BatchKey<FootGround<f64>>>,
     odometry_batches: BTreeMap<i64, BatchKey<VisualOdometry<f64>>>,
     reprojection_batches: Vec<(i64, BatchKey<FrameReprojections<f64>>)>,
@@ -190,9 +189,7 @@ impl Estimator {
             generation: 0,
             controls: BTreeMap::new(),
             biases: BTreeMap::new(),
-            imu_batches: BTreeMap::new(),
-            acceleration_batches: BTreeMap::new(),
-            acceleration: acceleration::AccelerationIntegrator::default(),
+            preintegration: preintegration::ImuIntervals::default(),
             foot_batches: BTreeMap::new(),
             odometry_batches: BTreeMap::new(),
             reprojection_batches: Vec::new(),
@@ -276,8 +273,10 @@ impl Estimator {
     }
 
     pub(crate) fn update_parameters(&mut self, parameters: Localization3dParameters) {
-        if self.parameters.accelerometer != parameters.accelerometer {
-            self.acceleration = acceleration::AccelerationIntegrator::default();
+        if self.parameters.accelerometer != parameters.accelerometer
+            || self.parameters.imu_preintegration != parameters.imu_preintegration
+        {
+            self.preintegration.invalidate();
         }
         self.parameters = parameters;
     }
@@ -311,17 +310,22 @@ impl Estimator {
             imu_bias: None,
         };
         let result = (|| -> Result<_> {
-            let mut result = self
-                .prepare_attitude()
-                .and_then(|()| self.solve_graph(&mut diagnostics, heading));
+            let result = self
+                .prepare_preintegration()
+                .and_then(|()| self.prepare_attitude())
+                .and_then(|()| {
+                    let mut result = self.solve_graph(&mut diagnostics, heading);
+                    if result.is_err() && had_visual_update {
+                        self.discard_visuals()?;
+                        visual_rejected = true;
+                        result = self.solve_graph(&mut diagnostics, heading);
+                    }
+                    result
+                });
             if result.is_ok() {
                 self.accept_visuals();
             } else {
                 self.discard_visuals()?;
-                if had_visual_update {
-                    visual_rejected = true;
-                    result = self.solve_graph(&mut diagnostics, heading);
-                }
             }
             if let Some(key) = self.current_yaw.take() {
                 self.graph.remove_factor(key)?;
@@ -346,7 +350,7 @@ impl Estimator {
         let (estimate, converged) = match result {
             Ok((estimate, converged)) => (Some(estimate), converged),
             Err(error) => {
-                diagnostics.failure = Some(error.to_string());
+                diagnostics.failure = Some(format!("{error:#}"));
                 (None, false)
             }
         };
@@ -544,7 +548,7 @@ mod tests {
 
     use super::*;
 
-    fn estimator() -> Estimator {
+    pub(super) fn estimator() -> Estimator {
         let camera = CameraGeometry {
             intrinsics: Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]),
             ..Default::default()
@@ -555,6 +559,7 @@ mod tests {
             nalgebra::Isometry3::identity().framed_transform(),
             &camera,
             Localization3dParameters {
+                imu_preintegration: Default::default(),
                 imu_bias: Default::default(),
                 kinematic_odometry_noise: Some(Default::default()),
                 accelerometer: None,
@@ -573,6 +578,50 @@ mod tests {
             &FieldDimensions::SPL_2025,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn sustained_fast_turn_preserves_off_grid_camera_estimates() {
+        let mut estimator = estimator();
+        let mut max_error = 0.0_f64;
+        for index in 0..=1500 {
+            let t = index as f64 * 0.002;
+            estimator
+                .ingest_imu(
+                    estimator.origin + Duration::from_millis(index * 2),
+                    ImuState {
+                        roll_pitch_yaw: vector![0.0, 0.0, (4.0 * t) as f32],
+                        angular_velocity: vector![0.0, 0.0, 4.0],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            if index == 0 || index % 25 != 0 {
+                continue;
+            }
+            let solved = estimator.solve();
+            assert!(solved.estimate.is_some(), "{:?}", solved.diagnostics);
+            let exposure = estimator.latest_time - Duration::from_millis(37);
+            let (segment, tau) = estimator.segment_and_tau(exposure).unwrap();
+            let controls = control_keys(&estimator.controls, segment).unwrap();
+            let spline = estimator.spline(controls).unwrap();
+            let sample = spline.linearize().unwrap().pose(tau).unwrap();
+            let expected = nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.0, 4.0 * (t - 0.037));
+            max_error = max_error.max(sample.pose.inner.rotation.angle_to(&expected));
+            let covariance = estimator
+                .graph
+                .joint_covariance(&controls.map(|key| key.block_id()))
+                .unwrap();
+            let covariance = SMatrix::<f64, 24, 24>::from_fn(|r, c| covariance[(r, c)]);
+            assert!(sample.covariance(&covariance).cholesky().is_some());
+        }
+        eprintln!(
+            "off-grid camera-time fast-turn max error: {:.6} deg",
+            max_error.to_degrees()
+        );
+        // The unchanged zero-rotation process prior biases sustained blind turns:
+        // the raw-IMU baseline reaches 6.351317 degrees in this same experiment.
+        assert!(max_error < 6.5_f64.to_radians());
     }
 
     #[test]
@@ -633,6 +682,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        estimator.prepare_preintegration().unwrap();
         estimator.prepare_attitude().unwrap();
         let (segment, _) = estimator.segment_and_tau(estimator.latest_time).unwrap();
         let controls = control_keys(&estimator.controls, segment).unwrap();
@@ -687,41 +737,35 @@ mod tests {
     }
 
     #[test]
-    fn grouped_acceleration_preserves_unequal_weights_and_information() {
-        use localization_fagra::factors::ForceBias;
-        let build = |singletons: bool| {
+    fn late_imu_rebuild_preserves_cost_and_information() {
+        let build = |late: bool| {
             let mut estimator = estimator();
-            for index in 0..100 {
+            estimator.parameters.accelerometer = Some(Default::default());
+            let mut indices: Vec<_> = (0..100).collect();
+            if late {
+                indices.swap(24, 70);
+            }
+            for index in indices {
                 estimator
                     .ingest_imu(
                         estimator.origin + Duration::from_millis(index * 2),
-                        ImuState::default(),
+                        ImuState {
+                            angular_velocity: vector![0.1, -0.2, index as f32 * 0.001],
+                            linear_acceleration: vector![0.2, -0.1, 9.81],
+                            ..Default::default()
+                        },
                     )
                     .unwrap();
-            }
-            for (millis, root) in [(25, 0.2), (55, 0.4), (90, 0.3), (140, 0.6)] {
-                let time = estimator.origin + Duration::from_millis(millis);
-                if singletons {
-                    // Keep the old graph batches, but force a fresh one for each
-                    // observation to construct the pre-batching reference model.
-                    estimator.acceleration_batches.clear();
+                if late && index == 70 {
+                    estimator.prepare_preintegration().unwrap();
                 }
-                let (_, fraction) = bias::bias_segment_and_tau(estimator.origin, time);
-                estimator
-                    .insert_acceleration(
-                        time,
-                        vector![0.2, -0.1, 9.7],
-                        root,
-                        ForceBias::at_time(fraction),
-                    )
-                    .unwrap();
             }
+            estimator.prepare_preintegration().unwrap();
             estimator.prepare_attitude().unwrap();
             estimator
         };
         let mut grouped = build(false);
         let mut singletons = build(true);
-        assert_eq!(grouped.acceleration_batches.len(), 1);
         let evaluate = OptimizeOptions {
             gradient_tolerance: f64::MAX,
             ..grouped.options
@@ -970,7 +1014,7 @@ mod tests {
                     estimator.biases.len() <= 3,
                     "coarse calibration must retire with the window"
                 );
-                assert!(estimator.acceleration_batches.len() <= 11);
+                assert!(estimator.preintegration.interval_count() <= 22);
             }
         }
         let bias = last_bias.unwrap();
@@ -1181,6 +1225,9 @@ mod tests {
                     estimator.origin + Duration::from_millis(index * 2),
                     ImuState {
                         roll_pitch_yaw: Vector3::wrap(nalgebra::Vector3::new(0.1, -0.05, 2.0)),
+                        linear_acceleration: Vector3::wrap(
+                            wrong_pose.inner.rotation.inverse() * nalgebra::vector![0.0, 0.0, 9.81],
+                        ),
                         ..Default::default()
                     },
                 )
@@ -1251,11 +1298,56 @@ mod tests {
     }
 
     #[test]
+    fn imu_preparation_failure_does_not_retry_a_stale_graph_without_visuals() {
+        let (estimator, frame, heading) = recovery_fixture();
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        assert!(!candidate.pending_visuals.is_empty());
+        let mut parameters = candidate.parameters.clone();
+        parameters.accelerometer = Some(crate::parameters::AccelerometerParameters {
+            scale: nalgebra::vector![1e154, 1.0, 1.0],
+            ..Default::default()
+        });
+        assert!(parameters.validate().is_ok());
+        candidate.update_parameters(parameters);
+        let start = candidate.latest_time;
+        // Finite accepted readings can still overflow covariance propagation.
+        for millis in [2, 4, 6] {
+            candidate
+                .ingest_imu(
+                    start + Duration::from_millis(millis),
+                    ImuState {
+                        linear_acceleration: vector![f32::MAX, 0.0, 9.81],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let result = candidate.solve();
+        assert!(result.estimate.is_none());
+        assert!(!result.visual_rejected);
+        assert_eq!(result.diagnostics.iterations, None);
+        assert!(
+            result
+                .diagnostics
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("IMU propagation"),
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(candidate.pending_visuals.is_empty());
+    }
+
+    #[test]
     fn reconstruction_preserves_motion_and_admission_state() {
         let (mut estimator, frame, heading) = recovery_fixture();
-        for (nanos, root) in [(4_490_000_000, 0.2), (4_590_000_000, 0.7)] {
+        estimator.parameters.accelerometer = Some(Default::default());
+        for nanos in [4_490_000_000, 4_590_000_000] {
             let time = Time::from_nanos(nanos);
-            let (_, fraction) = bias::bias_segment_and_tau(estimator.origin, time);
             let force = estimator
                 .attitude_at(time)
                 .unwrap()
@@ -1263,11 +1355,11 @@ mod tests {
                 .inverse()
                 * vector![0.0, 0.0, 9.81];
             estimator
-                .accept_motion(recovery::MotionRecord::Acceleration {
+                .accept_motion(recovery::MotionRecord::Imu {
                     time,
                     force,
-                    information_root: root,
-                    bias: localization_fagra::factors::ForceBias::at_time(fraction),
+                    angular_velocity: Vector3::zeros(),
+                    attitude: estimator.attitude_at(time).unwrap(),
                 })
                 .unwrap();
         }
@@ -1283,7 +1375,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(candidate.latest_time, estimator.latest_time);
-        assert_eq!(candidate.acceleration_batches.len(), 1);
+        candidate.prepare_preintegration().unwrap();
+        assert!(candidate.preintegration.interval_count() > 0);
         assert_eq!(candidate.origin, estimator.origin);
         assert_eq!(
             candidate.motion_history.len(),

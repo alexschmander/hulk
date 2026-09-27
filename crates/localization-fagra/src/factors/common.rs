@@ -41,7 +41,7 @@ pub(super) fn spline<R: RealField + Copy, S: StateStore<PoseControl<R>>>(
     duration: R,
 ) -> Result<PoseSpline<R>, EvaluationError> {
     unique(keys)?;
-    PoseSpline::new(
+    let spline = PoseSpline::new(
         [
             states.get(keys[0])?,
             states.get(keys[1])?,
@@ -49,7 +49,9 @@ pub(super) fn spline<R: RealField + Copy, S: StateStore<PoseControl<R>>>(
             states.get(keys[3])?,
         ],
         duration,
-    )
+    )?;
+    spline.check_smooth_rotation()?;
+    Ok(spline)
 }
 
 pub(super) fn cost<R: RealField + Copy, const N: usize>(

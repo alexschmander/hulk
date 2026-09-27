@@ -134,14 +134,7 @@ impl Estimator {
         self.controls.retain(|index, _| *index >= oldest - 1);
         self.measurements.retain(|index, _| *index >= oldest);
         self.yaw_factors.retain(|index, _| *index >= oldest);
-        while self
-            .imu_batches
-            .first_key_value()
-            .is_some_and(|(index, _)| *index < oldest)
-        {
-            let (_, batch) = self.imu_batches.pop_first().unwrap();
-            self.graph.remove_batch(batch)?;
-        }
+        self.retire_preintegration(oldest);
         while self
             .foot_batches
             .first_key_value()
@@ -165,14 +158,6 @@ impl Estimator {
         }
         self.reprojection_batches
             .retain(|(index, _)| *index >= oldest);
-        while self
-            .acceleration_batches
-            .first_key_value()
-            .is_some_and(|(index, _)| *index < oldest)
-        {
-            let (_, batch) = self.acceleration_batches.pop_first().unwrap();
-            self.graph.remove_batch(batch)?;
-        }
         Ok(())
     }
 }

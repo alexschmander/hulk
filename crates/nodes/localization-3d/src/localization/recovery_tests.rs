@@ -127,6 +127,7 @@ fn ingest_motion(localization: &mut Localization, index: u64, with_vo: bool) {
 fn new_localization() -> Localization {
     let initial = frame(0.0, false);
     let parameters = Localization3dParameters {
+        imu_preintegration: Default::default(),
         imu_bias: Default::default(),
         kinematic_odometry_noise: Some(Default::default()),
         accelerometer: None,

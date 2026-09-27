@@ -178,6 +178,7 @@ mod factor_workload {
     use linear_algebra::{Framed, Transform};
     use localization_fagra::{
         factors::*,
+        preintegration::{ImuDelta, PreintegrationInformation},
         variables::{CameraIntrinsics, FieldAlignment, ImuBias, TrajectoryState},
     };
     use nalgebra::{Matrix3, SMatrix};
@@ -187,7 +188,8 @@ mod factor_workload {
         trajectory: TrajectoryPrior<R>, calibration: CameraIntrinsicsPrior<R>, motion: MotionPrior<R>,
         bias_prior: ImuBiasPrior<R>, bias_walk: ImuBiasWalk<R>,
         tilt: RollPitchPrior<R>, yaw: RelativeYaw<R>, containment: FieldContainment<R>,
-        imu: Batch<ImuKinematics<R>, ImuObservation<R>>,
+        imu: ImuKinematics<R>,
+        preintegrated_imu: PreintegratedImu<R>,
         feet: Batch<FootGround<R>, FootObservation<R>>,
         pixels: Batch<FrameReprojections<R>, ReprojectionObservation<R>>,
         odometry: Batch<VisualOdometry<R>, VisualOdometryObservation<R>>, adjacent: AdjacentVisualOdometry<R>,
@@ -279,6 +281,31 @@ mod factor_workload {
             })
             .unwrap();
         let biases = std::array::from_fn(|_| graph.add(ImuBias::identity()));
+        for information in [
+            PreintegrationInformation::Rotation(Matrix3::identity()),
+            PreintegrationInformation::Full(SMatrix::identity()),
+        ] {
+            graph
+                .add_factor(PreintegratedImu {
+                    controls,
+                    biases,
+                    duration: c(0.2),
+                    start_tau: c(0.0),
+                    end_tau: c(0.5),
+                    delta: ImuDelta {
+                        duration: c(0.1),
+                        rotation: Transform::wrap(UnitQuaternion::identity()),
+                        velocity: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(0.981))),
+                        position: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(0.04905))),
+                        reference_biases: std::array::from_fn(|_| ImuBias::identity()),
+                        bias_jacobians: [SMatrix::repeat(c(0.01)); 2],
+                    },
+                    information,
+                    gravity_compensation: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(9.81))),
+                    position: Framed::wrap(Vector3::new(c(0.1), c(0.0), c(0.05))),
+                })
+                .unwrap();
+        }
         graph
             .add_factor(ImuBiasPrior {
                 bias: biases[0],
@@ -292,14 +319,17 @@ mod factor_workload {
                 information_root: SMatrix::identity(),
             })
             .unwrap();
-        let imu = graph.add_batch(ImuKinematics {
+        let imu = ImuKinematics {
             controls,
             biases,
             duration: c(0.2),
-            gravity_compensation: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(9.81))),
             gyroscope_information_root: Matrix3::identity(),
             tilt_information_root: Matrix3::identity(),
-        });
+            tau: c(0.0),
+            bias_tau: c(0.0),
+            angular_velocity: Framed::wrap(Vector3::zeros()),
+            measured_up: Some(Framed::wrap(Vector3::z())),
+        };
         let feet = graph.add_batch(FootGround {
             controls,
             duration: c(0.2),
@@ -314,18 +344,11 @@ mod factor_workload {
         for i in 0..10 {
             let tau = c(i as f64 / 10.0);
             graph
-                .add_factor_to(
-                    imu,
-                    ImuObservation {
-                        tau,
-                        bias_tau: tau,
-                        measured_up: Some(Framed::wrap(Vector3::z())),
-                        force_bias: None,
-                        angular_velocity: Framed::wrap(Vector3::zeros()),
-                        specific_force: Some(Framed::wrap(Vector3::new(c(0.0), c(0.0), c(9.81)))),
-                        accelerometer_information_root: Matrix3::identity(),
-                    },
-                )
+                .add_factor(ImuKinematics {
+                    tau,
+                    bias_tau: tau,
+                    ..imu.clone()
+                })
                 .unwrap();
             graph
                 .add_factor_to(

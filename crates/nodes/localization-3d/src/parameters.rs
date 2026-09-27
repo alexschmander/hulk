@@ -7,6 +7,35 @@ use serde::{Deserialize, Serialize};
 
 const MAX_TRACKING_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
+#[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ImuPreintegrationParameters {
+    /// Continuous gyro noise density, rad/s sqrt(s).
+    pub gyroscope_noise_density: f64,
+    /// Position integration/model-error density, m/sqrt(s), as in GTSAM.
+    pub integration_noise_density: f64,
+    /// SDK up-direction sigma for a complete 100 ms interval.
+    pub tilt_sigma: f64,
+    /// Instantaneous, not integrated, newest gyro measurement sigma (rad/s).
+    pub terminal_gyroscope_sigma: f64,
+    /// Reintegrate between solves beyond these reference-bias changes.
+    pub gyroscope_reintegration_threshold: f64,
+    pub accelerometer_reintegration_threshold: f64,
+}
+
+impl Default for ImuPreintegrationParameters {
+    fn default() -> Self {
+        Self {
+            gyroscope_noise_density: (2e-5_f64).sqrt(),
+            integration_noise_density: 1e-4,
+            tilt_sigma: 0.02,
+            terminal_gyroscope_sigma: 0.1,
+            gyroscope_reintegration_threshold: 0.01,
+            accelerometer_reintegration_threshold: 0.1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Message)]
 #[serde(deny_unknown_fields)]
 pub struct ImuBiasParameters {
@@ -39,8 +68,6 @@ pub struct AccelerometerParameters {
     pub position: Vector3<Robot, f64>,
     /// Specific-force white-noise density in m/s² sqrt(s), including model error.
     pub noise_density: f64,
-    /// Integrate rather than discard high-rate impulses before spline fitting.
-    pub averaging_interval: Duration,
 }
 
 impl Default for AccelerometerParameters {
@@ -50,7 +77,6 @@ impl Default for AccelerometerParameters {
             scale: nalgebra::Vector3::repeat(1.0),
             position: Vector3::zeros(),
             noise_density: 0.3,
-            averaging_interval: Duration::from_millis(10),
         }
     }
 }
@@ -82,6 +108,8 @@ pub struct Localization3dParameters {
     pub accelerometer: Option<AccelerometerParameters>,
     #[serde(default)]
     pub imu_bias: ImuBiasParameters,
+    #[serde(default)]
+    pub imu_preintegration: ImuPreintegrationParameters,
     /// Broad initialization distributions, not measured standing height or zero velocity.
     pub initial_height_sigma: f64,
     pub initial_velocity_sigma: f64,
@@ -115,6 +143,21 @@ fn default_tracking_timeout() -> Duration {
 
 impl Localization3dParameters {
     pub(crate) fn validate(&self) -> std::result::Result<(), String> {
+        let p = &self.imu_preintegration;
+        for value in [
+            p.gyroscope_noise_density,
+            p.integration_noise_density,
+            p.tilt_sigma,
+            p.terminal_gyroscope_sigma,
+            p.gyroscope_reintegration_threshold,
+            p.accelerometer_reintegration_threshold,
+        ] {
+            if !valid_scale(value) || !(value * value).is_finite() {
+                return Err(
+                    "IMU preintegration noise and thresholds must be finite and positive".into(),
+                );
+            }
+        }
         for value in [
             self.imu_bias.accelerometer_initial_sigma,
             self.imu_bias.gyroscope_initial_sigma,
@@ -174,13 +217,9 @@ impl Localization3dParameters {
                     .iter()
                     .all(|v| valid_scale(*v) && (v * v).is_finite())
                 || !valid_scale(accel.noise_density)
-                || !(accel.noise_density * accel.noise_density).is_finite()
-                || accel.averaging_interval.is_zero()
-                || accel.averaging_interval > Duration::from_millis(50))
+                || !(accel.noise_density * accel.noise_density).is_finite())
         {
-            return Err(
-                "invalid accelerometer calibration, noise density or averaging interval".into(),
-            );
+            return Err("invalid accelerometer calibration or noise density".into());
         }
         if !valid_scale(self.accelerometer_process_noise_variance) {
             return Err("accelerometer_process_noise_variance must be finite and > 0".to_string());
@@ -214,6 +253,7 @@ mod tests {
     #[test]
     fn validation_rejects_unusable_whitening_and_timer_ranges() {
         let parameters = Localization3dParameters {
+            imu_preintegration: Default::default(),
             imu_bias: Default::default(),
             kinematic_odometry_noise: Some(Default::default()),
             accelerometer: None,

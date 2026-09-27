@@ -91,10 +91,11 @@ The estimator now reuses LM's final undamped linearization for covariance and ta
 from solver reports/statistics instead of running extra evaluation-only solves. Accepted
 nonconverged motion results still get a fresh covariance. `initial_cost` is unavailable on
 failures after accepted steps when fagra does not return a report; final cost and termination
-remain available. Gyro and SDK tilt share batched spline evaluation. Exactly inactive foot
+remain available. Exactly inactive foot
 constraints and zero Jacobian blocks avoid assembly work without dropping measurements.
-Acceleration means are grouped by their shared pose/bias segment, with whitening stored per
-observation so unequal averaging durations and insertion-time noise settings are preserved.
+Gyro and force now use correlated 100 ms preintegrated endpoint factors, with partial
+intervals through the newest sample. SDK tilt is reduced to coarse endpoint observations.
+See the [preintegration model and comparison](localization_preintegration.md).
 Small local spline optimizations borrow the tilt Jacobians and propagate only the already-active
 angular derivative prefix. Their incremental measured impact is recorded in the
 [local refinement results](localization_perf.md#local-refinements-complexity-versus-measured-gain).
@@ -110,16 +111,17 @@ motion-only partial solves may publish; visual updates and global bootstrap requ
 ### Contact-independent inertial fusion
 
 The SDK accelerometer measures **specific force**: approximately +9.81 m/s² on Robot Z upright
-at rest, and zero in free fall. The factor predicts `Rᵀ(p̈ + [0, 0, 9.81])`.
-`accelerometer` configures Robot-frame bias, per-axis scale, sensor position, noise density, and
-averaging interval. Calibration subtracts bias, applies scale, compensates tangential and centripetal
-lever-arm acceleration, and time-averages force in IMU-reference axes before adding a midpoint
-observation. Zero force and impulses remain observations. Calibration changes reset the partial average.
+at rest, and zero in free fall. `accelerometer` configures Robot-frame bias, per-axis scale,
+sensor position, and noise density. Calibrated force is preintegrated at the physical IMU
+origin; the factor transforms spline endpoint position and velocity using the mounting offset.
+This avoids angular-acceleration differencing. Zero force and impulses remain observations.
+Missing acceleration produces rotation-only pieces; gaps over 20 ms are not integrated.
+Calibration changes rebuild retained intervals from raw data.
 
-Bundled settings enable acceleration with 10 ms averaging and noise density 0.3, but zero bias/position
+Bundled settings enable acceleration with 100 ms preintegration and noise density 0.3, but zero bias/position
 and unit scale are provisional: the physical mounting offset and calibration have not been measured.
 The simulation IMU site's origin is not hardware calibration. The 200 ms spline also limits the motion
-bandwidth represented by these averaged observations.
+bandwidth represented by the trajectory between endpoint observations.
 
 ### Online IMU bias calibration
 
@@ -128,9 +130,9 @@ configured fixed calibration. Bias has independent **5-second knots with linear 
 not a 200 ms spline. Each observation references two bracketing six-dimensional bias states;
 the two-second trajectory window normally retains two knots, or three across a boundary.
 
-For interpolation fraction `u`, `b(t) = (1-u) b0 + u b1`. Gyro residuals are
-`omega_predicted + b_g(t) - omega_measured`; point accelerometer residuals are
-`Rᵀ(p̈ + g) + b_a(t) - f_measured`. Bias tangent/covariance order is gyro XYZ, then
+For interpolation fraction `u`, `b(t) = (1-u) b0 + u b1`. Preintegration subtracts
+the interpolated gyro/force bias and propagates sensitivities for both reference knots.
+Bias tangent/covariance order is gyro XYZ, then
 accelerometer XYZ. The bias walk penalizes consecutive differences with variance `density² * 5 s`.
 
 `localization3d.imu_bias` configures initial uncertainties and drift densities:
@@ -148,11 +150,10 @@ affect newly constructed priors/walks, not already marginalized information.
 Fixed sensor bias/scale/mounting calibration is assumed constant within an epoch; start a
 fresh epoch after changing those physical calibration parameters.
 
-Acceleration averaging retains both interpolation-weighted rotation matrices, rather than
-pretending the average has a single body-axis bias. Averages split at bias boundaries without
-dropping the intervening impulse. For nonzero IMU mounting offsets, retained quadrature samples
-also account for corrected angular velocity and the interpolated gyro-bias time derivative in
-tangential/centripetal compensation. All corresponding bias Jacobians are analytical.
+Intervals split at bias boundaries without dropping intervening impulses. The optimizer uses
+first-order bias correction with analytical Jacobians; accepted changes exceeding configurable
+thresholds trigger reintegration between solves. Mounting offsets enter endpoint kinematics,
+so no gyro-bias time derivative is needed for sensor-origin integration.
 
 Bias knots retire through joint marginalization with pose controls, retaining cross-correlations.
 Rejected updates restore bias along with pose/alignment/intrinsics. Recovery candidates start

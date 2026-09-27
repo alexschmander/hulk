@@ -78,6 +78,39 @@ pub struct LinearizedState<R: RealField + Copy = f64> {
     pub jacobians: [SMatrix<R, 9, 6>; 4],
 }
 
+impl<R: RealField + Copy> LinearizedState<R> {
+    pub(crate) fn from_pose_and_velocity(
+        pose: LinearizedPose<R>,
+        velocity: LinearizedVelocity<R>,
+    ) -> Result<Self, EvaluationError> {
+        let inverse = pose
+            .pose
+            .inner
+            .rotation
+            .to_rotation_matrix()
+            .inverse()
+            .into_inner();
+        let jacobians = std::array::from_fn(|i| {
+            let mut j = SMatrix::<R, 9, 6>::zeros();
+            j.fixed_rows_mut::<3>(0)
+                .copy_from(&pose.jacobians[i].fixed_rows::<3>(0));
+            j.fixed_rows_mut::<3>(3)
+                .copy_from(&(inverse * velocity.jacobians[i]));
+            j.fixed_rows_mut::<3>(6)
+                .copy_from(&pose.jacobians[i].fixed_rows::<3>(3));
+            j
+        });
+        finite(jacobians.iter().flat_map(|j| j.iter()))?;
+        Ok(Self {
+            state: TrajectoryState {
+                pose: pose.pose,
+                velocity: velocity.velocity,
+            },
+            jacobians,
+        })
+    }
+}
+
 /// Kinematics and vector-component derivatives with respect to all four controls.
 #[derive(Debug)]
 pub struct LinearizedKinematics<R: RealField + Copy = f64> {
@@ -223,9 +256,7 @@ impl<R: RealField + Copy> PoseSpline<R> {
     /// Prepare analytical right-control Jacobians. Rejects any consecutive rotation
     /// pair with `abs(relative quaternion w) <= 1e-6` (about 2e-6 radians from π).
     pub fn linearize(&self) -> Result<LinearizedPoseSpline<'_, R>, EvaluationError> {
-        if !self.smooth_rotation {
-            return Err(EvaluationError::InvalidEvaluation);
-        }
+        self.check_smooth_rotation()?;
         let control_rotations = self.rotations.map(|r| r.to_rotation_matrix().into_inner());
         let delta_jacobians = std::array::from_fn(|i| {
             let inverse = rotation::right_jacobian_inverse(self.rotation_deltas[i]);
@@ -240,6 +271,15 @@ impl<R: RealField + Copy> PoseSpline<R> {
             control_rotations,
             delta_jacobians,
         })
+    }
+
+    /// Factor cost and Jacobians must share a domain: LM must not accept a
+    /// lower-cost trial at a rotation-log seam that it cannot then linearize.
+    pub(crate) fn check_smooth_rotation(&self) -> Result<(), EvaluationError> {
+        if !self.smooth_rotation {
+            return Err(EvaluationError::InvalidEvaluation);
+        }
+        Ok(())
     }
 
     fn increments(&self, basis: &Basis<R>) -> [UnitQuaternion<R>; 3] {
@@ -333,33 +373,7 @@ impl<R: RealField + Copy> LinearizedPoseSpline<'_, R> {
     }
 
     pub fn state(&self, tau: R) -> Result<LinearizedState<R>, EvaluationError> {
-        let pose = self.pose(tau)?;
-        let velocity = self.velocity(tau)?;
-        let inverse = pose
-            .pose
-            .inner
-            .rotation
-            .to_rotation_matrix()
-            .inverse()
-            .into_inner();
-        let jacobians = std::array::from_fn(|i| {
-            let mut j = SMatrix::<R, 9, 6>::zeros();
-            j.fixed_rows_mut::<3>(0)
-                .copy_from(&pose.jacobians[i].fixed_rows::<3>(0));
-            j.fixed_rows_mut::<3>(3)
-                .copy_from(&(inverse * velocity.jacobians[i]));
-            j.fixed_rows_mut::<3>(6)
-                .copy_from(&pose.jacobians[i].fixed_rows::<3>(3));
-            j
-        });
-        finite(jacobians.iter().flat_map(|j| j.iter()))?;
-        Ok(LinearizedState {
-            state: TrajectoryState {
-                pose: pose.pose,
-                velocity: velocity.velocity,
-            },
-            jacobians,
-        })
+        LinearizedState::from_pose_and_velocity(self.pose(tau)?, self.velocity(tau)?)
     }
 
     pub fn kinematics(&self, tau: R) -> Result<LinearizedKinematics<R>, EvaluationError> {

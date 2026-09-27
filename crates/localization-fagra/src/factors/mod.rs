@@ -53,7 +53,7 @@
 //!         bias_priors: ImuBiasPrior<R>,
 //!         bias_walks: ImuBiasWalk<R>,
 //!         motion: MotionPrior<R>,
-//!         imu: Batch<ImuKinematics<R>, ImuObservation<R>>,
+//!         imu: ImuKinematics<R>,
 //!         tilt: RollPitchPrior<R>,
 //!         yaw: RelativeYaw<R>,
 //!         feet: Batch<FootGround<R>, FootObservation<R>>,
@@ -74,6 +74,7 @@ mod imu;
 mod imu_bias;
 mod kinematic_odometry;
 mod motion;
+mod preintegrated_imu;
 mod prior;
 mod reprojection;
 mod visual_odometry;
@@ -83,12 +84,11 @@ mod tests;
 
 pub use field_containment::FieldContainment;
 pub use ground::{FootGround, FootObservation};
-pub use imu::{
-    ForceBias, ImuKinematics, ImuObservation, LeverArmSample, RelativeYaw, RollPitchPrior,
-};
+pub use imu::{ImuKinematics, RelativeYaw, RollPitchPrior};
 pub use imu_bias::{ImuBiasPrior, ImuBiasWalk};
 pub use kinematic_odometry::{AdjacentKinematicOdometry, KinematicOdometry};
 pub use motion::MotionPrior;
+pub use preintegrated_imu::PreintegratedImu;
 pub use prior::{CameraIntrinsicsPrior, TrajectoryPrior};
 pub use reprojection::{FrameReprojections, ReprojectionObservation};
 pub use visual_odometry::{AdjacentVisualOdometry, VisualOdometry, VisualOdometryObservation};

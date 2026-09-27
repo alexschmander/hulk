@@ -1,98 +1,12 @@
-use coordinate_systems::{Local, Robot};
+use coordinate_systems::Robot;
 use fagra::{
-    BlockId, EvaluationError, Factor, FactorBatch, FactorSelection, JacobianBlock,
-    LinearizationSink, StateKey, StateStore,
+    BlockId, EvaluationError, Factor, JacobianBlock, LinearizationSink, StateKey, StateStore,
 };
 use linear_algebra::Vector3;
 use nalgebra::{Matrix3, RealField, SMatrix, SVector, UnitQuaternion};
 
 use super::common;
 use crate::variables::{ImuBias, PoseControl};
-
-/// One trapezoidal quadrature term for gyro-dependent lever-arm correction.
-#[derive(Clone, Debug)]
-pub struct LeverArmSample<R: RealField + Copy = f64> {
-    /// Weighted rotation from sample Robot axes to the averaged measurement axes.
-    pub weight: Matrix3<R>,
-    pub tau: R,
-    pub angular_velocity: Vector3<Robot, R>,
-}
-
-/// Bias dependence retained while averaging calibrated specific force.
-#[derive(Clone, Debug)]
-pub struct ForceBias<R: RealField + Copy = f64> {
-    pub accelerometer_weights: [Matrix3<R>; 2],
-    pub position: Vector3<Robot, R>,
-    /// Separation of the coarse bias knots in seconds, not the pose-knot spacing.
-    pub duration: R,
-    /// Empty for a sensor at the Robot origin.
-    pub lever_samples: Vec<LeverArmSample<R>>,
-}
-
-impl<R: RealField + Copy> ForceBias<R> {
-    pub fn at_time(tau: R) -> Self {
-        Self {
-            accelerometer_weights: [
-                Matrix3::identity() * (R::one() - tau),
-                Matrix3::identity() * tau,
-            ],
-            position: Vector3::zeros(),
-            duration: R::one(),
-            lever_samples: Vec::new(),
-        }
-    }
-
-    /// Added to predicted force: averaged accelerometer bias and the difference
-    /// between true and raw-gyro lever-arm acceleration. Includes bias time slope.
-    pub fn evaluate(
-        &self,
-        biases: [&ImuBias<R>; 2],
-    ) -> Result<(nalgebra::Vector3<R>, [SMatrix<R, 3, 6>; 2]), EvaluationError> {
-        common::finite(self.position.inner.iter())?;
-        let inverse_duration = common::positive(self.duration)?;
-        let mut correction = nalgebra::Vector3::zeros();
-        let mut jacobians = [SMatrix::<R, 3, 6>::zeros(); 2];
-        for i in 0..2 {
-            common::finite(self.accelerometer_weights[i].iter())?;
-            correction += self.accelerometer_weights[i] * biases[i].accelerometer.inner;
-            jacobians[i]
-                .fixed_columns_mut::<3>(3)
-                .copy_from(&self.accelerometer_weights[i]);
-        }
-        let r = self.position.inner;
-        let slope = (biases[1].gyroscope.inner - biases[0].gyroscope.inner) * inverse_duration;
-        let slope_jacobian = r.cross_matrix() * inverse_duration;
-        for sample in &self.lever_samples {
-            validate_bias_tau(sample.tau)?;
-            common::finite(
-                sample
-                    .weight
-                    .iter()
-                    .chain(sample.angular_velocity.inner.iter()),
-            )?;
-            let weights = [R::one() - sample.tau, sample.tau];
-            let raw = sample.angular_velocity.inner;
-            let omega = raw
-                - biases[0].gyroscope.inner * weights[0]
-                - biases[1].gyroscope.inner * weights[1];
-            correction += sample.weight
-                * (omega.cross(&omega.cross(&r)) - raw.cross(&raw.cross(&r)) + r.cross(&slope));
-            let derivative = omega * r.transpose() + Matrix3::identity() * omega.dot(&r)
-                - r * omega.transpose() * (R::one() + R::one());
-            for i in 0..2 {
-                let slope_sign = if i == 0 { -R::one() } else { R::one() };
-                let block =
-                    sample.weight * (-derivative * weights[i] + slope_jacobian * slope_sign);
-                let old = jacobians[i].fixed_columns::<3>(0).into_owned();
-                jacobians[i]
-                    .fixed_columns_mut::<3>(0)
-                    .copy_from(&(old + block));
-            }
-        }
-        common::finite(correction.iter())?;
-        Ok((correction, jacobians))
-    }
-}
 
 fn validate_bias_tau<R: RealField + Copy>(tau: R) -> Result<(), EvaluationError> {
     if tau.is_finite() && tau >= R::zero() && tau <= R::one() {
@@ -102,55 +16,34 @@ fn validate_bias_tau<R: RealField + Copy>(tau: R) -> Result<(), EvaluationError>
     }
 }
 
-/// One IMU sample evaluated on an interval's trajectory.
-/// Measurements are expressed in Robot axes. Fixed calibration and raw-gyro
-/// lever-arm correction happen upstream; force_bias retains their bias dependence.
-#[derive(Clone, Debug)]
-pub struct ImuObservation<R: RealField + Copy = f64> {
-    pub tau: R,
-    /// Linear interpolation fraction on the independent, coarse bias interval.
-    pub bias_tau: R,
-    /// Angular velocity in rad/s.
-    pub angular_velocity: Vector3<Robot, R>,
-    /// SDK attitude's up direction, sharing the gyro's spline preparation.
-    pub measured_up: Option<Vector3<Robot, R>>,
-    /// Accelerometer specific force in m/s², not the robot's translational
-    /// acceleration. Absent when accelerometer fitting is disabled.
-    pub specific_force: Option<Vector3<Robot, R>>,
-    /// Per-observation whitening, preserving each average's actual duration and
-    /// insertion-time noise setting. Used only when specific force is present.
-    pub accelerometer_information_root: Matrix3<R>,
-    /// None for a point observation; Some retains averaging/lever-arm dependence.
-    pub force_bias: Option<ForceBias<R>>,
-}
-
-/// Batched gyroscope, optional SDK tilt, and accelerometer residuals sharing spline preparation.
+/// Instantaneous gyro and optional SDK tilt, sharing spline preparation when both are active.
 ///
-/// With robot-to-local rotation `R` and local trajectory position `p`, raw
-/// residuals are body angular velocity plus interpolated gyro bias minus measured
-/// angular velocity, and `Rᵀ * (p̈ + gravity_compensation) + bias_correction - specific_force`.
+/// Gyro residuals are body angular velocity plus interpolated gyro bias minus measured
+/// angular velocity.
 /// Bias uses two independent coarse knots, never the pose spline. Each sample contributes
-/// gyroscope rows (unless their root is zero), optional tilt rows, and optional
-/// accelerometer rows within one factor scope. Noise roots whiten robot-axis errors.
+/// gyroscope rows (unless their root is zero) and optional tilt rows within one factor scope.
+/// Noise roots whiten robot-axis errors.
 #[derive(Clone, Debug)]
 pub struct ImuKinematics<R: RealField + Copy = f64> {
     pub controls: [StateKey<PoseControl<R>>; 4],
     pub biases: [StateKey<ImuBias<R>>; 2],
     pub duration: R,
-    /// Local-frame acceleration added to trajectory acceleration before rotating
-    /// into the robot frame; at rest this predicts the accelerometer reading.
-    pub gravity_compensation: Vector3<Local, R>,
+    pub tau: R,
+    /// Linear interpolation fraction on the independent, coarse bias interval.
+    pub bias_tau: R,
+    /// Angular velocity in Robot axes, rad/s.
+    pub angular_velocity: Vector3<Robot, R>,
+    /// SDK attitude's up direction in Robot axes.
+    pub measured_up: Option<Vector3<Robot, R>>,
     pub gyroscope_information_root: Matrix3<R>,
     pub tilt_information_root: Matrix3<R>,
 }
 
-impl<R: RealField + Copy, S: StateStore<PoseControl<R>> + StateStore<ImuBias<R>>> FactorBatch<S>
+impl<R: RealField + Copy, S: StateStore<PoseControl<R>> + StateStore<ImuBias<R>>> Factor<S>
     for ImuKinematics<R>
 {
     type Scalar = R;
-    type Factor = ImuObservation<R>;
-
-    fn visit_variables(&self, _factor: &Self::Factor, mut visitor: impl FnMut(BlockId)) {
+    fn visit_variables(&self, mut visitor: impl FnMut(BlockId)) {
         for key in self.controls {
             visitor(key.block_id());
         }
@@ -159,14 +52,7 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>> + StateStore<ImuBias<R>>
         }
     }
 
-    fn cost(
-        &self,
-        states: &S,
-        factors: FactorSelection<'_, Self::Factor>,
-    ) -> Result<R, EvaluationError> {
-        if factors.is_empty() {
-            return Ok(R::zero());
-        }
+    fn cost(&self, states: &S) -> Result<R, EvaluationError> {
         self.validate()?;
         let spline = common::spline(states, &self.controls, self.duration)?;
         let biases = [states.get(self.biases[0])?, states.get(self.biases[1])?];
@@ -175,50 +61,30 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>> + StateStore<ImuBias<R>>
             .iter()
             .any(|v| *v != R::zero());
         let mut cost = R::zero();
-        for (_, observation) in factors {
-            validate_bias_tau(observation.bias_tau)?;
-            let gyro_bias = biases[0].gyroscope.inner * (R::one() - observation.bias_tau)
-                + biases[1].gyroscope.inner * observation.bias_tau;
-            common::finite(gyro_bias.iter())?;
-            common::finite(observation.angular_velocity.inner.iter())?;
-            let (k, pose) =
-                if observation.specific_force.is_some() || observation.measured_up.is_some() {
-                    let (pose, k) = spline.pose_and_kinematics(observation.tau)?;
-                    (k, Some(pose))
-                } else {
-                    (spline.kinematics(observation.tau)?, None)
-                };
-            if observe_gyro {
-                cost += common::cost(
-                    &(self.gyroscope_information_root
-                        * (k.angular_velocity.inner + gyro_bias
-                            - observation.angular_velocity.inner)),
-                )?;
+        let gyro_bias = biases[0].gyroscope.inner * (R::one() - self.bias_tau)
+            + biases[1].gyroscope.inner * self.bias_tau;
+        common::finite(gyro_bias.iter())?;
+        let (k, pose) = match (observe_gyro, self.measured_up.is_some()) {
+            (true, true) => {
+                let (pose, k) = spline.pose_and_kinematics(self.tau)?;
+                (Some(k), Some(pose))
             }
-            if let Some((measured, pose)) = observation.measured_up.zip(pose.as_ref()) {
-                cost += common::cost(&tilt(
-                    &pose.inner.rotation,
-                    &measured,
-                    &self.tilt_information_root,
-                )?)?;
-            }
-            if let Some((measured, pose)) = observation.specific_force.zip(pose) {
-                common::finite(measured.inner.iter())?;
-                common::finite(observation.accelerometer_information_root.iter())?;
-                let rotation = pose.inner.rotation;
-                let prediction = rotation.inverse()
-                    * (k.linear_acceleration.inner + self.gravity_compensation.inner);
-                let point_bias = ForceBias::at_time(observation.bias_tau);
-                let (correction, _) = observation
-                    .force_bias
-                    .as_ref()
-                    .unwrap_or(&point_bias)
-                    .evaluate(biases)?;
-                cost += common::cost(
-                    &(observation.accelerometer_information_root
-                        * (prediction + correction - measured.inner)),
-                )?;
-            }
+            (true, false) => (Some(spline.kinematics(self.tau)?), None),
+            (false, true) => (None, Some(spline.pose(self.tau)?)),
+            (false, false) => (None, None),
+        };
+        if let Some(k) = k {
+            cost += common::cost(
+                &(self.gyroscope_information_root
+                    * (k.angular_velocity.inner + gyro_bias - self.angular_velocity.inner)),
+            )?;
+        }
+        if let Some((measured, pose)) = self.measured_up.zip(pose.as_ref()) {
+            cost += common::cost(&tilt(
+                &pose.inner.rotation,
+                &measured,
+                &self.tilt_information_root,
+            )?)?;
         }
         common::checked_cost(cost)
     }
@@ -226,12 +92,8 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>> + StateStore<ImuBias<R>>
     fn linearize<L: LinearizationSink<Scalar = R>>(
         &self,
         states: &S,
-        factors: FactorSelection<'_, Self::Factor>,
         sink: &mut L,
     ) -> Result<(), EvaluationError> {
-        if factors.is_empty() {
-            return Ok(());
-        }
         self.validate()?;
         let spline = common::spline(states, &self.controls, self.duration)?;
         let linearized = spline.linearize()?;
@@ -240,84 +102,45 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>> + StateStore<ImuBias<R>>
             .gyroscope_information_root
             .iter()
             .any(|v| *v != R::zero());
-        for (id, observation) in factors {
-            validate_bias_tau(observation.bias_tau)?;
-            let weights = [R::one() - observation.bias_tau, observation.bias_tau];
-            let gyro_bias =
-                biases[0].gyroscope.inner * weights[0] + biases[1].gyroscope.inner * weights[1];
-            common::finite(gyro_bias.iter())?;
-            common::finite(observation.angular_velocity.inner.iter())?;
-            let (k, pose) =
-                if observation.specific_force.is_some() || observation.measured_up.is_some() {
-                    let (pose, k) = linearized.pose_and_kinematics(observation.tau)?;
-                    (k, Some(pose))
-                } else {
-                    (linearized.kinematics(observation.tau)?, None)
-                };
-            sink.factor(id, |sink| {
-                if observe_gyro {
-                    let residual = self.gyroscope_information_root
-                        * (k.kinematics.angular_velocity.inner + gyro_bias
-                            - observation.angular_velocity.inner);
-                    let jacobians = k
-                        .angular_velocity_jacobians
-                        .map(|j| self.gyroscope_information_root * j);
-                    let gyro_jacobians = weights.map(|weight| {
-                        let mut j = SMatrix::<R, 3, 6>::zeros();
-                        j.fixed_columns_mut::<3>(0)
-                            .copy_from(&(self.gyroscope_information_root * weight));
-                        j
-                    });
-                    self.emit(sink, &residual, &jacobians, &gyro_jacobians)?;
-                }
-                if let Some((measured, pose)) = observation.measured_up.zip(pose.as_ref()) {
-                    let residual = tilt(
-                        &pose.pose.inner.rotation,
-                        &measured,
-                        &self.tilt_information_root,
-                    )?;
-                    let derivative =
-                        tilt_jacobian(&pose.pose.inner.rotation, &self.tilt_information_root);
-                    let jacobians = pose
-                        .jacobians
-                        .each_ref()
-                        .map(|j| derivative * j.fixed_rows::<3>(0));
-                    common::emit(sink, &self.controls, &residual, &jacobians)?;
-                }
-                if let Some((measured, pose)) = observation.specific_force.zip(pose) {
-                    common::finite(measured.inner.iter())?;
-                    common::finite(observation.accelerometer_information_root.iter())?;
-                    let inverse = pose
-                        .pose
-                        .inner
-                        .rotation
-                        .to_rotation_matrix()
-                        .inverse()
-                        .into_inner();
-                    let prediction = inverse
-                        * (k.kinematics.linear_acceleration.inner
-                            + self.gravity_compensation.inner);
-                    let point_bias = ForceBias::at_time(observation.bias_tau);
-                    let (correction, bias_jacobians) = observation
-                        .force_bias
-                        .as_ref()
-                        .unwrap_or(&point_bias)
-                        .evaluate(biases)?;
-                    let jacobians = std::array::from_fn(|i| {
-                        observation.accelerometer_information_root
-                            * (prediction.cross_matrix() * pose.jacobians[i].fixed_rows::<3>(0)
-                                + inverse * k.linear_acceleration_jacobians[i])
-                    });
-                    self.emit(
-                        sink,
-                        &(observation.accelerometer_information_root
-                            * (prediction + correction - measured.inner)),
-                        &jacobians,
-                        &bias_jacobians.map(|j| observation.accelerometer_information_root * j),
-                    )?;
-                }
-                Ok(())
-            })?;
+        let weights = [R::one() - self.bias_tau, self.bias_tau];
+        let gyro_bias =
+            biases[0].gyroscope.inner * weights[0] + biases[1].gyroscope.inner * weights[1];
+        common::finite(gyro_bias.iter())?;
+        let (k, pose) = match (observe_gyro, self.measured_up.is_some()) {
+            (true, true) => {
+                let (pose, k) = linearized.pose_and_kinematics(self.tau)?;
+                (Some(k), Some(pose))
+            }
+            (true, false) => (Some(linearized.kinematics(self.tau)?), None),
+            (false, true) => (None, Some(linearized.pose(self.tau)?)),
+            (false, false) => (None, None),
+        };
+        if let Some(k) = k {
+            let residual = self.gyroscope_information_root
+                * (k.kinematics.angular_velocity.inner + gyro_bias - self.angular_velocity.inner);
+            let jacobians = k
+                .angular_velocity_jacobians
+                .map(|j| self.gyroscope_information_root * j);
+            let gyro_jacobians = weights.map(|weight| {
+                let mut j = SMatrix::<R, 3, 6>::zeros();
+                j.fixed_columns_mut::<3>(0)
+                    .copy_from(&(self.gyroscope_information_root * weight));
+                j
+            });
+            self.emit(sink, &residual, &jacobians, &gyro_jacobians)?;
+        }
+        if let Some((measured, pose)) = self.measured_up.zip(pose.as_ref()) {
+            let residual = tilt(
+                &pose.pose.inner.rotation,
+                &measured,
+                &self.tilt_information_root,
+            )?;
+            let derivative = tilt_jacobian(&pose.pose.inner.rotation, &self.tilt_information_root);
+            let jacobians = pose
+                .jacobians
+                .each_ref()
+                .map(|j| derivative * j.fixed_rows::<3>(0));
+            common::emit(sink, &self.controls, &residual, &jacobians)?;
         }
         Ok(())
     }
@@ -345,12 +168,13 @@ impl<R: RealField + Copy> ImuKinematics<R> {
         )
     }
     fn validate(&self) -> Result<(), EvaluationError> {
+        validate_bias_tau(self.tau)?;
+        validate_bias_tau(self.bias_tau)?;
         common::finite(
-            self.gravity_compensation
-                .inner
+            self.gyroscope_information_root
                 .iter()
-                .chain(self.gyroscope_information_root.iter())
-                .chain(self.tilt_information_root.iter()),
+                .chain(self.tilt_information_root.iter())
+                .chain(self.angular_velocity.inner.iter()),
         )
     }
 }

@@ -12,6 +12,7 @@ use nalgebra::RealField;
 pub mod alignment;
 mod covariance;
 pub mod factors;
+pub mod preintegration;
 pub mod spline;
 pub mod variables;
 
