@@ -4070,7 +4070,7 @@ dependencies = [
 [[package]]
 name = "fagra"
 version = "0.1.0"
-source = "git+https://github.com/oleflb/fagra?rev=0fe573b54b233d1eda49407a7247eee851cee99c#0fe573b54b233d1eda49407a7247eee851cee99c"
+source = "git+https://github.com/oleflb/fagra?rev=7b37df61ed615c85f5d59265f5df53ff5d5dc1be#7b37df61ed615c85f5d59265f5df53ff5d5dc1be"
 dependencies = [
  "faer 0.24.4",
  "faer-ext",
@@ -6593,13 +6593,17 @@ dependencies = [
  "color-eyre",
  "coordinate_systems",
  "fagra",
+ "field_mark_association",
+ "json5",
  "kinematics",
  "linear_algebra",
  "localization-fagra",
+ "mcap",
  "nalgebra 0.34.2",
  "projection",
  "ros-z",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "types",
@@ -6825,6 +6829,23 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.20",
  "zstd",
+]
+
+[[package]]
+name = "mcap-replay"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "mcap",
+ "ros-z",
+ "ros-z-debug",
+ "ros-z-schema",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "zenoh",
 ]
 
 [[package]]

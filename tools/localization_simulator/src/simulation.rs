@@ -6,7 +6,7 @@ use field_mark_association::{
     AssociationInput, DetectedVisualFeatures, FieldMarkAssociationParameters,
     associate_visual_features, raw_detections,
 };
-use linear_algebra::{Framed, IntoTransform, Isometry3 as FramedIsometry3};
+use linear_algebra::{Framed, IntoTransform, Isometry3 as FramedIsometry3, Orientation3};
 use localization_3d::{Localization, SolveDiagnostics};
 use nalgebra::{Isometry3, Point2, Translation3, UnitQuaternion, Vector3};
 use projection::camera_matrix::CameraMatrix;
@@ -110,9 +110,9 @@ impl LocalizationSimulation {
         let initial_camera_to_field = scenario.sample_camera_to_field(0.0);
         let truth_robot_to_field = robot_to_field_from_camera_to_field(&initial_camera_to_field);
         let initial_camera_matrix = camera_matrix(&truth_robot_to_field);
-        let (roll, pitch, _) = truth_robot_to_field.rotation.euler_angles();
+        let (roll, pitch, _) = truth_robot_to_field.inner.rotation.euler_angles();
         let initial_robot_to_local: FramedIsometry3<Robot, Local> = Isometry3::from_parts(
-            Translation3::new(0.0, 0.0, truth_robot_to_field.translation.z),
+            Translation3::new(0.0, 0.0, truth_robot_to_field.translation().z()),
             UnitQuaternion::from_euler_angles(roll, pitch, 0.0),
         )
         .framed_transform();
@@ -150,6 +150,7 @@ impl LocalizationSimulation {
                 time: Time::from_nanos(0),
                 inner: AssociationGeometry {
                     epoch: 0,
+                    generation: 0,
                     state: LocalizationState3D::Startup,
                     robot_to_local: initial_robot_to_local,
                     local_to_field: None,
@@ -249,7 +250,11 @@ impl LocalizationSimulation {
                     .scenario
                     .sample_camera_to_field(elapsed + delay.as_secs_f32());
                 let right_camera_to_field = delayed_left_camera_to_field
-                    * Isometry3::translation(crate::stereo_render::BASELINE, 0.0, 0.0);
+                    * FramedIsometry3::<Camera, Camera>::from_translation(
+                        crate::stereo_render::BASELINE,
+                        0.0,
+                        0.0,
+                    );
                 let reported_right_time = if self.config.assume_synchronized_stereo_timestamps {
                     time
                 } else {
@@ -261,8 +266,8 @@ impl LocalizationSimulation {
                     .measure(
                         time,
                         reported_right_time,
-                        &camera_to_field,
-                        &right_camera_to_field,
+                        &camera_to_field.inner,
+                        &right_camera_to_field.inner,
                     )
             }
         };
@@ -278,30 +283,40 @@ impl LocalizationSimulation {
             .step_index
             .is_multiple_of(interval_steps(FIELD_MARK_INTERVAL))
         {
-            let geometry = self.association_geometry().ok_or_else(|| {
-                eyre!("association geometry is unavailable at the simulation tick")
-            })?;
+            let geometry = self.association_geometry();
+            let status = self.localization.status();
             let mut observations = self
                 .sensors
                 .observe_landmarks(&camera_to_field, &current_camera_matrix);
             filter(time, &mut observations);
-            let associations = match self.config.association_mode {
-                AssociationMode::KnownCorrespondences => observations.true_associations,
-                AssociationMode::ProductionAssociation => {
-                    associate_visual_features(
-                        AssociationInput {
-                            visual_features: &observations.detections,
-                            robot_to_camera,
-                            geometry: &geometry.inner,
-                            camera_intrinsic: current_camera_matrix.intrinsics,
-                            field_dimensions: &self.field_dimensions,
-                            time,
+            let rpy = imu.roll_pitch_yaw.inner;
+            let association = match self.config.association_mode {
+                AssociationMode::KnownCorrespondences => {
+                    field_mark_association::AssociationResult {
+                        associations: observations.true_associations,
+                        source: if status.state == LocalizationState::Tracking {
+                            types::visual_localization::VisualAssociationSource::Tracking
+                        } else {
+                            types::visual_localization::VisualAssociationSource::Global
                         },
-                        &self.association_parameters,
-                    )
-                    .associations
+                        ..Default::default()
+                    }
                 }
+                AssociationMode::ProductionAssociation => associate_visual_features(
+                    AssociationInput {
+                        status: &status,
+                        attitude: Some(Orientation3::from_euler_angles(rpy.x, rpy.y, rpy.z)),
+                        tracking: geometry.as_ref().map(|g| &g.inner),
+                        visual_features: &observations.detections,
+                        robot_to_camera,
+                        camera_intrinsic: current_camera_matrix.intrinsics,
+                        field_dimensions: &self.field_dimensions,
+                        time,
+                    },
+                    &self.association_parameters,
+                ),
             };
+            let associations = association.associations;
             landmark_frame = Some(LandmarkFrameCounts {
                 ideal_visible: observations.ideal_visible_count,
                 emitted_detections: observations.detections.supported_feature_count(),
@@ -311,10 +326,10 @@ impl LocalizationSimulation {
             });
             if !associations.is_empty() {
                 let frame = VisualLocalizationFrame {
-                    epoch: geometry.inner.epoch,
-                    source: types::visual_localization::VisualAssociationSource::Tracking,
+                    epoch: status.epoch,
+                    generation: status.generation,
+                    source: association.source,
                     robot_to_camera,
-                    robot_to_local: geometry.inner.robot_to_local,
                     camera_intrinsic: current_camera_matrix.intrinsics,
                     associations,
                 };
@@ -338,7 +353,7 @@ impl LocalizationSimulation {
             time,
             estimate_time: self.localization.estimate().map(|estimate| estimate.time),
             imu,
-            truth_robot_to_field: robot_to_field.framed_transform(),
+            truth_robot_to_field: robot_to_field,
             raw_backend_robot_to_field: self
                 .localization
                 .estimate()
@@ -383,23 +398,25 @@ fn interval_steps(interval: std::time::Duration) -> usize {
 }
 
 fn framed_robot_to_camera() -> FramedIsometry3<Robot, Camera> {
-    fixed_robot_to_camera().framed_transform()
+    fixed_robot_to_camera()
 }
 
-pub(crate) fn camera_matrix(robot_to_field: &Isometry3<f32>) -> CameraMatrix {
-    let (_, _, yaw) = robot_to_field.rotation.euler_angles();
-    let ground_to_field = Isometry3::from_parts(
+pub(crate) fn camera_matrix(robot_to_field: &FramedIsometry3<Robot, Field>) -> CameraMatrix {
+    let (_, _, yaw) = robot_to_field.inner.rotation.euler_angles();
+    let ground_to_field: FramedIsometry3<Ground, Field> = Isometry3::from_parts(
         Translation3::new(
-            robot_to_field.translation.x,
-            robot_to_field.translation.y,
+            robot_to_field.translation().x(),
+            robot_to_field.translation().y(),
             0.0,
         ),
         UnitQuaternion::from_euler_angles(0.0, 0.0, yaw),
-    );
+    )
+    .framed_transform();
     let ground_to_robot: FramedIsometry3<Ground, Robot> =
-        (robot_to_field.inverse() * ground_to_field).framed_transform();
+        robot_to_field.inverse() * ground_to_field;
     let robot_to_head: FramedIsometry3<Robot, Head> = Isometry3::identity().framed_transform();
-    let head_to_camera: FramedIsometry3<Head, Camera> = fixed_robot_to_camera().framed_transform();
+    let head_to_camera: FramedIsometry3<Head, Camera> =
+        fixed_robot_to_camera() * robot_to_head.inverse();
     CameraMatrix::from_normalized_focal_and_center(
         nalgebra::vector![0.625, 0.625],
         Point2::new(0.5, 0.5),
@@ -413,24 +430,28 @@ pub(crate) fn camera_matrix(robot_to_field: &Isometry3<f32>) -> CameraMatrix {
 fn imu_state(
     scenario: &Scenario,
     elapsed: f32,
-    robot_to_field: &Isometry3<f32>,
-    camera_to_field: &Isometry3<f32>,
+    robot_to_field: &FramedIsometry3<Robot, Field>,
+    camera_to_field: &FramedIsometry3<Camera, Field>,
 ) -> ImuState {
     let dt = TICK_INTERVAL.as_secs_f32();
-    let (roll, pitch, yaw) = robot_to_field.rotation.euler_angles();
+    let (roll, pitch, yaw) = robot_to_field.inner.rotation.euler_angles();
     let (rotation_start, rotation_end, rotation_dt) = if elapsed + dt <= scenario.duration_seconds()
     {
         let next_camera = scenario.sample_camera_to_field(elapsed + dt);
         (
-            robot_to_field.rotation,
-            robot_to_field_from_camera_to_field(&next_camera).rotation,
+            robot_to_field.inner.rotation,
+            robot_to_field_from_camera_to_field(&next_camera)
+                .inner
+                .rotation,
             dt,
         )
     } else {
         let previous_camera = scenario.sample_camera_to_field((elapsed - dt).max(0.0));
         (
-            robot_to_field_from_camera_to_field(&previous_camera).rotation,
-            robot_to_field.rotation,
+            robot_to_field_from_camera_to_field(&previous_camera)
+                .inner
+                .rotation,
+            robot_to_field.inner.rotation,
             dt,
         )
     };
@@ -438,6 +459,7 @@ fn imu_state(
 
     let global_acceleration = trajectory_acceleration(scenario, elapsed, camera_to_field, dt);
     let gravity_in_robot = robot_to_field
+        .inner
         .rotation
         .inverse_transform_vector(&(global_acceleration + Vector3::new(0.0, 0.0, 9.81)));
     ImuState {
@@ -450,17 +472,19 @@ fn imu_state(
 fn trajectory_acceleration(
     scenario: &Scenario,
     elapsed: f32,
-    camera_to_field: &Isometry3<f32>,
+    camera_to_field: &FramedIsometry3<Camera, Field>,
     dt: f32,
 ) -> Vector3<f32> {
-    let position = camera_to_field.translation.vector;
+    let position = camera_to_field.translation().coords().inner;
     if elapsed + 2.0 * dt <= scenario.duration_seconds() {
         let next = scenario
             .sample_camera_to_field(elapsed + dt)
+            .inner
             .translation
             .vector;
         let after_next = scenario
             .sample_camera_to_field(elapsed + 2.0 * dt)
+            .inner
             .translation
             .vector;
         return (after_next - 2.0 * next + position) / dt.powi(2);
@@ -468,10 +492,12 @@ fn trajectory_acceleration(
     if elapsed >= 2.0 * dt {
         let previous = scenario
             .sample_camera_to_field(elapsed - dt)
+            .inner
             .translation
             .vector;
         let before_previous = scenario
             .sample_camera_to_field(elapsed - 2.0 * dt)
+            .inner
             .translation
             .vector;
         return (position - 2.0 * previous + before_previous) / dt.powi(2);
@@ -494,13 +520,20 @@ mod tests {
             let mirror = Isometry3::from_parts(
                 Translation3::identity(),
                 UnitQuaternion::from_euler_angles(0.0, 0.0, std::f32::consts::PI),
-            ) * own;
+            )
+            .framed_transform::<Field, Field>()
+                * own;
             // Smooth start/stop: this fixture tests field-branch recovery, not
             // the response to infinite acceleration in a piecewise-linear path.
             poses.extend((0..=150).map(|step| {
                 let u = step as f32 / 150.0;
                 let blend = u.powi(3) * (10.0 - 15.0 * u + 6.0 * u * u);
-                (1.0 + 3.0 * u, own.lerp_slerp(&mirror, blend))
+                (
+                    1.0 + 3.0 * u,
+                    own.inner
+                        .lerp_slerp(&mirror.inner, blend)
+                        .framed_transform(),
+                )
             }));
             mirror
         } else {
@@ -523,10 +556,6 @@ mod tests {
         config: SimulationConfig,
         count_at: impl Fn(i64) -> usize,
     ) -> LocalizationSimulation {
-        assert_eq!(
-            config.association_mode,
-            AssociationMode::ProductionAssociation
-        );
         let mut simulation = LocalizationSimulation::new(scenario, config).unwrap();
         assert_eq!(simulation.state(), LocalizationState3D::Startup);
         while simulation
@@ -555,7 +584,7 @@ mod tests {
         simulation
     }
 
-    fn sparse_config() -> SimulationConfig {
+    fn exact_sensor_config() -> SimulationConfig {
         SimulationConfig {
             landmark_pixel_sigma: 0.0,
             vo_translation_sigma_m: 0.0,
@@ -595,17 +624,18 @@ mod tests {
                         .scenario
                         .sample_camera_to_field(truth_time.as_nanos() as f32 * 1.0e-9),
                 );
-                let error = (pose.inner.translation.vector - truth.translation.vector).norm();
+                let error = (pose.translation() - truth.translation()).norm();
                 maximum_translation_error = maximum_translation_error.max(error);
                 maximum_rotation_error =
-                    maximum_rotation_error.max(pose.inner.rotation.angle_to(&truth.rotation));
+                    maximum_rotation_error.max(pose.inner.rotation.angle_to(&truth.inner.rotation));
                 // Accuracy is checked by the stationary and smooth-trajectory tests.
                 // These discontinuous-motion fixtures test lifecycle and field branch.
                 assert!(error.is_finite());
-                assert!(pose.inner.rotation.angle_to(&truth.rotation) < 5.0_f32.to_radians());
+                assert!(pose.inner.rotation.angle_to(&truth.inner.rotation) < 5.0_f32.to_radians());
             }
             if let Some(frame) = &sample.landmark_frame
                 && frame.emitted_detections < 3
+                && simulation.config.association_mode == AssociationMode::ProductionAssociation
             {
                 assert_eq!(frame.associated, 0);
             }
@@ -621,7 +651,7 @@ mod tests {
     fn sparse_stationary_startup_tracking_loss_and_recovery() {
         let simulation = run_sparse(
             sparse_scenario(10.0, false),
-            sparse_config(),
+            exact_sensor_config(),
             |time| match time / 1_000_000_000 {
                 0 => 0,
                 1 => 1,
@@ -634,8 +664,8 @@ mod tests {
             transitions,
             vec![
                 (0, "Startup"),
-                // The freshly seeded graph receives its next IMU/VO samples before solving.
-                (3_020_000_000, "Tracking"),
+                // Bootstrap preserves the already-ingested IMU/VO window.
+                (3_000_000_000, "Tracking"),
                 (7_900_000_000, "LostTrack"),
                 (9_000_000_000, "Tracking"),
             ]
@@ -662,55 +692,72 @@ mod tests {
 
     #[test]
     fn sparse_recovery_keeps_opponent_half_and_heading() {
-        let simulation = run_sparse(sparse_scenario(10.0, true), sparse_config(), |time| {
-            if (5_000_000_000..8_000_000_000).contains(&time) {
-                2
-            } else {
-                3
+        for association_mode in [
+            AssociationMode::ProductionAssociation,
+            AssociationMode::KnownCorrespondences,
+        ] {
+            let simulation = run_sparse(
+                sparse_scenario(10.0, true),
+                SimulationConfig {
+                    association_mode,
+                    ..exact_sensor_config()
+                },
+                |time| {
+                    if (5_000_000_000..8_000_000_000).contains(&time) {
+                        2
+                    } else {
+                        3
+                    }
+                },
+            );
+            let transitions = state_transitions(&simulation);
+            assert_eq!(
+                transitions,
+                vec![
+                    (0, "Startup"),
+                    (100_000_000, "Tracking"),
+                    (6_900_000_000, "LostTrack"),
+                    (8_000_000_000, "Tracking"),
+                ]
+            );
+            for sample in simulation
+                .history()
+                .iter()
+                .filter(|sample| sample.time.as_nanos() >= 4_000_000_000)
+            {
+                let estimate = match sample.state {
+                    LocalizationState3D::Tracking { estimate, .. } => estimate,
+                    LocalizationState3D::LostTrack {
+                        last_known_estimate,
+                        ..
+                    } => last_known_estimate,
+                    LocalizationState3D::Startup => panic!("recovery must not restart globally"),
+                };
+                assert!(estimate.robot_to_field.translation().x() > 0.0);
             }
-        });
-        let transitions = state_transitions(&simulation);
-        assert_eq!(
-            transitions,
-            vec![
-                (0, "Startup"),
-                (20_000_000, "Tracking"),
-                (6_900_000_000, "LostTrack"),
-                (8_000_000_000, "Tracking"),
-            ]
-        );
-        for sample in simulation
-            .history()
-            .iter()
-            .filter(|sample| sample.time.as_nanos() >= 4_000_000_000)
-        {
-            let estimate = match sample.state {
-                LocalizationState3D::Tracking { estimate, .. } => estimate,
-                LocalizationState3D::LostTrack {
-                    last_known_estimate,
-                    ..
-                } => last_known_estimate,
-                LocalizationState3D::Startup => panic!("recovery must not restart globally"),
-            };
-            assert!(estimate.robot_to_field.translation().x() > 0.0);
         }
     }
 
     #[test]
-    fn sparse_expired_recovery_prior_does_not_restart_globally() {
-        let simulation = run_sparse(sparse_scenario(10.0, false), sparse_config(), |time| {
-            if (1_000_000_000..9_000_000_000).contains(&time) {
-                2
-            } else {
-                3
-            }
-        });
+    fn sparse_expired_tracking_prior_recovers_with_heading() {
+        let simulation = run_sparse(
+            sparse_scenario(10.0, false),
+            exact_sensor_config(),
+            |time| {
+                if (1_000_000_000..9_000_000_000).contains(&time) {
+                    2
+                } else {
+                    3
+                }
+            },
+        );
         assert_eq!(
             state_transitions(&simulation),
             vec![
                 (0, "Startup"),
-                (20_000_000, "Tracking"),
+                (100_000_000, "Tracking"),
                 (2_900_000_000, "LostTrack"),
+                (9_000_000_000, "Tracking"),
             ]
         );
         for sample in simulation
@@ -720,14 +767,14 @@ mod tests {
         {
             if let Some(frame) = &sample.landmark_frame {
                 assert_eq!(frame.emitted_detections, 3);
-                assert_eq!(frame.associated, 0);
+                assert_eq!(frame.associated, 3);
             }
         }
     }
 
     #[test]
     fn sparse_timeout_boundary_requires_a_post_loss_frame() {
-        let simulation = run_sparse(sparse_scenario(4.0, false), sparse_config(), |time| {
+        let simulation = run_sparse(sparse_scenario(4.0, false), exact_sensor_config(), |time| {
             if (1_000_000_000..2_900_000_000).contains(&time) {
                 2
             } else {
@@ -738,7 +785,7 @@ mod tests {
             state_transitions(&simulation),
             vec![
                 (0, "Startup"),
-                (20_000_000, "Tracking"),
+                (100_000_000, "Tracking"),
                 (2_900_000_000, "LostTrack"),
                 (3_000_000_000, "Tracking"),
             ]
@@ -748,10 +795,10 @@ mod tests {
             .iter()
             .find(|sample| sample.time.as_nanos() == 2_900_000_000)
             .unwrap();
-        assert_eq!(boundary.landmark_frame.as_ref().unwrap().associated, 3);
+        assert_eq!(boundary.landmark_frame.as_ref().unwrap().associated, 0);
         assert!(
             matches!(boundary.state, LocalizationState3D::LostTrack { .. }),
-            "matches alone are not a backend acknowledgement"
+            "shared dispatch requires exposure after the loss boundary"
         );
     }
 
@@ -793,13 +840,14 @@ mod tests {
     #[test]
     fn sparse_recovery_with_four_or_five_features() {
         for count in [4, 5] {
-            let simulation = run_sparse(sparse_scenario(6.0, false), sparse_config(), |time| {
-                if (1_000_000_000..4_000_000_000).contains(&time) {
-                    2
-                } else {
-                    count
-                }
-            });
+            let simulation =
+                run_sparse(sparse_scenario(6.0, false), exact_sensor_config(), |time| {
+                    if (1_000_000_000..4_000_000_000).contains(&time) {
+                        2
+                    } else {
+                        count
+                    }
+                });
             assert_eq!(
                 simulation.history()[0]
                     .landmark_frame
@@ -813,7 +861,7 @@ mod tests {
                 state_transitions(&simulation),
                 vec![
                     (0, "Startup"),
-                    (20_000_000, "Tracking"),
+                    (100_000_000, "Tracking"),
                     (2_900_000_000, "LostTrack"),
                     (4_000_000_000, "Tracking"),
                 ]
@@ -827,7 +875,8 @@ mod tests {
             Translation3::new(-4.5, 0.0, 0.55),
             UnitQuaternion::from_euler_angles(0.0, 0.2, std::f32::consts::FRAC_PI_6),
         );
-        let camera = robot * fixed_robot_to_camera().inverse();
+        let camera =
+            FramedIsometry3::<Robot, Field>::wrap(robot) * fixed_robot_to_camera().inverse();
         let scenario = Scenario::new(
             "sparse_boundary",
             6.0,
@@ -869,7 +918,7 @@ mod tests {
             state_transitions(&simulation),
             vec![
                 (0, "Startup"),
-                (20_000_000, "Tracking"),
+                (100_000_000, "Tracking"),
                 (2_900_000_000, "LostTrack"),
                 (4_000_000_000, "Tracking"),
             ]
@@ -882,7 +931,8 @@ mod tests {
             Translation3::new(-3.5, 1.5, 0.55),
             UnitQuaternion::from_euler_angles(0.0, -0.1, 0.5),
         );
-        let camera = robot * fixed_robot_to_camera().inverse();
+        let camera =
+            FramedIsometry3::<Robot, Field>::wrap(robot) * fixed_robot_to_camera().inverse();
         let scenario = Scenario::new(
             "distant_stationary",
             3.0,
@@ -921,58 +971,20 @@ mod tests {
 
     #[test]
     fn stationary_known_correspondences_lock_with_finite_output_near_truth() {
-        let mut simulation = LocalizationSimulation::new(
-            Scenario::stationary(),
-            SimulationConfig {
-                association_mode: AssociationMode::KnownCorrespondences,
-                landmark_pixel_sigma: 0.0,
-                vo_translation_sigma_m: 0.0,
-                vo_rotation_sigma_rad: 0.0,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        simulation.run_to_end().unwrap();
-        let last = simulation.history.last().unwrap();
-        assert_eq!(last.global_visual_lock, GlobalVisualLock::Locked);
-        let raw = last.raw_backend_robot_to_field.as_ref().unwrap();
-        assert!(
-            raw.inner
-                .translation
-                .vector
-                .iter()
-                .all(|value| value.is_finite())
-        );
-        assert!(
-            raw.inner
-                .rotation
-                .coords
-                .iter()
-                .all(|value| value.is_finite())
-        );
-        let estimate = last
-            .live_robot_to_field
-            .expect("known correspondences establish live localization")
-            .inner;
-        let truth = last.truth_robot_to_field.inner;
-        let translation_error = (estimate.translation.vector - truth.translation.vector).norm();
-        assert!(
-            translation_error < 0.1,
-            "translation error was {translation_error}"
-        );
-        assert!(estimate.rotation.angle_to(&truth.rotation) < 0.5_f32.to_radians());
+        check_stationary_lock(AssociationMode::KnownCorrespondences, 0.5_f32.to_radians());
     }
 
     #[test]
     fn production_association_acquires_global_lock() {
+        check_stationary_lock(AssociationMode::ProductionAssociation, 5.0_f32.to_radians());
+    }
+
+    fn check_stationary_lock(association_mode: AssociationMode, rotation_tolerance: f32) {
         let mut simulation = LocalizationSimulation::new(
             Scenario::stationary(),
             SimulationConfig {
-                association_mode: AssociationMode::ProductionAssociation,
-                landmark_pixel_sigma: 0.0,
-                vo_translation_sigma_m: 0.0,
-                vo_rotation_sigma_rad: 0.0,
-                ..Default::default()
+                association_mode,
+                ..exact_sensor_config()
             },
         )
         .unwrap();
@@ -981,28 +993,31 @@ mod tests {
             simulation.history.iter().any(|sample| sample
                 .landmark_frame
                 .as_ref()
-                .is_some_and(|counts| counts.associated > 0)),
-            "maximum visible landmarks: {}",
-            simulation
-                .history
-                .iter()
-                .filter_map(|sample| sample.landmark_frame.as_ref())
-                .map(|counts| counts.ideal_visible)
-                .max()
-                .unwrap_or(0)
-        );
-        assert_eq!(
-            simulation.history.last().unwrap().global_visual_lock,
-            GlobalVisualLock::Locked
+                .is_some_and(|frame| frame.associated > 0)),
+            "{association_mode:?} emitted no associations"
         );
         let last = simulation.history.last().unwrap();
-        let truth = last.truth_robot_to_field.inner;
+        assert_eq!(last.global_visual_lock, GlobalVisualLock::Locked);
+        let raw = last.raw_backend_robot_to_field.as_ref().unwrap();
+        assert!(
+            raw.inner
+                .translation
+                .vector
+                .iter()
+                .chain(raw.inner.rotation.coords.iter())
+                .all(|value| value.is_finite())
+        );
         let estimate = last
             .live_robot_to_field
-            .expect("locked production association has a live pose")
+            .expect("stationary localization has a live pose")
             .inner;
-        assert!((estimate.translation.vector - truth.translation.vector).norm() < 0.1);
-        assert!(estimate.rotation.angle_to(&truth.rotation) < 5.0_f32.to_radians());
+        let truth = last.truth_robot_to_field.inner;
+        let translation_error = (estimate.translation.vector - truth.translation.vector).norm();
+        assert!(
+            translation_error < 0.1,
+            "translation error was {translation_error}"
+        );
+        assert!(estimate.rotation.angle_to(&truth.rotation) < rotation_tolerance);
     }
 
     #[test]
@@ -1084,7 +1099,7 @@ mod tests {
             .robot_to_local
             .translation()
             .z();
-        assert!((fitted_height - truth.translation.vector.z).abs() < 0.01);
+        assert!((fitted_height - truth.translation().z()).abs() < 0.01);
         assert!(counts.associated >= 3);
     }
 
@@ -1112,7 +1127,9 @@ mod tests {
                 AssociationInput {
                     visual_features: &observations.detections,
                     robot_to_camera: framed_robot_to_camera(),
-                    geometry: &simulation.association_geometry().unwrap().inner,
+                    status: &simulation.localization.status(),
+                    tracking: None,
+                    attitude: Some(Orientation3::wrap(robot_to_field.inner.rotation)),
                     camera_intrinsic: camera_matrix.intrinsics,
                     field_dimensions: &field,
                     time: Time::from_nanos(0),
@@ -1227,10 +1244,7 @@ mod tests {
             Scenario::field_figure_eight_twice(),
             SimulationConfig {
                 association_mode,
-                landmark_pixel_sigma: 0.0,
-                vo_translation_sigma_m: 0.0,
-                vo_rotation_sigma_rad: 0.0,
-                ..Default::default()
+                ..exact_sensor_config()
             },
         )
         .expect("simulation initializes");
@@ -1258,12 +1272,8 @@ mod tests {
             first.time
         );
         let mut squared_errors = 0.0;
-        let mut along_track_errors = 0.0;
         let mut sample_count = 0;
-        for samples in simulation.history.windows(3) {
-            let [previous, current, next] = samples else {
-                unreachable!("windows have length three")
-            };
+        for current in &simulation.history[1..simulation.history.len() - 1] {
             let Some(estimate) = current.live_robot_to_field.map(|pose| pose.inner) else {
                 continue;
             };
@@ -1273,12 +1283,8 @@ mod tests {
                     .scenario
                     .sample_camera_to_field(truth_time.as_nanos() as f32 * 1.0e-9),
             );
-            let error = estimate.translation.vector - truth.translation.vector;
-            let direction = (next.truth_robot_to_field.inner.translation.vector
-                - previous.truth_robot_to_field.inner.translation.vector)
-                .normalize();
+            let error = estimate.translation.vector - truth.inner.translation.vector;
             squared_errors += error.norm_squared();
-            along_track_errors += error.dot(&direction);
             sample_count += 1;
         }
         assert!(
@@ -1287,10 +1293,7 @@ mod tests {
             simulation.history.len() - 2
         );
         let translation_rms = (squared_errors / sample_count as f32).sqrt();
-        let mean_along_track_error = along_track_errors / sample_count as f32;
-        eprintln!(
-            "{association_mode:?}: figure8 rms={translation_rms} along={mean_along_track_error} samples={sample_count}"
-        );
+        eprintln!("{association_mode:?}: figure8 rms={translation_rms} samples={sample_count}");
 
         assert!(
             translation_rms < 0.1,

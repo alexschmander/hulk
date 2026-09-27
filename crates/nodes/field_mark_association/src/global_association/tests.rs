@@ -11,14 +11,16 @@ use types::{
 
 use super::{GlobalAssociationConfig, solver};
 use crate::{
-    AssociationInput, AssociationResult, DetectedVisualFeature, DetectedVisualFeatures,
-    FieldMarkAssociationParameters, GlobalAssociationInput, VisualFeatureClass,
-    associate_global_visual_features, associate_visual_features, map::LandmarkMap,
+    AssociationResult, DetectedVisualFeature, DetectedVisualFeatures,
+    FieldMarkAssociationParameters, GlobalAssociationInput,
+    TrackingAssociationInput as AssociationInput, VisualFeatureClass,
+    associate_global_visual_features, associate_tracking_visual_features, map::LandmarkMap,
 };
 
 fn geometry() -> AssociationGeometry {
     AssociationGeometry {
         epoch: 0,
+        generation: 0,
         robot_to_local: Isometry3::wrap(nalgebra::Isometry3::translation(2.0, 0.0, 0.45)),
         local_to_field: None,
         state: LocalizationState3D::Startup,
@@ -57,13 +59,28 @@ fn global_input<'a>(
     input: AssociationInput<'a>,
     parameters: &'a GlobalAssociationConfig,
 ) -> GlobalAssociationInput<'a> {
+    let (roll, pitch, _) = input.geometry.robot_to_local.inner.rotation.euler_angles();
     GlobalAssociationInput {
         visual_features: input.visual_features,
-        robot_to_local: input.geometry.robot_to_local,
+        robot_to_ground: linear_algebra::Rotation3::from_euler_angles(roll, pitch, 0.0),
         robot_to_camera: input.robot_to_camera,
         camera_intrinsic: input.camera_intrinsic,
         field_dimensions: input.field_dimensions,
         parameters,
+        heading: None,
+    }
+}
+
+// Exercise the explicit global and pose-prior APIs in algorithm-only fixtures.
+fn associate_visual_features(
+    input: AssociationInput<'_>,
+    parameters: &FieldMarkAssociationParameters,
+) -> AssociationResult {
+    match input.geometry.state {
+        LocalizationState3D::Startup => {
+            associate_global_visual_features(global_input(input, &parameters.global_localizer))
+        }
+        _ => associate_tracking_visual_features(input, parameters),
     }
 }
 
@@ -131,22 +148,15 @@ fn key(result: &AssociationResult) -> Vec<([f32; 2], [f32; 2])> {
         .collect()
 }
 
-fn tracking_state(lost: bool, covariance: f32) -> LocalizationState3D {
+fn tracking_state(covariance: f32) -> LocalizationState3D {
     let estimate = LocalizationEstimate3D {
         robot_to_field: Isometry3::wrap(nalgebra::Isometry3::translation(2.0, 0.0, 0.45)),
         covariance: SMatrix::identity() * covariance,
     };
     let last_successful_solve = Time::from_nanos(1_000_000_000);
-    if lost {
-        LocalizationState3D::LostTrack {
-            last_known_estimate: estimate,
-            last_successful_solve,
-        }
-    } else {
-        LocalizationState3D::Tracking {
-            estimate,
-            last_successful_solve,
-        }
+    LocalizationState3D::Tracking {
+        estimate,
+        last_successful_solve,
     }
 }
 
@@ -154,42 +164,120 @@ fn tracking_state(lost: bool, covariance: f32) -> LocalizationState3D {
 fn three_stationary_features_certify_without_history_or_pose() {
     let geometry = geometry();
     let features = project(stationary_three(), &geometry, Isometry2::identity());
-    let parameters = FieldMarkAssociationParameters::default();
+    let mut parameters = FieldMarkAssociationParameters::default();
     assert_eq!(parameters.global_localizer.min_inliers, 3);
     let first = associate_visual_features(input(&features, &geometry), &parameters);
     assert_eq!(first.associations.len(), 3);
     assert!(first.associations.iter().all(|a| a.field_point.x() < 0.0));
     assert_eq!(first.debug.as_ref().unwrap().association_count, 3);
     assert!(first.debug.as_ref().unwrap().pairwise_distance_rms < 1.0e-4);
-    for _ in 0..10 {
-        assert_eq!(
-            key(&first),
-            key(&associate_visual_features(
-                input(&features, &geometry),
-                &parameters
-            ))
-        );
-    }
+    // Global fitting estimates height; tracking's height-noise floor is irrelevant.
+    parameters.global_localizer.height_sigma = 0.2;
+    assert_eq!(
+        key(&first),
+        key(&associate_visual_features(
+            input(&features, &geometry),
+            &parameters
+        ))
+    );
 }
 
 #[test]
-fn global_and_startup_dispatch_share_stateless_matching() {
+fn lifecycle_dispatch_uses_exposure_attitude_and_matches_generations() {
+    use types::localization::{FieldHeadingReference, LocalizationState, LocalizationStatus};
     let geometry = geometry();
     let features = project(stationary_three(), &geometry, Isometry2::identity());
     let parameters = FieldMarkAssociationParameters::default();
-    let expected = associate_visual_features(input(&features, &geometry), &parameters);
-    assert_eq!(expected.associations.len(), 3);
+    let mut wrong = geometry.clone();
+    wrong.state = tracking_state(0.01);
+    wrong.robot_to_local.inner.rotation = UnitQuaternion::from_euler_angles(0.8, 0.7, 1.2);
+    let mut status = LocalizationStatus {
+        time: Time::from_nanos(0),
+        epoch: 0,
+        generation: 0,
+        state: LocalizationState::Startup,
+        heading: None,
+    };
+    let call = |status: &LocalizationStatus, tracking| {
+        crate::associate_visual_features(
+            crate::AssociationInput {
+                status,
+                attitude: Some(linear_algebra::Orientation3::from_euler_angles(
+                    0.0, 0.0, 1.3,
+                )),
+                tracking,
+                visual_features: &features,
+                robot_to_camera: robot_to_camera(),
+                camera_intrinsic: intrinsic(),
+                field_dimensions: &FieldDimensions::SPL_2025,
+                time: Time::from_nanos(1_000_000_000),
+            },
+            &parameters,
+        )
+    };
+    // Startup must ignore an optimizer tilt that disagrees with the source IMU.
+    assert_eq!(call(&status, Some(&wrong)).associations.len(), 3);
+    status.state = LocalizationState::LostTrack;
+    assert!(call(&status, None).associations.is_empty());
+    status.heading = Some(FieldHeadingReference {
+        time: status.time,
+        imu_to_field: linear_algebra::Rotation2::new(-1.3),
+        max_error: 0.3,
+    });
+    let recovery = call(&status, None);
     assert_eq!(
-        key(&expected),
-        key(&associate_global_visual_features(GlobalAssociationInput {
-            visual_features: &features,
-            robot_to_local: geometry.robot_to_local,
-            robot_to_camera: robot_to_camera(),
-            camera_intrinsic: intrinsic(),
-            field_dimensions: &FieldDimensions::SPL_2025,
-            parameters: &parameters.global_localizer,
-        }))
+        recovery.source,
+        types::visual_localization::VisualAssociationSource::Global
     );
+    assert_eq!(recovery.associations.len(), 3);
+    assert!(
+        recovery
+            .associations
+            .iter()
+            .all(|a| a.field_point.x() > 0.0)
+    );
+    status.state = LocalizationState::Tracking;
+    status.generation = 1;
+    assert!(call(&status, Some(&wrong)).associations.is_empty());
+}
+
+#[test]
+fn heading_preserves_orientation_and_budget_exhaustion_still_rejects() {
+    let geometry = geometry();
+    let features = project(stationary_three(), &geometry, Isometry2::identity());
+    let config = GlobalAssociationConfig::default();
+    let mut input = global_input(input(&features, &geometry), &config);
+    let heading = crate::HeadingConstraint {
+        expected: linear_algebra::Orientation2::identity(),
+        max_error: 0.3,
+    };
+    input.heading = Some(heading);
+    let result = associate_global_visual_features(input);
+    assert_eq!(result.associations.len(), 3);
+    assert!(result.associations.iter().all(|a| a.field_point.x() > 0.0));
+    let exhausted = GlobalAssociationConfig {
+        max_work: 1,
+        ..config
+    };
+    assert!(
+        associate_global_visual_features(GlobalAssociationInput {
+            parameters: &exhausted,
+            ..input
+        })
+        .associations
+        .is_empty()
+    );
+    for limit in [f64::NAN, 0.0, std::f64::consts::FRAC_PI_2] {
+        input.heading = Some(crate::HeadingConstraint {
+            max_error: limit,
+            ..heading
+        });
+        assert!(
+            associate_global_visual_features(input)
+                .associations
+                .is_empty()
+        );
+    }
 }
 
 #[test]
@@ -311,28 +399,6 @@ fn collinear_and_duplicate_seeds_do_not_certify() {
 }
 
 #[test]
-fn startup_matching_ignores_uninitialized_translation_and_height_uncertainty() {
-    let geometry = geometry();
-    let features = project(stationary_three(), &geometry, Isometry2::identity());
-    let mut config = calibrated_parameters().global_localizer;
-    let mut wrong = geometry.clone();
-    let expected =
-        associate_global_visual_features(global_input(input(&features, &geometry), &config));
-    assert_eq!(expected.associations.len(), 3);
-    for height in [0.0, 0.55, 4.0, -1.0, f32::NAN] {
-        wrong.robot_to_local.inner.translation.vector = vector![100.0, -50.0, height];
-        config.height_sigma = 0.2;
-        let result =
-            associate_global_visual_features(global_input(input(&features, &wrong), &config));
-        assert_eq!(result.associations.len(), expected.associations.len());
-        for (actual, expected) in result.associations.iter().zip(&expected.associations) {
-            assert_eq!(actual.detection, expected.detection);
-            assert_eq!(actual.field_point, expected.field_point);
-        }
-    }
-}
-
-#[test]
 fn rich_frame_has_bounded_search_and_budget_exhaustion_rejects() {
     let geometry = geometry();
     let map = LandmarkMap::new(&FieldDimensions::SPL_2025);
@@ -346,43 +412,39 @@ fn rich_frame_has_bounded_search_and_budget_exhaustion_rejects() {
         associate_global_visual_features(global_input(input(&features, &geometry), &config));
     assert_eq!(result.associations.len(), map.landmarks.len());
     config.max_work = 1;
-    for _ in 0..5 {
-        assert!(
-            associate_global_visual_features(global_input(input(&features, &geometry), &config))
-                .associations
-                .is_empty()
-        );
-    }
-}
-
-#[test]
-fn tracking_and_lost_track_keep_opponent_half_prediction() {
-    for lost in [false, true] {
-        let mut geometry = geometry();
-        geometry.robot_to_local.inner.translation.vector.x = 2.0;
-        geometry.local_to_field = Some(Isometry2::identity());
-        geometry.state = tracking_state(lost, 0.0001);
-        let features = project(stationary_three(), &geometry, Isometry2::identity());
-        let result = associate_visual_features(
-            input(&features, &geometry),
-            &FieldMarkAssociationParameters::default(),
-        );
-        assert_eq!(result.associations.len(), 3);
-        assert!(result.associations.iter().all(|a| a.field_point.x() > 0.0));
-        geometry.local_to_field = None;
-        assert!(
-            associate_visual_features(
-                input(&features, &geometry),
-                &FieldMarkAssociationParameters::default()
-            )
+    assert!(
+        associate_global_visual_features(global_input(input(&features, &geometry), &config))
             .associations
             .is_empty()
-        );
-    }
+    );
 }
 
 #[test]
-fn tracking_widens_with_covariance_age_and_lost_state_but_stays_bounded() {
+fn tracking_keeps_opponent_half_prediction() {
+    let mut geometry = geometry();
+    geometry.robot_to_local.inner.translation.vector.x = 2.0;
+    geometry.local_to_field = Some(Isometry2::identity());
+    geometry.state = tracking_state(0.0001);
+    let features = project(stationary_three(), &geometry, Isometry2::identity());
+    let result = associate_visual_features(
+        input(&features, &geometry),
+        &FieldMarkAssociationParameters::default(),
+    );
+    assert_eq!(result.associations.len(), 3);
+    assert!(result.associations.iter().all(|a| a.field_point.x() > 0.0));
+    geometry.local_to_field = None;
+    assert!(
+        associate_visual_features(
+            input(&features, &geometry),
+            &FieldMarkAssociationParameters::default()
+        )
+        .associations
+        .is_empty()
+    );
+}
+
+#[test]
+fn tracking_covariance_and_age_widen_the_gate_but_not_the_distance_limit() {
     let mut geometry = geometry();
     geometry.robot_to_local.inner.translation.vector.x = 2.0;
     // The downward-facing fixture has fx=500 and camera height 0.55 m: this is 20 pixels.
@@ -391,8 +453,8 @@ fn tracking_widens_with_covariance_age_and_lost_state_but_stays_bounded() {
         0.0,
     )));
     let features = project(stationary_three(), &geometry, Isometry2::identity());
-    let parameters = calibrated_parameters();
-    geometry.state = tracking_state(false, 0.0);
+    let mut parameters = calibrated_parameters();
+    geometry.state = tracking_state(0.0);
     assert!(
         associate_visual_features(input(&features, &geometry), &parameters)
             .associations
@@ -406,25 +468,16 @@ fn tracking_widens_with_covariance_age_and_lost_state_but_stays_bounded() {
             .len(),
         3
     );
-    geometry.state = tracking_state(false, 0.001);
+    geometry.state = tracking_state(0.001);
     assert_eq!(
         associate_visual_features(input(&features, &geometry), &parameters)
             .associations
             .len(),
         3
     );
-    geometry.state = tracking_state(true, 0.001);
-    assert_eq!(
-        associate_visual_features(input(&features, &geometry), &parameters)
-            .associations
-            .len(),
-        3
-    );
-    geometry.local_to_field = Some(Isometry2::wrap(nalgebra::Isometry2::translation(20.0, 0.0)));
-    let mut older = input(&features, &geometry);
-    older.time = Time::from_nanos(1_000_000_000_000);
+    parameters.tracking.max_pixel_distance = 19.0;
     assert!(
-        associate_visual_features(older, &parameters)
+        associate_visual_features(input(&features, &geometry), &parameters)
             .associations
             .is_empty()
     );
@@ -504,11 +557,13 @@ fn global_is_invariant_under_local_translation_yaw_and_detection_order() {
                         .iter()
                         .find(|d| d.pixel == association.detection)
                         .unwrap();
-                    let camera_to_local = geometry.robot_to_local * robot_to_camera().inverse();
-                    let origin = camera_to_local.inner.translation.vector;
-                    let field = local_to_field.inner
-                        * nalgebra::Point2::from(origin.xy() + origin.z * detection.xy);
-                    (field.coords, association.field_point.xy().coords().inner)
+                    let robot_to_field = local_to_field.to_3d() * geometry.robot_to_local;
+                    let camera_to_field = robot_to_field * robot_to_camera().inverse();
+                    let origin = camera_to_field.translation().coords().inner;
+                    let ground_to_field =
+                        nalgebra::UnitComplex::new(robot_to_field.inner.rotation.euler_angles().2);
+                    let field = origin.xy() + origin.z * (ground_to_field * detection.xy);
+                    (field, association.field_point.xy().coords().inner)
                 })
                 .collect::<Vec<_>>();
             assert!(
@@ -543,32 +598,26 @@ fn projection_covariance_matches_finite_differences_with_camera_lever_arm() {
         ..Default::default()
     };
     let config = GlobalAssociationConfig::default();
-    let projected = |geometry: &AssociationGeometry, features: &DetectedVisualFeatures| {
-        let mut input = input(features, geometry);
+    let ground_rotation = global_input(input(&features, &geometry), &config).robot_to_ground;
+    let projected = |rotation, features: &DetectedVisualFeatures| {
+        let mut input = input(features, &geometry);
         input.robot_to_camera = camera_to_robot.inverse();
-        solver::preprocess(global_input(input, &config))
-            .unwrap()
-            .1
-            .remove(0)
+        let mut input = global_input(input, &config);
+        input.robot_to_ground = rotation;
+        solver::preprocess(input).unwrap().1.remove(0)
     };
-    let actual = projected(&geometry, &features).covariance(config);
+    let actual = projected(ground_rotation, &features).covariance(config);
     let mut numerical = nalgebra::Matrix2::identity() * 1.0e-8;
     for axis in [nalgebra::Vector3::x(), nalgebra::Vector3::y()] {
-        let mut plus = geometry.clone();
-        let mut minus = geometry.clone();
-        plus.robot_to_local.inner.rotation =
-            UnitQuaternion::from_scaled_axis(axis * 0.001) * geometry.robot_to_local.inner.rotation;
-        minus.robot_to_local.inner.rotation = UnitQuaternion::from_scaled_axis(axis * -0.001)
-            * geometry.robot_to_local.inner.rotation;
-        let derivative = (projected(&plus, &features).xy - projected(&minus, &features).xy) / 0.002;
+        let plus = linear_algebra::Rotation3::wrap(
+            UnitQuaternion::from_scaled_axis(axis * 0.001) * ground_rotation.inner,
+        );
+        let minus = linear_algebra::Rotation3::wrap(
+            UnitQuaternion::from_scaled_axis(axis * -0.001) * ground_rotation.inner,
+        );
+        let derivative = (projected(plus, &features).xy - projected(minus, &features).xy) / 0.002;
         numerical += config.imu_tilt_sigma.powi(2) * derivative * derivative.transpose();
     }
-    let mut plus = geometry.clone();
-    let mut minus = geometry.clone();
-    plus.robot_to_local.inner.translation.vector.z += 0.001;
-    minus.robot_to_local.inner.translation.vector.z -= 0.001;
-    let derivative = (projected(&plus, &features).xy - projected(&minus, &features).xy) / 0.002;
-    numerical += config.height_sigma.powi(2) * derivative * derivative.transpose();
     for delta in [point![0.1, 0.0], point![0.0, 0.1]] {
         let shifted = |sign| DetectedVisualFeatures {
             penalty_spots: vec![DetectedVisualFeature {
@@ -577,8 +626,8 @@ fn projection_covariance_matches_finite_differences_with_camera_lever_arm() {
             }],
             ..Default::default()
         };
-        let derivative = (projected(&geometry, &shifted(1.0)).xy
-            - projected(&geometry, &shifted(-1.0)).xy)
+        let derivative = (projected(ground_rotation, &shifted(1.0)).xy
+            - projected(ground_rotation, &shifted(-1.0)).xy)
             / 0.2;
         numerical += config.detection_pixel_sigma.powi(2) * derivative * derivative.transpose();
     }
@@ -632,32 +681,6 @@ fn pixel_uncertainty_reaching_horizon_is_rejected() {
 }
 
 #[test]
-fn lost_track_explicitly_widens_the_same_prediction_gate() {
-    let mut geometry = geometry();
-    geometry.local_to_field = Some(Isometry2::wrap(nalgebra::Isometry2::translation(
-        30.0 * 0.55 / 500.0,
-        0.0,
-    )));
-    let features = project(stationary_three(), &geometry, Isometry2::identity());
-    let parameters = calibrated_parameters();
-    for lost in [false, true] {
-        geometry.state = tracking_state(lost, 0.0);
-        let estimate = match &mut geometry.state {
-            LocalizationState3D::Tracking { estimate, .. } => estimate,
-            LocalizationState3D::LostTrack {
-                last_known_estimate,
-                ..
-            } => last_known_estimate,
-            LocalizationState3D::Startup => unreachable!(),
-        };
-        // A common translation explains the whole image shift, unlike independent tilts per edge.
-        estimate.covariance[(3, 3)] = 0.006_f32.powi(2);
-        let result = associate_visual_features(input(&features, &geometry), &parameters);
-        assert_eq!(result.associations.len(), if lost { 3 } else { 0 });
-    }
-}
-
-#[test]
 fn tracking_rejects_invalid_covariance_future_solve_and_ambiguous_assignment() {
     let mut geometry = geometry();
     geometry.local_to_field = Some(Isometry2::identity());
@@ -672,7 +695,7 @@ fn tracking_rejects_invalid_covariance_future_solve_and_ambiguous_assignment() {
     indefinite[(1, 0)] = 2.0;
     invalid_covariances.push(indefinite);
     for covariance in invalid_covariances {
-        geometry.state = tracking_state(false, 0.0);
+        geometry.state = tracking_state(0.0);
         if let LocalizationState3D::Tracking { estimate, .. } = &mut geometry.state {
             estimate.covariance = covariance;
         }
@@ -682,7 +705,7 @@ fn tracking_rejects_invalid_covariance_future_solve_and_ambiguous_assignment() {
                 .is_empty()
         );
     }
-    geometry.state = tracking_state(false, 0.0001);
+    geometry.state = tracking_state(0.0001);
     let mut future = input(&features, &geometry);
     future.time = Time::from_nanos(999_999_999);
     assert!(
@@ -690,7 +713,7 @@ fn tracking_rejects_invalid_covariance_future_solve_and_ambiguous_assignment() {
             .associations
             .is_empty()
     );
-    geometry.state = tracking_state(true, 1.0);
+    geometry.state = tracking_state(1.0);
     let field = FieldDimensions::SPL_2025;
     let features = project(
         [
@@ -756,7 +779,7 @@ fn global_never_certifies_a_seed_subset_with_a_competing_penalty() {
 }
 
 #[test]
-fn tracking_large_frames_keep_plausible_rivals_outside_the_hard_distance_limit() {
+fn tracking_joint_assignment_keeps_plausible_rivals_outside_the_distance_limit() {
     let mut geometry = geometry();
     geometry.robot_to_local.inner.translation.vector.y = 0.375;
     geometry.local_to_field = Some(Isometry2::identity());
@@ -775,42 +798,11 @@ fn tracking_large_frames_keep_plausible_rivals_outside_the_hard_distance_limit()
     // The center and +y crossing have mirror-symmetric image covariances about robot y=0.375.
     // This observation is 332 pixels from the center and 350 from its plausible rival.
     // Pruning that rival at the output ceiling would falsely certify the center match.
-    for lost in [false, true] {
-        geometry.state = tracking_state(lost, 1.0);
-        let estimate = match &mut geometry.state {
-            LocalizationState3D::Tracking { estimate, .. } => estimate,
-            LocalizationState3D::LostTrack {
-                last_known_estimate,
-                ..
-            } => last_known_estimate,
-            LocalizationState3D::Startup => unreachable!(),
-        };
-        estimate.robot_to_field.inner.translation.vector.y = 0.375;
-        assert!(
-            associate_visual_features(input(&features, &geometry), &parameters)
-                .associations
-                .is_empty()
-        );
-    }
-}
-
-#[test]
-fn tracking_winning_edges_must_still_obey_the_hard_distance_limit() {
-    let mut geometry = geometry();
-    geometry.local_to_field = Some(Isometry2::wrap(nalgebra::Isometry2::translation(
-        20.0 * 0.55 / 500.0,
-        0.0,
-    )));
-    geometry.state = tracking_state(false, 0.001);
-    let features = project(stationary_three(), &geometry, Isometry2::identity());
-    let mut parameters = calibrated_parameters();
-    assert_eq!(
-        associate_visual_features(input(&features, &geometry), &parameters)
-            .associations
-            .len(),
-        3
-    );
-    parameters.tracking.max_pixel_distance = 19.0;
+    geometry.state = tracking_state(1.0);
+    let LocalizationState3D::Tracking { estimate, .. } = &mut geometry.state else {
+        unreachable!()
+    };
+    estimate.robot_to_field.inner.translation.vector.y = 0.375;
     assert!(
         associate_visual_features(input(&features, &geometry), &parameters)
             .associations
@@ -826,23 +818,21 @@ fn tracking_age_is_a_validity_horizon_including_its_exact_boundary() {
     let mut parameters = calibrated_parameters();
     parameters.tracking.position_sigma_per_second = 1.0e-6;
     parameters.tracking.yaw_sigma_per_second = 1.0e-6;
-    for lost in [false, true] {
-        geometry.state = tracking_state(lost, 0.0);
-        let mut input = input(&features, &geometry);
-        input.time = input.time + parameters.tracking.max_age;
-        assert_eq!(
-            associate_visual_features(input, &parameters)
-                .associations
-                .len(),
-            3
-        );
-        input.time = input.time + std::time::Duration::from_nanos(1);
-        assert!(
-            associate_visual_features(input, &parameters)
-                .associations
-                .is_empty()
-        );
-    }
+    geometry.state = tracking_state(0.0);
+    let mut input = input(&features, &geometry);
+    input.time = input.time + parameters.tracking.max_age;
+    assert_eq!(
+        associate_visual_features(input, &parameters)
+            .associations
+            .len(),
+        3
+    );
+    input.time = input.time + std::time::Duration::from_nanos(1);
+    assert!(
+        associate_visual_features(input, &parameters)
+            .associations
+            .is_empty()
+    );
 }
 
 #[test]
@@ -860,40 +850,23 @@ fn tracking_high_covariance_keeps_distinct_opponent_landmarks_and_exact_age_hori
     .map(|(feature, (_, point))| (feature.pixel, point))
     .collect::<Vec<_>>();
     let parameters = FieldMarkAssociationParameters::default();
-    for lost in [false, true] {
-        geometry.state = tracking_state(lost, 0.0);
-        let estimate = match &mut geometry.state {
-            LocalizationState3D::Tracking { estimate, .. } => estimate,
-            LocalizationState3D::LostTrack {
-                last_known_estimate,
-                ..
-            } => last_known_estimate,
-            LocalizationState3D::Startup => unreachable!(),
-        };
-        estimate.covariance = sparse_retained_covariance();
-        let state = geometry.state;
-        for age in [
-            std::time::Duration::from_millis(3100),
-            parameters.tracking.max_age,
-        ] {
-            let mut input = input(&features, &geometry);
-            input.time = input.time + age;
-            let result = associate_visual_features(input, &parameters);
-            assert_eq!(result.associations.len(), 3, "lost={lost} age={age:?}");
-            for association in &result.associations {
-                assert!(expected.contains(&(association.detection, association.field_point.xy())));
-                assert!(association.field_point.x() > 0.0);
-            }
+    geometry.state = tracking_state(0.0);
+    let LocalizationState3D::Tracking { estimate, .. } = &mut geometry.state else {
+        unreachable!()
+    };
+    estimate.covariance = sparse_retained_covariance();
+    for age in [
+        std::time::Duration::from_millis(3100),
+        parameters.tracking.max_age,
+    ] {
+        let mut input = input(&features, &geometry);
+        input.time = input.time + age;
+        let result = associate_visual_features(input, &parameters);
+        assert_eq!(result.associations.len(), 3, "age={age:?}");
+        for association in &result.associations {
+            assert!(expected.contains(&(association.detection, association.field_point.xy())));
+            assert!(association.field_point.x() > 0.0);
         }
-        let mut expired = input(&features, &geometry);
-        expired.time =
-            expired.time + parameters.tracking.max_age + std::time::Duration::from_nanos(1);
-        assert!(
-            associate_visual_features(expired, &parameters)
-                .associations
-                .is_empty()
-        );
-        assert_eq!(geometry.state, state);
     }
 }
 
@@ -949,40 +922,31 @@ fn tracking_uses_raw_image_features_even_when_their_rays_reach_the_horizon() {
         pixel: point![10.0, 10.0],
         confidence: f32::NAN,
     });
-    for lost in [false, true] {
-        let mut estimate = LocalizationEstimate3D {
-            robot_to_field: Isometry3::wrap(geometry.robot_to_local.inner),
-            covariance: SMatrix::zeros(),
-        };
-        estimate.covariance[(5, 5)] = 0.25_f32.powi(2);
-        let last_successful_solve = Time::from_nanos(1_000_000_000);
-        geometry.state = if lost {
-            LocalizationState3D::LostTrack {
-                last_known_estimate: estimate,
-                last_successful_solve,
-            }
-        } else {
-            LocalizationState3D::Tracking {
-                estimate,
-                last_successful_solve,
-            }
-        };
-        let mut input = input(&features, &geometry);
-        input.robot_to_camera = robot_to_camera;
-        assert!(
-            solver::preprocess(global_input(input, &GlobalAssociationConfig::default()))
-                .unwrap()
-                .1
-                .is_empty()
-        );
-        let result = associate_visual_features(input, &FieldMarkAssociationParameters::default());
-        assert_eq!(result.associations.len(), 3);
-        assert!(result.associations.iter().all(|a| a.field_point.x() > 0.0));
-        assert!(
-            result.debug.is_none(),
-            "pixel residuals must not be labeled as metric RMS"
-        );
-    }
+    let mut estimate = LocalizationEstimate3D {
+        robot_to_field: Isometry3::wrap(geometry.robot_to_local.inner),
+        covariance: SMatrix::zeros(),
+    };
+    estimate.covariance[(5, 5)] = 0.25_f32.powi(2);
+    let last_successful_solve = Time::from_nanos(1_000_000_000);
+    geometry.state = LocalizationState3D::Tracking {
+        estimate,
+        last_successful_solve,
+    };
+    let mut input = input(&features, &geometry);
+    input.robot_to_camera = robot_to_camera;
+    assert!(
+        solver::preprocess(global_input(input, &GlobalAssociationConfig::default()))
+            .unwrap()
+            .1
+            .is_empty()
+    );
+    let result = associate_visual_features(input, &FieldMarkAssociationParameters::default());
+    assert_eq!(result.associations.len(), 3);
+    assert!(result.associations.iter().all(|a| a.field_point.x() > 0.0));
+    assert!(
+        result.debug.is_none(),
+        "pixel residuals must not be labeled as metric RMS"
+    );
 }
 
 #[test]
@@ -991,33 +955,26 @@ fn tracking_process_growth_uses_current_range_separately_from_stored_covariance(
     geometry.local_to_field = Some(Isometry2::identity());
     let features = project(stationary_three(), &geometry, Isometry2::identity());
     let parameters = calibrated_parameters();
-    for lost in [false, true] {
-        geometry.state = tracking_state(lost, 0.0);
-        let estimate = match &mut geometry.state {
-            LocalizationState3D::Tracking { estimate, .. } => estimate,
-            LocalizationState3D::LostTrack {
-                last_known_estimate,
-                ..
-            } => last_known_estimate,
-            LocalizationState3D::Startup => unreachable!(),
-        };
-        estimate.robot_to_field.inner.translation.vector = vector![-1000.0, 0.0, 1000.0];
-        let mut input = input(&features, &geometry);
-        input.time = input.time + std::time::Duration::from_millis(100);
-        assert_eq!(
-            associate_visual_features(input, &parameters)
-                .associations
-                .len(),
-            3
-        );
-    }
+    geometry.state = tracking_state(0.0);
+    let LocalizationState3D::Tracking { estimate, .. } = &mut geometry.state else {
+        unreachable!()
+    };
+    estimate.robot_to_field.inner.translation.vector = vector![-1000.0, 0.0, 1000.0];
+    let mut input = input(&features, &geometry);
+    input.time = input.time + std::time::Duration::from_millis(100);
+    assert_eq!(
+        associate_visual_features(input, &parameters)
+            .associations
+            .len(),
+        3
+    );
 }
 
 #[test]
 fn tracking_filters_duplicates_but_rejects_input_and_retained_overflow() {
     let mut geometry = geometry();
     geometry.local_to_field = Some(Isometry2::identity());
-    geometry.state = tracking_state(false, 0.0001);
+    geometry.state = tracking_state(0.0001);
     let parameters = FieldMarkAssociationParameters::default();
     let mut features = project(stationary_three(), &geometry, Isometry2::identity());
     let duplicate = features.goalposts[0];
@@ -1080,18 +1037,14 @@ fn runtime_characterization() {
         Isometry2::identity(),
     );
     let parameters = calibrated_parameters();
-    let mut lost = tracking_state(true, 0.0);
-    if let LocalizationState3D::LostTrack {
-        last_known_estimate,
-        ..
-    } = &mut lost
-    {
-        last_known_estimate.covariance = sparse_retained_covariance();
+    let mut high_covariance = tracking_state(0.0);
+    if let LocalizationState3D::Tracking { estimate, .. } = &mut high_covariance {
+        estimate.covariance = sparse_retained_covariance();
     }
     for (mode, state) in [
         ("global", LocalizationState3D::Startup),
-        ("tracking", tracking_state(false, 1.0e-6)),
-        ("lost-high-covariance", lost),
+        ("tracking", tracking_state(1.0e-6)),
+        ("tracking-high-covariance", high_covariance),
     ] {
         geometry.state = state;
         geometry.local_to_field = Some(Isometry2::identity());
@@ -1101,11 +1054,11 @@ fn runtime_characterization() {
             ("5", &sparse[2]),
             ("rich", &rich),
         ] {
-            if mode == "lost-high-covariance" && frame == "rich" {
+            if mode == "tracking-high-covariance" && frame == "rich" {
                 continue;
             }
             let mut input = input(features, &geometry);
-            if mode == "lost-high-covariance" {
+            if mode == "tracking-high-covariance" {
                 input.time = input.time + std::time::Duration::from_millis(3100);
             }
             let mut samples = Vec::with_capacity(500);

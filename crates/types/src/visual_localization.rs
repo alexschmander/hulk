@@ -21,6 +21,7 @@ pub enum VisualAssociationSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssociationGeometry {
     pub epoch: u64,
+    pub generation: u64,
     /// The tracking prior stays anchored during loss while local poses continue updating.
     pub state: crate::localization::LocalizationState3D,
     pub robot_to_local: Isometry3<Robot, Local>,
@@ -36,7 +37,7 @@ impl AssociationGeometry {
         tracking_reference: Option<&crate::localization::LocalizationEstimate>,
     ) -> Option<Self> {
         use crate::localization::{LocalizationEstimate3D, LocalizationState, LocalizationState3D};
-        if estimate.epoch != status.epoch {
+        if estimate.epoch != status.epoch || estimate.generation != status.generation {
             return None;
         }
         let field = estimate.robot_to_field.map(|field| LocalizationEstimate3D {
@@ -52,7 +53,7 @@ impl AssociationGeometry {
             LocalizationState::LostTrack => LocalizationState3D::LostTrack {
                 last_known_estimate: {
                     let prior = tracking_reference
-                        .filter(|p| p.epoch == status.epoch)?
+                        .filter(|p| p.epoch == status.epoch && p.generation == status.generation)?
                         .robot_to_field?;
                     LocalizationEstimate3D {
                         robot_to_field: prior.pose.inner.cast().framed_transform(),
@@ -71,6 +72,7 @@ impl AssociationGeometry {
         });
         Some(Self {
             epoch: estimate.epoch,
+            generation: estimate.generation,
             state,
             robot_to_local: estimate.robot_to_local.pose.inner.cast().framed_transform(),
             local_to_field,
@@ -81,11 +83,9 @@ impl AssociationGeometry {
 #[derive(Debug, Clone, Serialize, Deserialize, Message)]
 pub struct VisualLocalizationFrame {
     pub epoch: u64,
+    pub generation: u64,
     pub source: VisualAssociationSource,
     pub robot_to_camera: Isometry3<Robot, Camera>,
-    /// In startup only the IMU-derived attitude is meaningful; bootstrap fits height
-    /// from landmarks. During tracking this is the localizer's pose used for association.
-    pub robot_to_local: Isometry3<Robot, Local>,
     pub camera_intrinsic: projection::intrinsic::Intrinsic,
     pub associations: Vec<FieldMarkAssociation>,
 }
@@ -114,6 +114,7 @@ mod tests {
     #[test]
     fn association_rejects_mixed_epochs_and_keeps_recovery_prior_frozen() {
         let prior = LocalizationEstimate {
+            generation: 0,
             time: Time::from_nanos(10),
             epoch: 3,
             robot_to_local: PoseEstimate {
@@ -130,9 +131,11 @@ mod tests {
         current.robot_to_local.pose.inner.translation.vector.x = 2.0;
         current.robot_to_field.as_mut().unwrap().covariance *= 5.0;
         let mut status = LocalizationStatus {
+            generation: 0,
             time: Time::from_nanos(20),
             epoch: 3,
             state: LocalizationState::LostTrack,
+            heading: None,
         };
         let geometry = AssociationGeometry::from_estimate(&current, &status, Some(&prior)).unwrap();
         assert_eq!(geometry.robot_to_local.translation().x(), 2.0);
@@ -150,5 +153,12 @@ mod tests {
         );
         status.epoch = 4;
         assert!(AssociationGeometry::from_estimate(&current, &status, Some(&prior)).is_none());
+        status.epoch = current.epoch;
+        status.generation += 1;
+        assert!(AssociationGeometry::from_estimate(&current, &status, Some(&prior)).is_none());
+        current.generation = status.generation;
+        assert!(AssociationGeometry::from_estimate(&current, &status, Some(&prior)).is_none());
+        status.state = LocalizationState::Tracking;
+        assert!(AssociationGeometry::from_estimate(&current, &status, None).is_some());
     }
 }

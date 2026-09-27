@@ -4,7 +4,7 @@ use fagra::{
     StateStore,
 };
 use linear_algebra::Vector3;
-use nalgebra::{Matrix2, Matrix3, RealField, SMatrix, SVector, UnitQuaternion};
+use nalgebra::{Matrix3, RealField, SVector, UnitQuaternion};
 
 use super::common;
 use crate::variables::PoseControl;
@@ -159,25 +159,25 @@ impl<R: RealField + Copy> ImuKinematics<R> {
 fn tilt<R: RealField + Copy>(
     rotation: &UnitQuaternion<R>,
     measured: &Vector3<Robot, R>,
-    root: &Matrix2<R>,
-) -> Result<nalgebra::Vector2<R>, EvaluationError> {
+    root: &Matrix3<R>,
+) -> Result<nalgebra::Vector3<R>, EvaluationError> {
     common::validate_up(&measured.inner)?;
     common::finite(root.iter())?;
-    Ok(root * (common::up(rotation) - measured.inner).fixed_rows::<2>(0))
+    Ok(root * (common::up(rotation) - measured.inner))
 }
 
 fn tilt_jacobian<R: RealField + Copy>(
     rotation: &UnitQuaternion<R>,
-    root: &Matrix2<R>,
-) -> SMatrix<R, 2, 3> {
-    root * common::up(rotation).cross_matrix().fixed_rows::<2>(0)
+    root: &Matrix3<R>,
+) -> Matrix3<R> {
+    root * common::up(rotation).cross_matrix()
 }
 
-/// Two-dimensional tilt constraint on the evaluated spline, independent of absolute IMU yaw.
+/// Up-direction constraint on the evaluated spline, independent of absolute IMU yaw.
 ///
-/// Residual: `W * (Rᵀ * [0, 0, 1] - measured_up).xy`, where `R` maps robot
-/// to local coordinates. This near-upright model cannot distinguish upright
-/// from exactly inverted poses using the two horizontal components alone.
+/// Residual: `W * (Rᵀ * [0, 0, 1] - measured_up)`, where `R` maps Robot to Local.
+/// All three components distinguish upright from inverted attitudes while imposing
+/// only two rotational constraints. The exact antipode is a stationary maximum.
 #[derive(Clone, Debug)]
 pub struct RollPitchPrior<R: RealField + Copy = f64> {
     pub controls: [StateKey<PoseControl<R>>; 4],
@@ -185,9 +185,9 @@ pub struct RollPitchPrior<R: RealField + Copy = f64> {
     pub tau: R,
     /// Finite unit up direction from IMU attitude, expressed in the robot frame.
     pub measured_up: Vector3<Robot, R>,
-    /// Whitens dimensionless robot-frame up-vector x/y errors, not Euler angles.
+    /// Whitens dimensionless robot-frame up-vector errors, not Euler angles.
     /// Angular measurement covariance must be mapped into these coordinates upstream.
-    pub information_root: Matrix2<R>,
+    pub information_root: Matrix3<R>,
 }
 
 impl<R: RealField + Copy, S: StateStore<PoseControl<R>>> Factor<S> for RollPitchPrior<R> {

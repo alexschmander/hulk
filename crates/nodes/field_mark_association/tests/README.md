@@ -4,7 +4,7 @@ Run with `cargo test -p field_mark_association --test association_recording_fixt
 
 `association_fixtures.json` is unchanged historical sensor data. Its five expected
 correspondences came from the retired pose-fitting associator, not a certificate
-from the current measured-Local-height invariant matcher.
+from the current similarity-fit matcher.
 
 The Ground-to-Local adapter is valid for this single recorded frame: both have
 the same horizontal plane. Independent ray/plane intersection and planar fitting
@@ -17,18 +17,13 @@ give these measurements:
 | Diagnostic free-scale fit | 1.0242, implying 0.6467 m camera height |
 | Fixed-height rigid-fit residual | 0.1499 m RMS, 5.310 px RMS |
 
-The rejection is **not** a physically incompatible measured height. The legacy
-test settings (10 px pixel sigma, 0.1 rad tilt sigma, squared gate 100) make the
-uncertainty reach the horizon for all five detections. Even production-default
-uncertainties cannot certify the sign of any of the ten possible seed triangles.
-For example, one doubled triangle area is -2.474 m^2 against a 4.178 m^2 gate.
-This is conservative chirality rejection, not proof of a second map assignment.
+Global association must recover all five correspondences with default parameters,
+and reject excessive uncertainty (10 px pixel sigma, 0.1 rad tilt sigma, squared
+gate 100), which brings these rays' uncertainty to the horizon.
 
-`support/geometry_oracle.rs` uses finite differences, independently of production
-analytic Jacobians, to check every triangle's uncertainty margin. A separate
-positive test constructs an explicit oracle tracking prior from the labels,
-holding measured height and tilt fixed, and requires **all five original exact
-correspondences** with default association parameters. No fitted scale is supplied
+`support/geometry_oracle.rs` constructs an independent tracking prior from the labels,
+holding measured height and tilt fixed. The tracking test requires **all five original
+exact correspondences** with default association parameters. No fitted scale is supplied
 to association or localization, and no production code reads this oracle.
 
 The oracle prior covariance comes from the planar fit, not an arbitrary near-zero
@@ -47,7 +42,5 @@ The test still requires all five exact matches, bounds the original fit residual
 and checks that the prior covariance is positive semidefinite without introducing
 height or tilt freedom.
 
-This fixture covers real-data startup rejection and positive tracking, not
-positive real-data bootstrap. That still needs an additional well-conditioned
-recording. The obsolete MCAP extractor has been removed; preserve this frozen case
-when adding independently reviewed recordings.
+This fixture covers global association and prior-based tracking, not end-to-end
+localization bootstrap. Preserve it when adding independently reviewed recordings.

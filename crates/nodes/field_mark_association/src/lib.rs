@@ -11,11 +11,12 @@ mod parameters;
 mod tracking;
 
 pub use api::{
-    AssociationInput, AssociationResult, GlobalAssociationInput, associate_global_visual_features,
+    AssociationInput, AssociationResult, GlobalAssociationInput, HeadingConstraint,
+    TrackingAssociationInput, associate_global_visual_features, associate_tracking_visual_features,
     associate_visual_features,
 };
 pub use features::{
-    DetectedVisualFeature, DetectedVisualFeatures, VisualFeatureClass, find_detected_goalposts,
+    DetectedVisualFeature, DetectedVisualFeatures, VisualFeatureClass,
     find_detected_visual_features, raw_detections,
 };
 pub use global_association::GlobalAssociationConfig as GlobalLocalizerParameters;
@@ -50,7 +51,7 @@ mod public_map_tests {
     use super::*;
 
     #[test]
-    fn public_landmarks_match_the_production_map() {
+    fn public_landmarks_expose_expected_feature_counts() {
         let landmarks =
             field_feature_landmarks(&types::field_dimensions::FieldDimensions::SPL_2025);
 

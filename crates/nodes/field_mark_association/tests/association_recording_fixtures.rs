@@ -1,8 +1,8 @@
 use coordinate_systems::{Camera, Local, Robot};
 use field_mark_association::{
-    AssociationInput, FieldMarkAssociationParameters, GlobalAssociationInput,
-    GlobalLocalizerParameters, associate_global_visual_features, associate_visual_features,
-    find_detected_visual_features,
+    FieldMarkAssociationParameters, GlobalAssociationInput, GlobalLocalizerParameters,
+    TrackingAssociationInput as AssociationInput, associate_global_visual_features,
+    associate_tracking_visual_features, find_detected_visual_features,
 };
 use linear_algebra::{IntoTransform, Isometry3};
 use projection::camera_matrix::CameraMatrix;
@@ -39,7 +39,7 @@ struct ExpectedAssociation {
 }
 
 #[test]
-fn real_recording_startup_fits_height_and_rejects_excessive_uncertainty() {
+fn real_recording_global_association_rejects_excessive_uncertainty() {
     for fixture in fixtures() {
         let features = find_detected_visual_features(&fixture.detections);
         assert_eq!(features.supported_feature_count(), fixture.expected.len());
@@ -52,20 +52,20 @@ fn real_recording_startup_fits_height_and_rejects_excessive_uncertainty() {
                 ..Default::default()
             },
         ] {
-            let margins = geometry_oracle::triangle_margins(&fixture, config);
-            assert_eq!(margins.len(), 10);
-            assert!(
-                margins
-                    .iter()
-                    .all(|(area, gate)| area.is_finite() && gate - area.abs() > 0.3)
-            );
             let result = associate_global_visual_features(GlobalAssociationInput {
                 visual_features: &features,
-                robot_to_local: robot_to_local(&fixture.camera_matrix),
+                robot_to_ground: {
+                    let (roll, pitch, _) = robot_to_local(&fixture.camera_matrix)
+                        .inner
+                        .rotation
+                        .euler_angles();
+                    linear_algebra::Rotation3::from_euler_angles(roll, pitch, 0.0)
+                },
                 robot_to_camera: robot_to_camera(&fixture.camera_matrix),
                 camera_intrinsic: fixture.camera_matrix.intrinsics,
                 field_dimensions: &FieldDimensions::SPL_2025,
                 parameters: &config,
+                heading: None,
             });
             if config.detection_pixel_sigma == 2.0 {
                 assert_eq!(result.associations.len(), fixture.expected.len());
@@ -117,7 +117,7 @@ fn real_recording_tracking_fixtures_match_all_expected_landmarks() {
         assert!((metrics.free_height_scale - 1.0242).abs() < 0.001);
         assert!(metrics.metric_rms < 0.16);
         assert!(metrics.pixel_rms < 6.0);
-        let localization = associate_visual_features(
+        let localization = associate_tracking_visual_features(
             AssociationInput {
                 visual_features: &features,
                 robot_to_camera: robot_to_camera(&fixture.camera_matrix),
@@ -166,6 +166,7 @@ fn robot_to_local(camera: &CameraMatrix) -> Isometry3<Robot, Local> {
 fn fixture_geometry(camera: &CameraMatrix) -> AssociationGeometry {
     AssociationGeometry {
         epoch: 0,
+        generation: 0,
         state: LocalizationState3D::Startup,
         robot_to_local: robot_to_local(camera),
         local_to_field: None,

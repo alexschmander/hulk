@@ -97,7 +97,6 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         estimates: &estimates,
         status: &status,
         attitudes: std::sync::Mutex::new(ros_z::cache::CacheInner::new(1500)),
-        tracking_reference: std::sync::Mutex::new(None),
         associations_publisher: Arc::new(associations_publisher),
         global_localization_publisher: Arc::new(global_localization_publisher),
         clock: node.clock(),

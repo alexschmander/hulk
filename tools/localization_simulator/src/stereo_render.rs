@@ -277,7 +277,9 @@ mod tests {
     #[test]
     #[ignore = "requires a graphics adapter"]
     fn renders_stereo_images_on_gpu() {
-        let left = crate::trajectory::Scenario::stationary().sample_camera_to_field(0.0);
+        let left = crate::trajectory::Scenario::stationary()
+            .sample_camera_to_field(0.0)
+            .inner;
         let right = left * Isometry3::translation(BASELINE, 0.0, 0.0);
         let mut renderer = StereoRenderer::new();
         let rendered = renderer.render(&left, &right);

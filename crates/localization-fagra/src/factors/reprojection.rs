@@ -1,4 +1,4 @@
-use coordinate_systems::{Field, NormalizedDeviceCoordinates, Pixel, Robot};
+use coordinate_systems::{Camera, Field, Pixel, Robot};
 use fagra::{
     BlockId, EvaluationError, FactorBatch, FactorSelection, JacobianBlock, LinearizationSink,
     StateKey, StateStore,
@@ -37,7 +37,7 @@ pub struct FrameReprojections<R: RealField + Copy = f64> {
     pub duration: R,
     pub tau: R,
     /// Optical convention: x right, y down, z forward, before perspective division.
-    pub robot_to_camera: Isometry3<Robot, NormalizedDeviceCoordinates, R>,
+    pub robot_to_camera: Isometry3<Robot, Camera, R>,
     /// Fixed inverse angular standard deviation (radians^-1), independent of the
     /// optimized intrinsics. Isotropic angular noise, not anisotropic pixel noise.
     pub angular_information_root: R,

@@ -48,7 +48,7 @@ impl ScenarioChoice {
 }
 
 struct FlightRecorder {
-    pose: Isometry3<f32>,
+    pose: linear_algebra::Isometry3<coordinate_systems::Camera, coordinate_systems::Field>,
     elapsed: Duration,
     accumulator: Duration,
     keyframes: Vec<PoseKeyframe>,
@@ -527,15 +527,13 @@ impl LocalizationSimulatorApp {
             {
                 let pose = self
                     .displayed_sample()
-                    .map(|sample| {
-                        sample.truth_robot_to_field.inner * fixed_robot_to_camera().inverse()
-                    })
+                    .map(|sample| sample.truth_robot_to_field * fixed_robot_to_camera().inverse())
                     .or_else(|| {
                         self.simulation
                             .as_ref()
                             .map(|simulation| simulation.scenario().sample_camera_to_field(0.0))
                     })
-                    .unwrap_or_else(Isometry3::identity);
+                    .unwrap_or_else(linear_algebra::Isometry3::identity);
                 self.recorder = Some(FlightRecorder {
                     pose,
                     elapsed: Duration::ZERO,
@@ -576,12 +574,14 @@ impl LocalizationSimulatorApp {
             recorder.accumulator -= TICK_INTERVAL;
             recorder.elapsed += TICK_INTERVAL;
             let dt = TICK_INTERVAL.as_secs_f32();
-            let local_translation = recorder.pose.rotation * Vector3::new(right, 0.0, forward) * dt;
-            recorder.pose.translation.vector += local_translation;
-            recorder.pose.translation.z += vertical * dt;
+            let local_translation =
+                recorder.pose.inner.rotation * Vector3::new(right, 0.0, forward) * dt;
+            recorder.pose.inner.translation.vector += local_translation;
+            recorder.pose.inner.translation.z += vertical * dt;
             let yaw_rotation = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), yaw * dt);
             let local_rotation = UnitQuaternion::from_euler_angles(pitch * dt, 0.0, roll * dt);
-            recorder.pose.rotation = yaw_rotation * recorder.pose.rotation * local_rotation;
+            recorder.pose.inner.rotation =
+                yaw_rotation * recorder.pose.inner.rotation * local_rotation;
             recorder.keyframes.push(PoseKeyframe::from_camera_to_field(
                 recorder.elapsed.as_secs_f32(),
                 recorder.pose,
@@ -692,12 +692,28 @@ impl LocalizationSimulatorApp {
         } else {
             ui.label("Optimizer: no solve yet");
         }
-        let truth = sample.truth_robot_to_field.inner;
-        if let Some(backend) = sample.raw_backend_robot_to_field.as_ref() {
-            error_labels(ui, "Truth vs backend", &truth, &backend.inner.cast::<f32>());
-        }
-        if let Some(live) = &sample.live_robot_to_field {
-            error_labels(ui, "Truth vs live", &truth, &live.inner);
+        if let Some(time) = sample.estimate_time {
+            let truth = robot_to_field_from_camera_to_field(
+                &simulation
+                    .scenario()
+                    .sample_camera_to_field(time.as_nanos() as f32 * 1e-9),
+            )
+            .inner;
+            ui.label(format!(
+                "Estimate age: {:.1} ms",
+                sample.time.duration_since(time).as_secs_f64() * 1000.0
+            ));
+            if let Some(backend) = sample.raw_backend_robot_to_field.as_ref() {
+                error_labels(
+                    ui,
+                    "Estimate-time truth vs backend",
+                    &truth,
+                    &backend.inner.cast::<f32>(),
+                );
+            }
+            if let Some(live) = &sample.live_robot_to_field {
+                error_labels(ui, "Estimate-time truth vs live", &truth, &live.inner);
+            }
         }
     }
 
@@ -725,7 +741,9 @@ impl LocalizationSimulatorApp {
             let start = if reset { 0 } else { self.scene_history_len };
             let new_truth = recorder.keyframes[start..]
                 .iter()
-                .map(|keyframe| robot_to_field_from_camera_to_field(&keyframe.camera_to_field()))
+                .map(|keyframe| {
+                    robot_to_field_from_camera_to_field(&keyframe.camera_to_field()).inner
+                })
                 .collect::<Vec<_>>();
             let mut state = self
                 .widget
@@ -739,7 +757,7 @@ impl LocalizationSimulatorApp {
                     ..Default::default()
                 };
             }
-            state.truth = Some(robot_to_field_from_camera_to_field(&recorder.pose));
+            state.truth = Some(robot_to_field_from_camera_to_field(&recorder.pose).inner);
             state.truth_history.extend(new_truth);
             self.scene_source = Some(SceneSource::Recorder);
             self.scene_history_len = target_len;

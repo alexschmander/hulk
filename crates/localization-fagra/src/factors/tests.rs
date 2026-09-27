@@ -403,7 +403,10 @@ impl<const N: usize, const ROBUST: bool> TestFactor for KinematicCase<N, ROBUST>
             duration: c(0.2),
             previous_tau: c(0.4),
             current_tau: c(0.7),
-            translation: nalgebra::Vector2::new(c(self.0.values[6]), c(self.0.values[7])),
+            translation: linear_algebra::Vector2::wrap(nalgebra::Vector2::new(
+                c(self.0.values[6]),
+                c(self.0.values[7]),
+            )),
             information_root: root(),
             huber_threshold: c(if ROBUST { 0.15 } else { 1e6 }),
         }
@@ -464,12 +467,6 @@ fn huber_cost_and_frozen_weight_reference() {
         let (cost, scale) = common::huber(&r, 2.0).unwrap();
         assert!((cost - expected_cost).abs() < 1e-12);
         assert!((scale - expected_scale).abs() < 1e-12);
-        let j = SMatrix::<f64, 2, 2>::new(1.0, 2.0, 3.0, 4.0);
-        assert!(
-            ((j * scale).transpose() * (j * scale) - j.transpose() * j * expected_scale.powi(2))
-                .norm()
-                < 1e-12
-        );
     }
 }
 
@@ -594,7 +591,7 @@ fn exact_static_measurements_and_one_sided_constraints() {
         duration: 0.25,
         tau: 0.5,
         measured_up: Framed::wrap(Vector3::z()),
-        information_root: nalgebra::Matrix2::identity(),
+        information_root: nalgebra::Matrix3::identity(),
     };
     assert_eq!(tilt.cost(&scene).unwrap(), 0.0);
     tilt.linearize(&scene, &mut Capture::default()).unwrap();
@@ -701,6 +698,51 @@ fn exact_static_measurements_and_one_sided_constraints() {
             );
         }
     }
+}
+
+#[test]
+fn tilt_distinguishes_inversion_without_observing_yaw() {
+    let mut scene = Scene::new();
+    let measured = UnitQuaternion::from_euler_angles(0.0, 0.03, 0.0);
+    let factor = RollPitchPrior {
+        controls: scene.segment(),
+        duration: 0.25,
+        tau: 0.5,
+        measured_up: Framed::wrap(measured.inverse() * Vector3::z()),
+        information_root: nalgebra::Matrix3::identity(),
+    };
+    for yaw in [0.0, 1.7] {
+        for key in scene.controls {
+            scene
+                .graph
+                .set(
+                    key,
+                    PoseControl {
+                        pose: Framed::wrap(Isometry3::from_parts(
+                            nalgebra::Translation3::identity(),
+                            UnitQuaternion::from_euler_angles(0.0, 0.03, yaw),
+                        )),
+                    },
+                )
+                .unwrap();
+        }
+        assert!(factor.cost(&scene).unwrap() < 1e-20);
+    }
+    for key in scene.controls {
+        scene
+            .graph
+            .set(
+                key,
+                PoseControl {
+                    pose: Framed::wrap(Isometry3::from_parts(
+                        nalgebra::Translation3::identity(),
+                        UnitQuaternion::from_euler_angles(std::f64::consts::PI, 0.03, 0.0),
+                    )),
+                },
+            )
+            .unwrap();
+    }
+    assert!(factor.cost(&scene).unwrap() > 1.9);
 }
 
 #[test]
@@ -872,7 +914,6 @@ fn odometry_irls_curvature_and_shared_control_blocks() {
     for ((key, j), (raw_key, raw_j)) in robust.blocks[0].iter().zip(&raw.blocks[0]) {
         assert_eq!(key, raw_key);
         assert!((j - raw_j * scale).norm() < 1e-12);
-        assert!((j.transpose() * j - raw_j.transpose() * raw_j * (2.0 / 5.0)).norm() < 1e-12);
     }
 }
 
@@ -884,7 +925,7 @@ fn invalid_inputs_and_yaw_wrapping() {
         duration: 0.25,
         tau: 0.5,
         measured_up: Framed::wrap(Vector3::z()),
-        information_root: nalgebra::Matrix2::identity(),
+        information_root: nalgebra::Matrix3::identity(),
     };
     prior.controls[1] = prior.controls[0];
     assert!(prior.cost(&scene).is_err());

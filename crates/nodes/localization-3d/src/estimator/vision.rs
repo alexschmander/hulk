@@ -1,27 +1,58 @@
 use super::{
     Estimator, HUBER_THRESHOLD, MIN_LANDMARK_RANGE, MIN_REPROJECTION_DEPTH, WINDOW_NS,
-    control_keys, seconds_per_knot,
+    control_keys, recovery::MotionRecord, seconds_per_knot,
 };
-use crate::alignment::{seed_alignment, valid_visual_frame};
-use color_eyre::Result;
-use linear_algebra::{IntoTransform, Point2, Point3};
-use localization_fagra::{
-    factors::{
-        AdjacentVisualOdometry, FrameReprojections, ReprojectionObservation, VisualOdometry,
-        VisualOdometryObservation,
-    },
-    variables::FieldAlignment,
+use crate::alignment::{valid_visual_frame, valid_visual_rms};
+use crate::heading::HeadingReference;
+use color_eyre::{Result, eyre::eyre};
+use coordinate_systems::{Field, Robot};
+use linear_algebra::{IntoTransform, Isometry3, Orientation2, Point2, Point3};
+use localization_fagra::factors::{
+    AdjacentVisualOdometry, FrameReprojections, ReprojectionObservation, VisualOdometry,
+    VisualOdometryObservation,
 };
 use nalgebra::SMatrix;
+use ros_z::time::Time;
 use types::camera_geometry::CameraGeometry;
 use types::{
     time_wrapper::TimeWrapper, visual_localization::VisualLocalizationFrame,
     visual_odometry::VisualOdometer,
 };
 
+pub(super) struct PendingVisual {
+    segment: i64,
+    batch: fagra::BatchKey<FrameReprojections>,
+    factors: Vec<fagra::FactorKey<ReprojectionObservation>>,
+    frame: TimeWrapper<VisualLocalizationFrame>,
+}
+
 impl Estimator {
+    pub(crate) fn field_heading_at(&self, time: Time) -> Option<Orientation2<Field, f64>> {
+        let (segment, tau) = self.segment_and_tau(time).ok()?;
+        let pose = self
+            .spline(control_keys(&self.controls, segment).ok()?)
+            .ok()?
+            .pose(tau)
+            .ok()?;
+        let alignment = self.graph.get(self.alignment?).ok()?;
+        Some(Orientation2::new(
+            (alignment.local_to_field.to_3d().inner.rotation * pose.inner.rotation)
+                .euler_angles()
+                .2,
+        ))
+    }
+
     pub(crate) fn visual_rms(&self) -> Option<f64> {
-        let frame = self.latest_visual_frame.as_ref()?;
+        let frame = self
+            .pending_visuals
+            .iter()
+            .map(|p| &p.frame)
+            .chain(self.latest_visual_frame.iter())
+            .max_by_key(|f| f.time)?;
+        self.frame_rms(frame)
+    }
+
+    fn frame_rms(&self, frame: &TimeWrapper<VisualLocalizationFrame>) -> Option<f64> {
         let (segment, tau) = self.segment_and_tau(frame.time).ok()?;
         let pose = self
             .spline(control_keys(&self.controls, segment).ok()?)
@@ -49,92 +80,108 @@ impl Estimator {
         rms.is_finite().then_some(rms)
     }
 
+    /// Validate before either publication or marginalization can retain a bad field update.
+    pub(super) fn validate_heading(&self, reference: &HeadingReference) -> Result<()> {
+        let (&time, _) = self
+            .attitudes
+            .range(..=self.latest_time)
+            .next_back()
+            .ok_or_else(|| eyre!("missing IMU heading"))?;
+        if self.latest_time.duration_since(time) > types::localization::MAX_IMU_ATTITUDE_GAP {
+            return Err(eyre!("stale IMU heading"));
+        }
+        for time in std::iter::once(time).chain(self.pending_visuals.iter().map(|p| p.frame.time)) {
+            let expected = reference.expected(
+                self.attitude_at(time)
+                    .ok_or_else(|| eyre!("missing exposure IMU heading"))?,
+            );
+            let field = self
+                .field_heading_at(time)
+                .ok_or_else(|| eyre!("missing field heading"))?;
+            if expected.rotation_to(field).inner.angle().abs() > self.parameters.max_heading_error {
+                return Err(eyre!("field heading disagrees with propagated IMU heading"));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_tilt(&self) -> Result<()> {
+        let Some((&time, &attitude)) = self.attitudes.range(..=self.latest_time).next_back() else {
+            return Ok(());
+        };
+        let (segment, tau) = self.segment_and_tau(time)?;
+        let pose = self
+            .spline(control_keys(&self.controls, segment)?)?
+            .pose(tau)?;
+        let predicted = pose.inner.rotation.inverse() * nalgebra::Vector3::z();
+        let measured = attitude.inner.inverse() * nalgebra::Vector3::z();
+        let error = predicted
+            .cross(&measured)
+            .norm()
+            .atan2(predicted.dot(&measured));
+        if error > self.parameters.max_tilt_error {
+            return Err(eyre!("estimated tilt disagrees with IMU attitude"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_pending_visuals(&self) -> Result<()> {
+        if self
+            .pending_visuals
+            .iter()
+            .any(|pending| !valid_visual_rms(self.frame_rms(&pending.frame)))
+        {
+            return Err(eyre!("visual update failed pixel validation"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn accept_visuals(&mut self) {
+        for pending in self.pending_visuals.drain(..) {
+            if self
+                .latest_visual_frame
+                .as_ref()
+                .is_none_or(|old| pending.frame.time >= old.time)
+            {
+                self.latest_visual_frame = Some(pending.frame);
+            }
+        }
+    }
+
+    pub(super) fn discard_visuals(&mut self) -> Result<()> {
+        for pending in self.pending_visuals.drain(..) {
+            for key in &pending.factors {
+                self.graph.remove_factor(*key)?;
+            }
+            self.graph.remove_batch(pending.batch)?;
+            self.reprojection_batches
+                .retain(|(_, batch)| *batch != pending.batch);
+            *self.measurements.entry(pending.segment).or_default() -= pending.factors.len();
+        }
+        Ok(())
+    }
+
     pub(crate) fn ingest_visual(
         &mut self,
         frame: TimeWrapper<VisualLocalizationFrame>,
-        trusted_alignment_yaw: Option<f64>,
     ) -> Result<bool> {
         let time = frame.time;
-        let Some(_) = self.check_time(time, "visual localization")? else {
+        let Some((segment, tau)) = self.check_time(time, "visual localization")? else {
             return Ok(false);
         };
-        let mut frame = frame.inner;
-        if frame.epoch != self.epoch || !valid_visual_frame(&frame) {
+        let frame = frame.inner;
+        if frame.epoch != self.epoch
+            || frame.generation != self.generation
+            || !valid_visual_frame(&frame)
+        {
             return Ok(false);
         }
-        let recovering = trusted_alignment_yaw.is_some();
-        let candidate = if self.alignment.is_none() || recovering {
-            let Some((initial_pose, seed)) = seed_alignment(
-                frame.robot_to_local,
-                frame.robot_to_camera,
-                frame.camera_intrinsic,
-                &mut frame.associations,
-                !recovering,
-            ) else {
-                return Ok(false);
-            };
-            // Discard the unlocalized trajectory and its fixed-height gauge prior.
-            // Bootstrap at the exposure timestamp, retaining the lifecycle epoch.
-            let camera = CameraGeometry {
-                robot_to_camera: frame.robot_to_camera,
-                intrinsics: frame.camera_intrinsic,
-            };
-            let initialized = Self::new(
-                time,
-                self.epoch,
-                initial_pose,
-                &camera,
-                self.parameters.clone(),
-                &self.field,
-            )?;
-            let mut alignment: FieldAlignment<f64> = FieldAlignment {
-                local_to_field: seed.inner.cast().framed_transform(),
-            };
-            if let Some(expected) = trusted_alignment_yaw {
-                let heading = alignment.local_to_field.inner.rotation.angle();
-                let error = |heading: f64| {
-                    let difference = heading - expected;
-                    difference.sin().atan2(difference.cos()).abs()
-                };
-                if error(heading + std::f64::consts::PI) < error(heading) {
-                    alignment.local_to_field.inner =
-                        nalgebra::Isometry2::new(nalgebra::Vector2::zeros(), std::f64::consts::PI)
-                            * alignment.local_to_field.inner;
-                    for association in &mut frame.associations {
-                        association.field_point.inner.x = -association.field_point.inner.x;
-                        association.field_point.inner.y = -association.field_point.inner.y;
-                    }
-                }
-                if error(alignment.local_to_field.inner.rotation.angle())
-                    >= std::f64::consts::FRAC_PI_2
-                {
-                    return Ok(false);
-                }
-            }
-            let field_to_camera = frame.robot_to_camera.inner.cast::<f64>()
-                * initial_pose.inner.cast::<f64>().inverse()
-                * alignment.local_to_field.to_3d().inner.inverse();
-            if frame.associations.iter().any(|association| {
-                let p = field_to_camera * association.field_point.inner.cast::<f64>();
-                !p.iter().all(|v| v.is_finite()) || p.coords.norm() <= MIN_LANDMARK_RANGE
-            }) {
-                return Ok(false);
-            }
-            *self = initialized;
-            frame.robot_to_local = initial_pose;
-            Some(alignment)
-        } else {
-            None
+        let Some(alignment_key) = self.alignment else {
+            return Ok(false);
         };
-        let (segment, tau) = self.segment_and_tau(time)?;
         let controls = self.ensure_segment(segment)?;
         let pose = self.spline(controls)?.pose(tau)?;
-        let alignment = match &candidate {
-            Some(value) => value,
-            None => self
-                .graph
-                .get(self.alignment.expect("existing alignment"))?,
-        };
+        let alignment = self.graph.get(alignment_key)?;
         let field_to_camera = frame.robot_to_camera.inner.cast::<f64>()
             * pose.inner.inverse()
             * alignment.local_to_field.to_3d().inner.inverse();
@@ -145,15 +192,9 @@ impl Estimator {
             tracing::warn!(?time, "discarding visual frame with invalid landmark range");
             return Ok(false);
         }
-        if let Some(candidate) = candidate {
-            self.alignment = Some(self.graph.add(candidate));
-            for segment in self.segments() {
-                self.add_containment(segment)?;
-            }
-        }
         let batch = self.graph.add_batch(FrameReprojections {
             controls,
-            alignment: self.alignment.expect("initialized alignment"),
+            alignment: alignment_key,
             intrinsics: self.intrinsics,
             duration: seconds_per_knot(),
             tau,
@@ -167,24 +208,24 @@ impl Estimator {
             huber_threshold: HUBER_THRESHOLD,
             min_range: MIN_LANDMARK_RANGE,
         });
+        let mut factors = Vec::with_capacity(frame.associations.len());
         for association in &frame.associations {
-            self.graph.add_factor_to(
+            factors.push(self.graph.add_factor_to(
                 batch,
                 ReprojectionObservation {
                     field_point: Point3::wrap(association.field_point.inner.cast()),
                     detection: Point2::wrap(association.detection.inner.cast()),
                 },
-            )?;
+            )?);
             *self.measurements.entry(segment).or_default() += 1;
         }
         self.reprojection_batches.push((segment, batch));
-        if self
-            .latest_visual_frame
-            .as_ref()
-            .is_none_or(|old| time >= old.time)
-        {
-            self.latest_visual_frame = Some(TimeWrapper { time, inner: frame });
-        }
+        self.pending_visuals.push(PendingVisual {
+            segment,
+            batch,
+            factors,
+            frame: TimeWrapper { time, inner: frame },
+        });
         self.commit_time(time);
         Ok(true)
     }
@@ -195,9 +236,9 @@ impl Estimator {
         previous_camera: Option<&CameraGeometry>,
         current_camera: Option<&CameraGeometry>,
     ) -> Result<bool> {
-        if self.check_time(sample.time, "visual odometry")?.is_none() {
+        let Some((current_segment, _)) = self.check_time(sample.time, "visual odometry")? else {
             return Ok(false);
-        }
+        };
         if self
             .latest_vo_epoch
             .is_some_and(|epoch| sample.epoch < epoch)
@@ -223,13 +264,8 @@ impl Estimator {
             tracing::warn!("discarding visual odometry without endpoint camera geometry");
             return Ok(false);
         };
-        let Some((previous_segment, previous_tau)) =
+        let Some((previous_segment, _)) =
             self.check_time(delta.previous_time, "visual odometry")?
-        else {
-            return Ok(false);
-        };
-        let Some((current_segment, current_tau)) =
-            self.check_time(sample.time, "visual odometry")?
         else {
             return Ok(false);
         };
@@ -256,10 +292,25 @@ impl Estimator {
                 .current_left_camera_to_previous_left_camera
                 .cast::<f64>()
             * current_camera.robot_to_camera.inner.cast::<f64>();
+        self.accept_motion(MotionRecord::Visual {
+            previous_time: delta.previous_time,
+            time: sample.time,
+            transform: transform.framed_transform(),
+        })
+    }
+
+    pub(super) fn insert_visual_odometry(
+        &mut self,
+        previous_time: Time,
+        time: Time,
+        transform: Isometry3<Robot, Robot, f64>,
+    ) -> Result<()> {
+        let (previous_segment, previous_tau) = self.segment_and_tau(previous_time)?;
+        let (current_segment, current_tau) = self.segment_and_tau(time)?;
         let observation = VisualOdometryObservation {
             previous_tau,
             current_tau,
-            current_to_previous: transform.framed_transform(),
+            current_to_previous: transform,
         };
         let information_root = SMatrix::identity() * 10.0;
         if previous_segment == current_segment {
@@ -287,8 +338,7 @@ impl Estimator {
                 huber_threshold: HUBER_THRESHOLD,
             })?;
         }
-        self.commit_time(sample.time);
         *self.measurements.entry(previous_segment).or_default() += 1;
-        Ok(true)
+        Ok(())
     }
 }

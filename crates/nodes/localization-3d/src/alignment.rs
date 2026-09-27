@@ -1,12 +1,65 @@
 use coordinate_systems::{Camera, Field, Local, Robot};
-use linear_algebra::{IntoTransform, Isometry2, Isometry3, Point2};
+use linear_algebra::{
+    IntoTransform, Isometry2, Isometry3, Orientation2, Point2, Rotation3, Vector2, Vector3,
+};
 use localization_fagra::alignment::fit_ground_similarity;
 use projection::intrinsic::Intrinsic;
+use types::localization::HeadingConstraint;
 use types::visual_localization::FieldMarkAssociation;
+use types::visual_localization::VisualLocalizationFrame;
 
 const MIN_REPROJECTION_DEPTH: f64 = 0.01;
 const MIN_DETECTION_SEPARATION_PX: f32 = 1.0;
 const MIN_LANDMARK_SEPARATION_M: f32 = 1.0e-4;
+const MAX_VISUAL_RMS_PX: f64 = 10.0;
+
+pub(crate) fn valid_visual_rms(rms: Option<f64>) -> bool {
+    rms.is_some_and(|rms| rms.is_finite() && rms <= MAX_VISUAL_RMS_PX)
+}
+
+pub(crate) fn seed_recovery_alignment(
+    frame: &mut VisualLocalizationFrame,
+    robot_to_local: Rotation3<Robot, Local>,
+    heading: HeadingConstraint,
+) -> Option<(Isometry3<Robot, Local>, Isometry2<Local, Field>)> {
+    let (pose, mut alignment) = seed_alignment(
+        robot_to_local,
+        frame.robot_to_camera,
+        frame.camera_intrinsic,
+        &mut frame.associations,
+        false,
+    )?;
+    let field_heading = Orientation2::new(
+        (alignment.to_3d().inner.rotation * pose.inner.rotation)
+            .euler_angles()
+            .2 as f64,
+    );
+    let error = heading
+        .expected
+        .rotation_to(field_heading)
+        .inner
+        .angle()
+        .abs();
+    let flipped = error > std::f64::consts::FRAC_PI_2;
+    let error = if flipped {
+        std::f64::consts::PI - error
+    } else {
+        error
+    };
+    if !heading.is_valid() || !error.is_finite() || error > heading.max_error {
+        return None;
+    }
+    if flipped {
+        alignment.inner =
+            nalgebra::Isometry2::new(nalgebra::Vector2::zeros(), std::f32::consts::PI)
+                * alignment.inner;
+        for association in &mut frame.associations {
+            association.field_point.inner.x = -association.field_point.inner.x;
+            association.field_point.inner.y = -association.field_point.inner.y;
+        }
+    }
+    Some((pose, alignment))
+}
 
 pub(crate) fn valid_visual_frame(
     frame: &types::visual_localization::VisualLocalizationFrame,
@@ -40,45 +93,45 @@ pub(crate) fn valid_visual_frame(
 }
 
 /// Fit camera height and field alignment from IMU tilt and bearings.
-/// The incoming local translation is deliberately ignored.
 /// Startup canonicalizes the field half; recovery selects it from trusted heading.
 pub(crate) fn seed_alignment(
-    robot_to_local: Isometry3<Robot, Local>,
+    robot_to_local: Rotation3<Robot, Local>,
     robot_to_camera: Isometry3<Robot, Camera>,
     intrinsic: Intrinsic,
     associations: &mut [FieldMarkAssociation],
     canonicalize: bool,
 ) -> Option<(Isometry3<Robot, Local>, Isometry2<Local, Field>)> {
-    let rotation = robot_to_local.inner.rotation.cast::<f64>();
-    let camera_to_robot = robot_to_camera.inner.cast::<f64>().inverse();
-    let camera_rotation = rotation * camera_to_robot.rotation;
+    let rotation: Rotation3<Robot, Local, f64> = Rotation3::wrap(robot_to_local.inner.cast());
+    let camera_to_robot: Isometry3<Camera, Robot, f64> =
+        Isometry3::wrap(robot_to_camera.inner.cast::<f64>()).inverse();
+    let camera_rotation = rotation * camera_to_robot.rotation();
     let mut points = Vec::with_capacity(associations.len());
     for a in associations.iter() {
-        let ray = camera_rotation * intrinsic.bearing(a.detection).inner.cast::<f64>();
-        if !ray.iter().all(|v| v.is_finite()) || ray.z >= -1e-6 {
+        let ray =
+            camera_rotation * Vector3::wrap(intrinsic.bearing(a.detection).inner.cast::<f64>());
+        if !ray.inner.iter().all(|v| v.is_finite()) || ray.z() >= -1e-6 {
             return None;
         }
         points.push((
-            -ray.xy() / ray.z,
+            Vector2::<Local, f64>::wrap(-ray.inner.xy() / ray.z()),
             Point2::wrap(a.field_point.inner.coords.xy().cast::<f64>().into()),
         ));
     }
-    let (camera_alignment, height) = fit_ground_similarity(points.into_iter()).ok()?;
-    let offset = rotation * camera_to_robot.translation.vector;
-    let body_height = height - offset.z;
+    let fit = fit_ground_similarity(points.into_iter()).ok()?;
+    let offset = rotation * camera_to_robot.translation().coords();
+    let body_height = fit.camera_height - offset.z();
     if body_height <= 0.0 {
         return None;
     }
     let pose: Isometry3<Robot, Local> = nalgebra::Isometry3::from_parts(
         nalgebra::Translation3::new(0.0, 0.0, body_height),
-        rotation,
+        rotation.inner,
     )
     .cast()
     .framed_transform();
     let mut alignment = nalgebra::Isometry2::from_parts(
-        (camera_alignment.inner.translation.vector - camera_alignment.inner.rotation * offset.xy())
-            .into(),
-        camera_alignment.inner.rotation,
+        (fit.camera_position.inner.coords - fit.rotation.inner * offset.inner.xy()).into(),
+        fit.rotation.inner,
     );
     let framed_alignment: Isometry2<Local, Field, f64> = alignment.framed_transform();
     let field_to_camera = robot_to_camera.inner.cast::<f64>()
@@ -97,7 +150,7 @@ pub(crate) fn seed_alignment(
         squared += (pixel - a.detection.inner.coords.cast::<f64>()).norm_squared();
     }
     let rms = (squared / associations.len() as f64).sqrt();
-    if !rms.is_finite() || rms > 10.0 {
+    if !valid_visual_rms(Some(rms)) {
         return None;
     }
     if canonicalize && alignment.translation.vector.x > 0.0 {

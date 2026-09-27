@@ -23,19 +23,13 @@ pub(super) fn positive<R: RealField + Copy>(value: R) -> Result<R, EvaluationErr
 pub(super) fn unique<R: RealField + Copy, const N: usize>(
     keys: &[StateKey<PoseControl<R>>; N],
 ) -> Result<(), EvaluationError> {
-    let mut remaining = keys.as_slice();
-
-    while let Some((current_key, tail_keys)) = remaining.split_first() {
-        let current_block_identifier = current_key.block_id();
-        let is_duplicate = tail_keys
+    for (index, key) in keys.iter().enumerate() {
+        if keys[index + 1..]
             .iter()
-            .any(|key| key.block_id() == current_block_identifier);
-
-        if is_duplicate {
+            .any(|other| other.block_id() == key.block_id())
+        {
             return Err(EvaluationError::InvalidEvaluation);
         }
-
-        remaining = tail_keys;
     }
 
     Ok(())

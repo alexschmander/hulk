@@ -66,12 +66,18 @@ impl ImageOverlay for ProjectedFieldLinesOverlay {
     }
 
     fn prepare(&self, image_time: Time) -> Option<Self::Sample> {
-        let epoch = self.status.latest()?.value.epoch;
+        let status = self.status.latest()?;
+        let epoch = status.value.epoch;
+        let generation = status.value.generation;
         let poses = self.history();
         let before = poses
             .iter()
             .rev()
-            .filter(|p| p.value.time <= image_time)
+            .filter(|p| {
+                p.value.time <= image_time
+                    && p.value.epoch == epoch
+                    && p.value.generation == generation
+            })
             .max_by_key(|p| p.value.time)?;
         let after = if before.value.time == image_time {
             before
@@ -79,12 +85,13 @@ impl ImageOverlay for ProjectedFieldLinesOverlay {
             poses
                 .iter()
                 .rev()
-                .filter(|p| p.value.time >= image_time)
+                .filter(|p| {
+                    p.value.time >= image_time
+                        && p.value.epoch == epoch
+                        && p.value.generation == generation
+                })
                 .min_by_key(|p| p.value.time)?
         };
-        if before.value.epoch != epoch || after.value.epoch != epoch {
-            return None;
-        }
         let gap = after.value.time.duration_since(before.value.time);
         let fraction = if gap.is_zero() {
             0.0
@@ -124,11 +131,12 @@ impl ImageOverlay for ProjectedFieldLinesOverlay {
                 .latest()
                 .map_or(FieldDimensions::SPL_2025, |p| p.value),
             epoch,
+            generation,
             pose_time: before.value.time,
             associations: self
                 .associations
                 .at_time(image_time)
-                .filter(|p| p.value.inner.epoch == epoch),
+                .filter(|p| p.value.inner.epoch == epoch && p.value.inner.generation == generation),
         };
         self.valid(&sample).then_some(sample)
     }
@@ -175,7 +183,9 @@ impl ProjectedFieldLinesOverlay {
             .filter(|p| p.value.time <= time)
             .max_by_key(|p| p.value.time)
             .is_some_and(|p| {
-                p.value.epoch != status.value.epoch || p.value.robot_to_field.is_none()
+                p.value.epoch != status.value.epoch
+                    || p.value.generation != status.value.generation
+                    || p.value.robot_to_field.is_none()
             })
     }
 
@@ -185,30 +195,41 @@ impl ProjectedFieldLinesOverlay {
         time: Time,
     ) {
         if sample.associations.is_none() {
-            sample.associations = self
-                .associations
-                .at_time(time)
-                .filter(|p| p.value.inner.epoch == sample.epoch);
+            sample.associations = self.associations.at_time(time).filter(|p| {
+                p.value.inner.epoch == sample.epoch && p.value.inner.generation == sample.generation
+            });
         }
     }
 
     pub(in crate::panels::image) fn valid(&self, sample: &ProjectedFieldSample) -> bool {
-        self.status
-            .latest()
-            .is_some_and(|status| status.value.epoch == sample.epoch)
-            && !self.history().iter().any(|p| {
-                p.value.time >= sample.pose_time
-                    && p.value.epoch == sample.epoch
-                    && p.value.robot_to_field.is_none()
-            })
+        self.status.latest().is_some_and(|status| {
+            status.value.epoch == sample.epoch && status.value.generation == sample.generation
+        }) && !self.history().iter().any(|p| {
+            p.value.time >= sample.pose_time
+                && p.value.epoch == sample.epoch
+                && p.value.generation == sample.generation
+                && p.value.robot_to_field.is_none()
+        })
     }
 
     fn history(&self) -> Vec<Arc<SampleRecord<LocalizationEstimate>>> {
         let mut samples = self.localization.get_all();
         // A late measurement can produce a newer solution at the same pose time.
-        samples.sort_by_key(|sample| (sample.value.epoch, sample.value.time));
+        samples.sort_by_key(|sample| {
+            (
+                sample.value.epoch,
+                sample.value.generation,
+                sample.value.time,
+            )
+        });
         samples.reverse();
-        samples.dedup_by_key(|sample| (sample.value.epoch, sample.value.time));
+        samples.dedup_by_key(|sample| {
+            (
+                sample.value.epoch,
+                sample.value.generation,
+                sample.value.time,
+            )
+        });
         samples.reverse();
         samples
     }
@@ -218,6 +239,7 @@ pub(in crate::panels::image) struct ProjectedFieldSample {
     projection: FieldProjection,
     dimensions: FieldDimensions,
     epoch: u64,
+    generation: u64,
     pose_time: Time,
     associations: Option<Arc<SampleRecord<TimeWrapper<VisualLocalizationFrame>>>>,
 }

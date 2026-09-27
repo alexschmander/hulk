@@ -49,8 +49,6 @@ pub struct TrackingAssociationParameters {
     pub yaw_sigma_per_second: f32,
     /// Validity horizon since the last successful solve; older predictions reject without fallback.
     pub max_age: Duration,
-    /// LostTrack multiplies prediction sigma, not the global geometric gates.
-    pub lost_track_sigma_multiplier: f32,
     /// For 3..=5 features, required best/rival joint Gaussian likelihood ratio;
     /// the log-likelihood gap must exceed ln(score_ratio).
     /// For >5 features, marginal-assignment heuristic: removing any winning edge must lose
@@ -65,7 +63,6 @@ impl Default for TrackingAssociationParameters {
             position_sigma_per_second: 0.15,
             yaw_sigma_per_second: 0.1,
             max_age: Duration::from_secs(5),
-            lost_track_sigma_multiplier: 2.0,
             score_ratio: 1.05,
         }
     }
@@ -84,13 +81,8 @@ impl TrackingAssociationParameters {
                 );
             }
         }
-        if self.max_age.is_zero()
-            || !self.lost_track_sigma_multiplier.is_finite()
-            || self.lost_track_sigma_multiplier < 1.0
-            || !self.score_ratio.is_finite()
-            || self.score_ratio <= 1.0
-        {
-            return Err("invalid tracking age, LostTrack multiplier or score ratio".into());
+        if self.max_age.is_zero() || !self.score_ratio.is_finite() || self.score_ratio <= 1.0 {
+            return Err("invalid tracking age or score ratio".into());
         }
         Ok(())
     }

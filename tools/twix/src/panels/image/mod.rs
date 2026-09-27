@@ -53,6 +53,7 @@ fn decode_color_image(image: &RosImage) -> Result<ColorImage, ImageDecodeError> 
 }
 
 pub struct ImagePanel {
+    replay_revision: u64,
     image_history_capacity: usize,
     topic_editor: String,
     topic: String,
@@ -95,6 +96,7 @@ impl Panel for ImagePanel {
             .to_string();
 
         let mut panel = Self {
+            replay_revision: context.backend.replay_revision(),
             image_history_capacity: context
                 .value
                 .and_then(|value| value.get("image_history_capacity"))
@@ -146,6 +148,12 @@ impl Panel for ImagePanel {
     }
 
     fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
+        if self.replay_revision != context.backend.replay_revision() {
+            self.replay_revision = context.backend.replay_revision();
+            if let ObservationState::Observing(observed) = &mut self.observation {
+                observed.render_cache = RenderedImageCache::for_panel();
+            }
+        }
         if self.topic.is_empty() {
             ui.label("Enter an image topic.");
             return;
@@ -793,6 +801,7 @@ mod tests {
     #[test]
     fn save_preserves_topic() {
         let panel = ImagePanel {
+            replay_revision: 0,
             image_history_capacity: super::DEFAULT_IMAGE_HISTORY_CAPACITY,
             topic_editor: "inputs/right_image".to_string(),
             topic: "inputs/right_image".to_string(),

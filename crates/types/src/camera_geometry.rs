@@ -38,7 +38,8 @@ pub fn camera_geometry_at(
     interpolate_camera_geometry(&before, &after, time)
 }
 
-fn interpolate_camera_geometry(
+/// Interpolate a validated source-time bracket without extrapolating head motion.
+pub fn interpolate_camera_geometry(
     before: &TimeWrapper<CameraGeometry>,
     after: &TimeWrapper<CameraGeometry>,
     time: Time,

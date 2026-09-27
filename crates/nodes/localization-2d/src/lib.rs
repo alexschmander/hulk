@@ -53,10 +53,9 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
 
     loop {
         let localization = localization_subscriber.recv().await?;
-        if status
-            .get_latest()
-            .is_none_or(|status| status.epoch != localization.epoch)
-        {
+        if status.get_latest().is_none_or(|status| {
+            status.epoch != localization.epoch || status.generation != localization.generation
+        }) {
             continue;
         }
         let time = localization.time;

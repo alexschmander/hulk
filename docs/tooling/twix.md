@@ -57,7 +57,36 @@ These cover bundled presets, file operations, picker dialogs, and layout renderi
 
 ## Panels and keybindings
 
-Twix includes Text, Image, Map (2D), 3D Map, and Parameter panels. Panels use the shared `ros-z-debug` topic observer and follow the selected namespace. The Text panel renders the latest dynamic payload as JSON and shows sample metadata. The Parameter panel discovers ROS-Z nodes with remote parameter services, shows full snapshots or selected paths as JSON, and writes selected paths to active layers with revision checks.
+Twix includes Text, Image, Map (2D), 3D Map, Parameter, and Timeline panels. Panels follow the selected namespace. Topic views use the shared `ros-z-debug` topic observer. The Text panel renders the latest dynamic payload as JSON and shows sample metadata. The Parameter panel discovers ROS-Z nodes with remote parameter services, shows full snapshots or selected paths as JSON, and writes selected paths to active layers with revision checks.
+
+## MCAP Timeline
+
+Start a recording with `cargo run -p mcap-replay -- recovered.mcap`. The tool starts
+an embedded Zenoh router and prints its router URI and a Twix connection command.
+Use `--router <URI>` to connect the replay tool to an existing router instead, or
+`--listen tcp/127.0.0.1:0` to allocate an available embedded-router port.
+
+In Twix, open **+ → Timeline**. Dock it alongside other views or save it in a
+layout. Its Blender-style view uses the full panel, with an adaptive time ruler,
+shaded recording range, recording strip, and a blue playhead extending through
+the grid. The panel header holds play/pause, start/end, and step buttons.
+Hover buttons for their labels; **⋯** holds exact-time jumps, step size, and
+**Copy timestamp**. The step size is saved with the panel. Scrubbing follows input
+immediately and sends seeks without waiting for status polling; intermediate
+unsent positions are coalesced. Seeking pauses playback and resets histories and presentation
+anchors, including on backward seeks. Multiple Timeline panels share a single
+control connection; hiding or closing a Timeline does not interrupt synchronization
+of the other views. Connection failures offer a retry action.
+
+Click or drag anywhere in the grid to scrub. Wheel/pinch zooms around the pointer;
+middle-drag or Shift + wheel pans without seeking. **Frame all** or a double
+middle-click restores the full recording. With the timeline focused, **Space**
+toggles playback, **Left/Right** step (hold Shift for finer steps), **Home/End**
+jump to the bounds, and **F** frames all. Time labels are elapsed recording time,
+not frame numbers. Each Timeline panel keeps an independent zoom/pan view.
+
+See [MCAP replay](../../tools/mcap-replay/README.md) for topic semantics and the
+Zenoh control protocol.
 
 ## 3D Map
 

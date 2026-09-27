@@ -68,7 +68,9 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let mut status = LocalizationStatus {
         time: node.clock().now(),
         epoch: 0,
+        generation: 0,
         state: LocalizationState::Startup,
+        heading: None,
     };
     statuses.publish(&status).await?;
     let mut active: Option<Localization> = None;
@@ -83,7 +85,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 if damping && !next_damping {
                     epoch_start = node.clock().now();
                     active = None;
-                    status = LocalizationStatus { time: epoch_start, epoch: status.epoch.wrapping_add(1), state: LocalizationState::Startup };
+                    status = LocalizationStatus { time: epoch_start, epoch: status.epoch.wrapping_add(1), generation: 0, state: LocalizationState::Startup, heading: None };
                     statuses.publish(&status).await?;
                 }
                 damping = next_damping;
@@ -107,6 +109,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         let samples = inputs.drain(first).await?;
         let now = node.clock().now();
         let mut needs_solve = false;
+        let mut ingestion_duration = Duration::ZERO;
         for sample in samples {
             let time = sample.time();
             if time < epoch_start || time > now {
@@ -131,7 +134,9 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 status = LocalizationStatus {
                     time,
                     epoch: status.epoch.wrapping_add(1),
+                    generation: 0,
                     state: LocalizationState::Startup,
+                    heading: None,
                 };
                 statuses.publish(&status).await?;
             }
@@ -176,7 +181,9 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 statuses.publish(&status).await?;
                 localization
             };
+            let started = std::time::Instant::now();
             needs_solve |= inputs.ingest(localization, sample)?;
+            ingestion_duration += started.elapsed();
         }
         if !needs_solve {
             continue;
@@ -184,7 +191,8 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         let Some(localization) = active.as_mut() else {
             continue;
         };
-        let output = tokio::task::block_in_place(|| localization.solve(node.clock().now()));
+        let mut output = tokio::task::block_in_place(|| localization.solve(node.clock().now()));
+        output.diagnostics.ingestion_duration = ingestion_duration;
         // Advance lifecycle after the potentially expensive solve, before publishing.
         localization.advance_time(node.clock().now());
         if status != localization.status() {

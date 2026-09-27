@@ -1010,6 +1010,7 @@ pub(super) mod tests {
             .unwrap();
         let time = |millis: i64| Time::from_nanos(millis * 1_000_000);
         let estimate = |time, field: bool| LocalizationEstimate {
+            generation: 0,
             time,
             epoch: 0,
             robot_to_local: PoseEstimate {
@@ -1075,7 +1076,7 @@ pub(super) mod tests {
                                     let source = time(stamp + geometry_delay);
                                     camera_pub.publish_with_source_time(&TimeWrapper { time: time(stamp), inner: CameraMatrix::default() }, source).await.unwrap();
                                     pose_pub.publish_with_source_time(&estimate(time(stamp), true), source).await.unwrap();
-                                    geometry_pub.publish_with_source_time(&LocalizationStatus { time: time(stamp), epoch: 0, state: LocalizationState::Tracking }, source).await.unwrap();
+                                    geometry_pub.publish_with_source_time(&LocalizationStatus { time: time(stamp), epoch: 0, generation: 0, state: LocalizationState::Tracking, heading: None }, source).await.unwrap();
                                     object_pub.publish_with_source_time(&TimeWrapper { time: time(stamp), inner: vec![] }, source).await.unwrap();
                                     tokio::time::sleep(Duration::from_millis(10)).await;
                                 }

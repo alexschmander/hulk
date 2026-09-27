@@ -21,3 +21,9 @@ serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 types = { workspace = true }
+
+[dev-dependencies]
+field_mark_association.workspace = true
+json5.workspace = true
+mcap.workspace = true
+serde_json.workspace = true

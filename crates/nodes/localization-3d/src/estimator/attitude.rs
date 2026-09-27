@@ -1,7 +1,8 @@
 use super::{Estimator, KNOT_SPACING_NS, control_keys, seconds_per_knot};
 use color_eyre::Result;
+use coordinate_systems::ImuReference;
+use linear_algebra::Orientation3;
 use localization_fagra::factors::RelativeYaw;
-use nalgebra::UnitQuaternion;
 use ros_z::time::Time;
 
 impl Estimator {
@@ -47,21 +48,24 @@ impl Estimator {
         Ok(())
     }
 
-    fn attitude_at(&self, time: Time) -> Option<UnitQuaternion<f64>> {
+    pub(crate) fn attitude_at(&self, time: Time) -> Option<Orientation3<ImuReference, f64>> {
         let (&before, a) = self.attitudes.range(..=time).next_back()?;
         if before == time {
             return Some(*a);
         }
         let (&after, b) = self.attitudes.range(time..).next()?;
+        if after.duration_since(before) > types::localization::MAX_IMU_ATTITUDE_GAP {
+            return None;
+        }
         let fraction = (time.as_nanos() - before.as_nanos()) as f64
             / (after.as_nanos() - before.as_nanos()) as f64;
-        Some(a.slerp(b, fraction))
+        Some(a.slerp(*b, fraction))
     }
 }
 
-fn yaw_change(a: UnitQuaternion<f64>, b: UnitQuaternion<f64>) -> f64 {
-    let a = a * nalgebra::Vector3::x();
-    let b = b * nalgebra::Vector3::x();
+fn yaw_change(a: Orientation3<ImuReference, f64>, b: Orientation3<ImuReference, f64>) -> f64 {
+    let a = a.inner * nalgebra::Vector3::x();
+    let b = b.inner * nalgebra::Vector3::x();
     let difference = b.y.atan2(b.x) - a.y.atan2(a.x);
     difference.sin().atan2(difference.cos())
 }

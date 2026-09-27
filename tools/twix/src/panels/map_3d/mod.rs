@@ -79,8 +79,9 @@ struct ViewerData {
 }
 
 struct Observations {
+    replay_revision: u64,
     namespace: String,
-    epoch: Option<u64>,
+    frame_id: Option<(u64, u64)>,
     last_anchor: Option<Time>,
     dimensions: Observation<FieldDimensions>,
     localization: Observation<types::localization::LocalizationEstimate>,
@@ -95,8 +96,9 @@ struct Observations {
 impl Observations {
     fn new(context: &impl ObservationContext) -> color_eyre::Result<Self> {
         Ok(Self {
+            replay_revision: 0,
             namespace: String::new(),
-            epoch: None,
+            frame_id: None,
             last_anchor: None,
             dimensions: Observation::new(
                 context,
@@ -161,16 +163,16 @@ impl Observations {
     }
 
     fn snapshot(&mut self, namespace: &str, settings: &Settings) -> ViewerData {
-        let epoch = self
-            .associations
-            .as_ref()
-            .and_then(|associations| associations.epoch(namespace));
+        let frame_id = self
+            .localization_status
+            .latest(namespace)
+            .map(|status| (status.value.epoch, status.value.generation));
         if self.namespace != namespace
-            || self.epoch != epoch
+            || self.frame_id != frame_id
             || (!settings.camera && !settings.associations)
         {
             self.namespace = namespace.to_owned();
-            self.epoch = epoch;
+            self.frame_id = frame_id;
             self.last_anchor = None;
         }
         let images = self
@@ -181,7 +183,7 @@ impl Observations {
         let associations = self
             .associations
             .as_ref()
-            .map(|associations| associations.current_frames(namespace))
+            .map(|associations| associations.current_frames(namespace, frame_id))
             .unwrap_or_default();
         let anchor = select_anchor(
             images.iter().map(|record| image_time(record)),
@@ -220,11 +222,7 @@ impl Observations {
             localization: self
                 .localization
                 .latest(namespace)
-                .filter(|record| {
-                    self.localization_status
-                        .latest(namespace)
-                        .is_some_and(|status| status.value.epoch == record.value.epoch)
-                })
+                .filter(|record| frame_id == Some((record.value.epoch, record.value.generation)))
                 .and_then(|record| record.value.robot_to_field)
                 .map(|field| Isometry3::wrap(field.pose.inner.cast::<f32>().inverse())),
             visual_odometer: odometer
@@ -364,6 +362,10 @@ impl Panel for Map3DPanel {
             Ok(observations) => {
                 if let Err(error) = observations.update_layers(&context, &self.settings) {
                     ui.colored_label(ui.visuals().error_fg_color, error.to_string());
+                }
+                if observations.replay_revision != context.backend.replay_revision() {
+                    observations.replay_revision = context.backend.replay_revision();
+                    observations.last_anchor = None;
                 }
                 observations.snapshot(&context.backend.namespace(), &self.settings)
             }

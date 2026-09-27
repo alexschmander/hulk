@@ -2,10 +2,7 @@ use linear_algebra::{IntoTransform, Isometry3, point};
 use nalgebra::{Isometry2, Translation3, UnitComplex, UnitQuaternion, Vector2, Vector3};
 use types::localization::{LocalizationEstimate3D, LocalizationState3D};
 
-use super::{
-    AssociationFixture, AssociationGeometry, GlobalLocalizerParameters, Time, fixture_geometry,
-    robot_to_camera,
-};
+use super::{AssociationFixture, AssociationGeometry, Time, fixture_geometry, robot_to_camera};
 
 pub struct FitMetrics {
     pub camera_height: f64,
@@ -140,80 +137,4 @@ pub fn expected_geometry(fixture: &AssociationFixture) -> (AssociationGeometry, 
             pixel_rms,
         },
     )
-}
-
-/// Finite-difference oracle independent of the associator's analytic Jacobians.
-/// Returns signed doubled area and its uncertainty gate for every possible seed triangle.
-pub fn triangle_margins(
-    fixture: &AssociationFixture,
-    config: GlobalLocalizerParameters,
-) -> Vec<(f64, f64)> {
-    let camera = &fixture.camera_matrix;
-    let geometry = fixture_geometry(camera);
-    let robot_origin = geometry
-        .robot_to_local
-        .inner
-        .translation
-        .vector
-        .cast::<f64>();
-    let camera_to_local = (geometry.robot_to_local * robot_to_camera(camera).inverse())
-        .inner
-        .cast::<f64>();
-    let project = |pixels: [Vector2<f64>; 3], tilt: Vector3<f64>, height: f64| {
-        let perturb = UnitQuaternion::from_scaled_axis(tilt);
-        let origin = robot_origin
-            + perturb * (camera_to_local.translation.vector - robot_origin)
-            + Vector3::new(0.0, 0.0, height);
-        pixels.map(|pixel| {
-            let normalized = (pixel - camera.intrinsics.optical_center.inner.coords.cast::<f64>())
-                .component_div(&camera.intrinsics.focals.cast::<f64>());
-            let ray =
-                perturb * camera_to_local.rotation * Vector3::new(normalized.x, normalized.y, 1.0);
-            (origin - ray * origin.z / ray.z).xy()
-        })
-    };
-    let area = |pixels, tilt, height| {
-        let p = project(pixels, tilt, height);
-        let u = p[1] - p[0];
-        let v = p[2] - p[0];
-        u.x * v.y - u.y * v.x
-    };
-    let mut margins = Vec::new();
-    for a in 0..fixture.expected.len() {
-        for b in a + 1..fixture.expected.len() {
-            for c in b + 1..fixture.expected.len() {
-                let pixels =
-                    [a, b, c].map(|i| Vector2::from(fixture.expected[i].detection).cast::<f64>());
-                let mut pixel_variance = 0.0;
-                for i in 0..3 {
-                    for axis in 0..2 {
-                        let mut plus = pixels;
-                        let mut minus = pixels;
-                        plus[i][axis] += 0.01;
-                        minus[i][axis] -= 0.01;
-                        let derivative = (area(plus, Vector3::zeros(), 0.0)
-                            - area(minus, Vector3::zeros(), 0.0))
-                            / 0.02;
-                        pixel_variance +=
-                            (derivative * config.detection_pixel_sigma as f64).powi(2);
-                    }
-                }
-                let tilt = [Vector3::x(), Vector3::y()].map(|axis| {
-                    (area(pixels, axis * 1.0e-5, 0.0) - area(pixels, -axis * 1.0e-5, 0.0)) / 2.0e-5
-                });
-                let height = (area(pixels, Vector3::zeros(), 1.0e-5)
-                    - area(pixels, Vector3::zeros(), -1.0e-5))
-                    / 2.0e-5;
-                let p = project(pixels, Vector3::zeros(), 0.0);
-                let gate = (config.mahalanobis_gate as f64).sqrt()
-                    * (pixel_variance.sqrt()
-                        + config.imu_tilt_sigma as f64 * tilt[0].hypot(tilt[1])
-                        + config.height_sigma as f64 * height.abs())
-                    + config.geometric_tolerance as f64
-                        * ((p[1] - p[0]).norm() + (p[2] - p[0]).norm());
-                margins.push((area(pixels, Vector3::zeros(), 0.0), gate));
-            }
-        }
-    }
-    margins
 }

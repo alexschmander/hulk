@@ -1,3 +1,4 @@
+use coordinate_systems::Ground;
 use fagra::{BlockId, EvaluationError, Factor, LinearizationSink, StateKey, StateStore};
 use nalgebra::{Matrix2, RealField, Rotation2, SMatrix, Vector2};
 
@@ -13,7 +14,7 @@ pub struct KinematicOdometry<R: RealField + Copy = f64, const N: usize = 4> {
     pub duration: R,
     pub previous_tau: R,
     pub current_tau: R,
-    pub translation: Vector2<R>,
+    pub translation: linear_algebra::Vector2<Ground, R>,
     pub information_root: Matrix2<R>,
     pub huber_threshold: R,
 }
@@ -28,7 +29,12 @@ impl<R: RealField + Copy, const N: usize> KinematicOdometry<R, N> {
             return Err(EvaluationError::InvalidEvaluation);
         }
         common::unique(&self.controls)?;
-        common::finite(self.translation.iter().chain(self.information_root.iter()))?;
+        common::finite(
+            self.translation
+                .inner
+                .iter()
+                .chain(self.information_root.iter()),
+        )?;
         common::positive(self.huber_threshold)?;
         Ok(())
     }
@@ -73,7 +79,7 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>>, const N: usize> Factor<
         .pose(self.current_tau)?;
         let (prediction, _) = self.prediction(&a.inner, &b.inner)?;
         Ok(common::huber(
-            &(self.information_root * (prediction - self.translation)),
+            &(self.information_root * (prediction - self.translation.inner)),
             self.huber_threshold,
         )?
         .0)
@@ -100,7 +106,7 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>>, const N: usize> Factor<
         .linearize()?
         .pose(self.current_tau)?;
         let (prediction, rotation) = self.prediction(&a.pose.inner, &b.pose.inner)?;
-        let residual = self.information_root * (prediction - self.translation);
+        let residual = self.information_root * (prediction - self.translation.inner);
         let scale = common::huber(&residual, self.huber_threshold)?.1;
         let mut ha = SMatrix::<R, 2, 6>::zeros();
         let mut hb = SMatrix::<R, 2, 6>::zeros();

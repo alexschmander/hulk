@@ -24,9 +24,8 @@
     max_pixel_distance: 80.0,
     position_sigma_per_second: 0.15,
     yaw_sigma_per_second: 0.1,
-    // Reject predictions older than this; never switch LostTrack back to global matching.
+    // Validity limit for pose-based tracking. LostTrack uses heading-guided global matching.
     max_age: { nanos: 0, secs: 5 },
-    lost_track_sigma_multiplier: 2.0,
     score_ratio: 1.05,
   },
   max_pose_hint_age: { nanos: 250000000, secs: 0 },

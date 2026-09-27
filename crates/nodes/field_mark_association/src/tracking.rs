@@ -11,8 +11,9 @@ use types::{
 };
 
 use crate::{
-    AssociationInput, AssociationResult, DetectedVisualFeature, DetectedVisualFeatures,
-    FieldMarkAssociationParameters, VisualFeatureClass, features::raw_detections, map::LandmarkMap,
+    AssociationResult, DetectedVisualFeature, DetectedVisualFeatures,
+    FieldMarkAssociationParameters, TrackingAssociationInput as AssociationInput,
+    VisualFeatureClass, features::raw_detections, map::LandmarkMap,
 };
 
 #[derive(Clone, Copy)]
@@ -20,7 +21,6 @@ struct TrackingPrior {
     anchor_estimate: LocalizationEstimate3D,
     predicted_robot_to_field: Isometry3<Robot, Field>,
     age: f32,
-    sigma_multiplier: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -58,9 +58,8 @@ pub(crate) fn associate(
     let current_covariance =
         process_covariance(input.geometry.robot_to_local, prior.age, parameters);
     let noise = PredictionNoise {
-        anchor: prior.anchor_estimate.covariance.cast::<f64>()
-            * f64::from(prior.sigma_multiplier).powi(2),
-        current: current_covariance.cast::<f64>() * f64::from(prior.sigma_multiplier).powi(2),
+        anchor: prior.anchor_estimate.covariance.cast::<f64>(),
+        current: current_covariance.cast::<f64>(),
         pixel_variance: f64::from(config.detection_pixel_sigma).powi(2),
     };
     let predictions = project_predictions(input, &map, prior, &noise);
@@ -72,20 +71,12 @@ fn validated_prior(
     parameters: &FieldMarkAssociationParameters,
 ) -> Option<TrackingPrior> {
     let tracking = parameters.tracking;
-    let (estimate, last_successful_solve, sigma_multiplier) = match input.geometry.state {
-        LocalizationState3D::Startup => return None,
-        LocalizationState3D::Tracking {
-            estimate,
-            last_successful_solve,
-        } => (estimate, last_successful_solve, 1.0),
-        LocalizationState3D::LostTrack {
-            last_known_estimate,
-            last_successful_solve,
-        } => (
-            last_known_estimate,
-            last_successful_solve,
-            tracking.lost_track_sigma_multiplier,
-        ),
+    let LocalizationState3D::Tracking {
+        estimate,
+        last_successful_solve,
+    } = input.geometry.state
+    else {
+        return None;
     };
     let alignment = input.geometry.local_to_field?;
     if !valid_geometry(input, estimate, parameters.global_localizer)
@@ -104,7 +95,6 @@ fn validated_prior(
         anchor_estimate: estimate,
         predicted_robot_to_field: alignment.to_3d() * input.geometry.robot_to_local,
         age: age.as_secs_f32(),
-        sigma_multiplier,
     })
 }
 
@@ -1271,6 +1261,7 @@ mod tests {
         };
         let current_covariance = covariance * 0.3;
         let geometry = AssociationGeometry {
+            generation: 0,
             epoch: 0,
             state: LocalizationState3D::Startup,
             robot_to_local: Isometry3::wrap(prediction),

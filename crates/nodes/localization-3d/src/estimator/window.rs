@@ -65,24 +65,25 @@ impl Estimator {
             self.controls.insert(index, self.graph.add(prediction));
         }
         for current in next_segment..=segment {
-            let root = MotionPrior::information_root(
-                seconds_per_knot(),
-                0.01,
-                self.parameters.accelerometer_process_noise_variance,
-            )? / if gap && current < segment {
-                10.0_f64.sqrt()
-            } else {
-                1.0
-            };
-            self.graph.add_factor(MotionPrior {
-                controls: control_keys(&self.controls, current)?,
-                duration: seconds_per_knot(),
-                information_root: root,
-                use_start_velocity: !gap || current == segment,
-            })?;
+            self.add_motion_prior(current, gap && current < segment)?;
             self.add_containment(current)?;
         }
         control_keys(&self.controls, segment)
+    }
+
+    pub(super) fn add_motion_prior(&mut self, segment: i64, gap: bool) -> Result<()> {
+        let root = MotionPrior::information_root(
+            seconds_per_knot(),
+            0.01,
+            self.parameters.accelerometer_process_noise_variance,
+        )? / if gap { 10.0_f64.sqrt() } else { 1.0 };
+        self.graph.add_factor(MotionPrior {
+            controls: control_keys(&self.controls, segment)?,
+            duration: seconds_per_knot(),
+            information_root: root,
+            use_start_velocity: !gap,
+        })?;
+        Ok(())
     }
 
     pub(super) fn add_containment(&mut self, segment: i64) -> Result<()> {
@@ -126,10 +127,6 @@ impl Estimator {
         self.controls.retain(|index, _| *index >= oldest - 1);
         self.measurements.retain(|index, _| *index >= oldest);
         self.yaw_factors.retain(|index, _| *index >= oldest);
-        let start = Time::from_nanos(self.origin.as_nanos() + oldest * KNOT_SPACING_NS);
-        if let Some((&before, _)) = self.attitudes.range(..=start).next_back() {
-            self.attitudes.retain(|time, _| *time >= before);
-        }
         while self
             .imu_batches
             .first_key_value()
@@ -160,6 +157,13 @@ impl Estimator {
             }
         }
         self.reprojection_batches
+            .retain(|(index, _)| *index >= oldest);
+        for &(index, batch) in &self.acceleration_batches {
+            if index < oldest {
+                self.graph.remove_batch(batch)?;
+            }
+        }
+        self.acceleration_batches
             .retain(|(index, _)| *index >= oldest);
         Ok(())
     }

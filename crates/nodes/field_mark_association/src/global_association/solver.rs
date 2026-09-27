@@ -1,5 +1,5 @@
-use coordinate_systems::Pixel;
-use linear_algebra::Point2;
+use coordinate_systems::{Field, Ground, Pixel};
+use linear_algebra::{Orientation2, Point2};
 use localization_fagra::alignment::fit_ground_similarity;
 use nalgebra::{Matrix2, Matrix2x3, Vector2, Vector3};
 use types::visual_localization::{
@@ -47,9 +47,8 @@ pub(crate) fn preprocess(
             .iter()
             .all(|x| x.is_finite())
         || !input
-            .robot_to_local
+            .robot_to_ground
             .inner
-            .rotation
             .coords
             .iter()
             .all(|x| x.is_finite())
@@ -99,8 +98,7 @@ fn project_detection(
     feature: DetectedVisualFeature,
 ) -> Option<Detection> {
     let config = *input.parameters;
-    let rotation =
-        input.robot_to_local.inner.rotation * input.robot_to_camera.inner.rotation.inverse();
+    let rotation = (input.robot_to_ground * input.robot_to_camera.rotation().inverse()).inner;
     let ray = rotation * input.camera_intrinsic.bearing(feature.pixel).inner;
     let pixel_rays = [
         (rotation * Vector3::x()) / input.camera_intrinsic.focals.x,
@@ -241,7 +239,13 @@ impl Search<'_> {
         self.spend()?;
         if pairs.len() == self.order.len() {
             if let Some(rms) = self.validate_fit(pairs) {
-                let key = canonical_pairs(pairs, self.detections, self.map);
+                let key = if self.input.heading.is_some() {
+                    let mut key = pairs.clone();
+                    key.sort_by_key(|&(d, _)| self.detections[d].id);
+                    key
+                } else {
+                    canonical_pairs(pairs, self.detections, self.map)
+                };
                 if self
                     .solution
                     .as_ref()
@@ -270,20 +274,27 @@ impl Search<'_> {
         for _ in pairs {
             self.spend()?;
         }
-        let (pose, height) = fit_ground_similarity(pairs.iter().map(|&(d, m)| {
+        let fit = fit_ground_similarity(pairs.iter().map(|&(d, m)| {
             (
-                self.detections[d].xy.cast::<f64>(),
+                linear_algebra::Vector2::<Ground, f64>::wrap(self.detections[d].xy.cast::<f64>()),
                 Point2::wrap(self.map.landmarks[m].xy.inner.cast::<f64>()),
             )
         }))
         .ok()?;
+        let height = fit.camera_height;
+        if let Some(heading) = self.input.heading {
+            let yaw = fit.rotation.angle();
+            if !heading.accepts(Orientation2::<Field, f64>::new(yaw)) {
+                return None;
+            }
+        }
         let input = self.input;
         let config = *input.parameters;
-        let camera_to_level = (input.robot_to_local.inner.rotation
+        let camera_to_level = (input.robot_to_ground.inner
             * input.robot_to_camera.inner.rotation.inverse())
         .cast::<f64>();
         // Height of the body origin, not an assumption about foot contact.
-        let lever = input.robot_to_local.inner.rotation.cast::<f64>()
+        let lever = input.robot_to_ground.inner.cast::<f64>()
             * input
                 .robot_to_camera
                 .inner
@@ -307,7 +318,7 @@ impl Search<'_> {
         let mut squared = 0.0;
         for &(d, m) in pairs {
             let field = self.map.landmarks[m].xy.inner.coords.cast::<f64>();
-            let xy = pose.inner.rotation.inverse() * (field - pose.inner.translation.vector);
+            let xy = fit.rotation.inner.inverse() * (field - fit.camera_position.inner.coords);
             let leveled = Vector3::new(xy.x, xy.y, -height);
             let camera = camera_to_level.inverse() * leveled;
             if camera.z <= f64::from(config.min_reprojection_depth) {
@@ -396,6 +407,9 @@ fn canonical_pairs(
 }
 
 pub(crate) fn associate(input: GlobalAssociationInput<'_>) -> Option<AssociationResult> {
+    if input.heading.is_some_and(|heading| !heading.is_valid()) {
+        return None;
+    }
     let (map, detections) = preprocess(input)?;
     if detections.len() < input.parameters.min_inliers || detections.len() > map.landmarks.len() {
         return None;

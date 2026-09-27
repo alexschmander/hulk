@@ -1,11 +1,24 @@
 {
-  kinematic_odometry_noise: {
-    position_sigma: [0.005, 0.005],
-    translation_variance_per_second: [0.001, 0.001],
+  // Leg odometry assumes a stationary support foot. Enable only with justified stance evidence.
+  kinematic_odometry_noise: null,
+  accelerometer: {
+    bias: [0.0, 0.0, 0.0],
+    scale: [1.0, 1.0, 1.0],
+    // K1 simulation model value; verify the physical mounting offset/calibration on hardware.
+    position: [0.0, 0.0, 0.0],
+    noise_density: 0.3,
+    averaging_interval: { secs: 0, nanos: 10000000 },
   },
+  initial_height_sigma: 1.0,
+  initial_velocity_sigma: 5.0,
+  recovery_height_gate: 9.0,
+  max_tilt_error: 0.3490658503988659,
   accelerometer_process_noise_variance: 10.0,
   visual_feature_noise_variance: 10000.0,
   field_containment_sigma: 1.0,
+  // Radians: reject abrupt visual heading corrections; allow slow IMU drift during tracking.
+  max_heading_error: 0.3490658503988659, // 20 degrees
+  max_heading_reference_drift_per_second: 0.008726646259971648, // 0.5 degrees/s
   tracking_timeout: { secs: 2, nanos: 0 },
   visual_tracking_timeout: { secs: 2, nanos: 0 },
 }

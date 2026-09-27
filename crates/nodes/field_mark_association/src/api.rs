@@ -1,10 +1,11 @@
-use coordinate_systems::{Camera, Local, Robot};
-use linear_algebra::Isometry3;
+use coordinate_systems::{Camera, Ground, ImuReference, Robot};
+use linear_algebra::{Isometry3, Orientation2, Orientation3, Rotation3};
 use projection::intrinsic::Intrinsic;
 use ros_z::time::Time;
+pub use types::localization::HeadingConstraint;
 use types::{
     field_dimensions::FieldDimensions,
-    localization::LocalizationState3D,
+    localization::{LocalizationState, LocalizationState3D, LocalizationStatus},
     visual_localization::{
         AssociationGeometry, FieldMarkAssociation, GlobalLocalizationDebug, VisualAssociationSource,
     },
@@ -15,9 +16,22 @@ use crate::{
     global_association::solver, tracking,
 };
 
-/// All geometry is sampled at the detection time. Epoch freshness belongs to the caller.
+/// Exposure-time sensor inputs and an optional coherent tracking snapshot.
 #[derive(Clone, Copy)]
 pub struct AssociationInput<'a> {
+    pub status: &'a LocalizationStatus,
+    pub attitude: Option<Orientation3<ImuReference>>,
+    pub tracking: Option<&'a AssociationGeometry>,
+    pub visual_features: &'a DetectedVisualFeatures,
+    pub robot_to_camera: Isometry3<Robot, Camera>,
+    pub camera_intrinsic: Intrinsic,
+    pub field_dimensions: &'a FieldDimensions,
+    pub time: Time,
+}
+
+/// Pose prediction for an established Tracking state.
+#[derive(Clone, Copy)]
+pub struct TrackingAssociationInput<'a> {
     pub visual_features: &'a DetectedVisualFeatures,
     pub robot_to_camera: Isometry3<Robot, Camera>,
     pub geometry: &'a AssociationGeometry,
@@ -26,38 +40,28 @@ pub struct AssociationInput<'a> {
     pub time: Time,
 }
 
-/// Stateless global matching inputs; no field pose, lifecycle state or history is consulted.
 #[derive(Clone, Copy)]
 pub struct GlobalAssociationInput<'a> {
     pub visual_features: &'a DetectedVisualFeatures,
-    /// IMU-derived attitude in a leveled frame. Translation is ignored at startup.
-    pub robot_to_local: Isometry3<Robot, Local>,
+    /// Exposure-time leveling rotation, with robot heading removed.
+    pub robot_to_ground: Rotation3<Robot, Ground>,
     pub robot_to_camera: Isometry3<Robot, Camera>,
     pub camera_intrinsic: Intrinsic,
     pub field_dimensions: &'a FieldDimensions,
     pub parameters: &'a GlobalLocalizerParameters,
+    pub heading: Option<HeadingConstraint>,
 }
 
-/// Fixed correspondences and diagnostics only. Pose estimation belongs to localization.
+/// Fixed correspondences only; pose estimation belongs to localization.
 #[derive(Default)]
 pub struct AssociationResult {
     pub associations: Vec<FieldMarkAssociation>,
     pub source: VisualAssociationSource,
-    /// Global-only metric diagnostics. Image-space tracking leaves this unset.
     pub debug: Option<GlobalLocalizationDebug>,
 }
 
-/// Stateless dispatch by `geometry.state`; previous calls never influence association.
-/// Tracking and LostTrack require `geometry.local_to_field`. The node may run an explicit global
-/// fallback after a LostTrack failure; it tags that result for branch-safe recovery downstream.
-/// They project map landmarks into the image, carrying the last solve's full right-tangent covariance.
-/// Frames with 3..=5 features compare every gated distinct assignment using the joint pixel Gaussian,
-/// including shared anchor/process correlations and uncertainty volume. The full residual keeps
-/// the configured 2D gate's tail probability; the best/rival likelihood ratio must exceed `score_ratio`.
-/// Every retained feature must match; no subset is silently certified.
-/// Search uses `global_localizer.max_work`; exhaustion rejects even after finding a candidate.
-/// Frames with >5 features retain the marginal-assignment heuristic, not joint certification.
-/// Hard pixel limits only certify winners, after comparing all rivals.
+/// Shared lifecycle dispatch for the robot and simulator. Global matching uses
+/// sensor attitude at exposure; only tracking consumes optimizer geometry.
 pub fn associate_visual_features(
     input: AssociationInput<'_>,
     parameters: &FieldMarkAssociationParameters,
@@ -65,43 +69,70 @@ pub fn associate_visual_features(
     if parameters.validate().is_err() {
         return AssociationResult::default();
     }
-    match input.geometry.state {
-        LocalizationState3D::Startup => associate_global_visual_features(GlobalAssociationInput {
-            visual_features: input.visual_features,
-            robot_to_local: input.geometry.robot_to_local,
-            robot_to_camera: input.robot_to_camera,
-            camera_intrinsic: input.camera_intrinsic,
-            field_dimensions: input.field_dimensions,
-            parameters: &parameters.global_localizer,
-        }),
-        LocalizationState3D::Tracking { .. } => tracking::associate(input, parameters)
-            .map(|mut result| {
-                result.source = VisualAssociationSource::Tracking;
-                result
-            })
-            .unwrap_or_default(),
-        LocalizationState3D::LostTrack { .. } => tracking::associate(input, parameters)
-            .map(|mut result| {
-                result.source = VisualAssociationSource::Tracking;
-                result
-            })
-            .unwrap_or_default(),
+    if input.status.state == LocalizationState::Tracking {
+        let Some(geometry) = input.tracking.filter(|geometry| {
+            geometry.epoch == input.status.epoch
+                && geometry.generation == input.status.generation
+                && matches!(geometry.state, LocalizationState3D::Tracking { .. })
+        }) else {
+            return AssociationResult::default();
+        };
+        return associate_tracking_visual_features(
+            TrackingAssociationInput {
+                geometry,
+                visual_features: input.visual_features,
+                robot_to_camera: input.robot_to_camera,
+                camera_intrinsic: input.camera_intrinsic,
+                field_dimensions: input.field_dimensions,
+                time: input.time,
+            },
+            parameters,
+        );
     }
+    let Some(attitude) = input.attitude else {
+        return AssociationResult::default();
+    };
+    let (roll, pitch, yaw) = attitude.euler_angles();
+    let heading = if input.status.state == LocalizationState::LostTrack {
+        if input.time <= input.status.time {
+            return AssociationResult::default();
+        }
+        let Some(heading) = input
+            .status
+            .heading
+            .and_then(|reference| reference.at(input.time, Orientation2::new(f64::from(yaw))))
+        else {
+            return AssociationResult::default();
+        };
+        Some(heading)
+    } else {
+        None
+    };
+    associate_global_visual_features(GlobalAssociationInput {
+        visual_features: input.visual_features,
+        robot_to_ground: Rotation3::from_euler_angles(roll, pitch, 0.0),
+        robot_to_camera: input.robot_to_camera,
+        camera_intrinsic: input.camera_intrinsic,
+        field_dimensions: input.field_dimensions,
+        parameters: &parameters.global_localizer,
+        heading,
+    })
 }
 
-/// Geometric matching modulo the field's half-turn symmetry, without using a global pose.
-///
-/// The representative is chosen by landmark coordinates, not the robot's half. Localization
-/// seeding must resolve the remaining half-turn. No state, alignment, epoch or time is needed.
-/// Every retained detection must match; no subset is silently certified when a retained outlier exists.
-/// Startup fits camera height, planar translation and yaw from unit-height rays using IMU tilt.
-/// A non-collinear seed is required. Localizer translation and height are never consulted.
-/// Work-budget exhaustion rejects rather than returning a candidate with unproven uniqueness.
+/// Predict map landmarks with the supplied pose prior, independent of node lifecycle.
+/// Sparse frames use the joint pixel Gaussian; larger frames use marginal assignment.
+pub fn associate_tracking_visual_features(
+    input: TrackingAssociationInput<'_>,
+    parameters: &FieldMarkAssociationParameters,
+) -> AssociationResult {
+    if parameters.validate().is_err() {
+        return AssociationResult::default();
+    }
+    tracking::associate(input, parameters).unwrap_or_default()
+}
+
+/// Reject ambiguous assignments and exhausted budgets. Heading constrains oriented
+/// assignments; without it, uniqueness is modulo field half-turn symmetry.
 pub fn associate_global_visual_features(input: GlobalAssociationInput<'_>) -> AssociationResult {
-    solver::associate(input)
-        .map(|mut result| {
-            result.source = VisualAssociationSource::Global;
-            result
-        })
-        .unwrap_or_default()
+    solver::associate(input).unwrap_or_default()
 }

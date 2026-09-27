@@ -180,7 +180,7 @@ mod factor_workload {
         factors::*,
         variables::{CameraIntrinsics, FieldAlignment, TrajectoryState},
     };
-    use nalgebra::{Matrix2, Matrix3, SMatrix};
+    use nalgebra::{Matrix3, SMatrix};
 
     fagra::states! { States<R> { controls: PoseControl<R>, alignment: FieldAlignment<R>, intrinsics: CameraIntrinsics<R> } }
     fagra::factors! { Factors<R> {
@@ -233,7 +233,7 @@ mod factor_workload {
                 duration: c(0.2),
                 tau: c(0.4),
                 measured_up: Framed::wrap(Vector3::z()),
-                information_root: Matrix2::identity(),
+                information_root: Matrix3::identity(),
             })
             .unwrap();
         graph

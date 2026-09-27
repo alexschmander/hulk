@@ -1,3 +1,5 @@
+use coordinate_systems::{Camera, Field, Robot};
+use linear_algebra::{IntoTransform, Isometry3 as FramedIsometry3};
 use nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector3};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
@@ -146,7 +148,7 @@ impl Scenario {
     }
 
     /// Samples the camera-to-field truth transform, clamping to the scenario endpoints.
-    pub fn sample_camera_to_field(&self, time_seconds: f32) -> Isometry3<f32> {
+    pub fn sample_camera_to_field(&self, time_seconds: f32) -> FramedIsometry3<Camera, Field> {
         let time_seconds = time_seconds.clamp(0.0, self.duration_seconds);
         let upper = self
             .camera_to_field_keyframes
@@ -160,7 +162,10 @@ impl Scenario {
         let start = &self.camera_to_field_keyframes[upper - 1];
         let end = &self.camera_to_field_keyframes[upper];
         let alpha = (time_seconds - start.time_seconds) / (end.time_seconds - start.time_seconds);
-        keyframe_pose(start).lerp_slerp(&keyframe_pose(end), alpha)
+        keyframe_pose(start)
+            .inner
+            .lerp_slerp(&keyframe_pose(end).inner, alpha)
+            .framed_transform()
     }
 
     /// Returns a stationary three-second view of nearby own-half markings for bootstrap.
@@ -255,11 +260,11 @@ impl Scenario {
 
 impl PoseKeyframe {
     /// Constructs a keyframe from a camera-to-field transform.
-    pub fn from_camera_to_field(time_seconds: f32, pose: Isometry3<f32>) -> Self {
-        let quaternion = pose.rotation.quaternion();
+    pub fn from_camera_to_field(time_seconds: f32, pose: FramedIsometry3<Camera, Field>) -> Self {
+        let quaternion = pose.inner.rotation.quaternion();
         Self {
             time_seconds,
-            position: pose.translation.vector.into(),
+            position: pose.inner.translation.vector.into(),
             quaternion_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
         }
     }
@@ -270,36 +275,40 @@ impl PoseKeyframe {
     }
 
     /// Reconstructs the camera-to-field transform.
-    pub fn camera_to_field(&self) -> Isometry3<f32> {
+    pub fn camera_to_field(&self) -> FramedIsometry3<Camera, Field> {
         keyframe_pose(self)
     }
 }
 
 /// Rotation mapping robot x/y/z to camera z/-x/-y respectively.
-pub fn fixed_robot_to_camera() -> Isometry3<f32> {
+pub fn fixed_robot_to_camera() -> FramedIsometry3<Robot, Camera> {
     let rotation = nalgebra::Matrix3::new(0.0, -1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0);
     Isometry3::from_parts(
         Translation3::identity(),
         UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(rotation)),
     )
+    .framed_transform()
 }
 
 /// Converts a camera-to-field pose using the simulator's fixed robot-to-camera extrinsic.
-pub fn robot_to_field_from_camera_to_field(camera_to_field: &Isometry3<f32>) -> Isometry3<f32> {
+pub fn robot_to_field_from_camera_to_field(
+    camera_to_field: &FramedIsometry3<Camera, Field>,
+) -> FramedIsometry3<Robot, Field> {
     camera_to_field * fixed_robot_to_camera()
 }
 
-fn robot_pose(position: [f32; 3], rpy: [f32; 3]) -> Isometry3<f32> {
+fn robot_pose(position: [f32; 3], rpy: [f32; 3]) -> FramedIsometry3<Robot, Field> {
     Isometry3::from_parts(
         Translation3::from(Vector3::from(position)),
         UnitQuaternion::from_euler_angles(rpy[0], rpy[1], rpy[2]),
     )
+    .framed_transform()
 }
 
 fn from_robot_poses(
     name: &str,
     duration_seconds: f32,
-    poses: Vec<(f32, Isometry3<f32>)>,
+    poses: Vec<(f32, FramedIsometry3<Robot, Field>)>,
 ) -> Scenario {
     let camera_alignment_inverse = fixed_robot_to_camera().inverse();
     Scenario::new(
@@ -318,12 +327,13 @@ fn from_robot_poses(
     .expect("built-in trajectory is valid")
 }
 
-fn keyframe_pose(keyframe: &PoseKeyframe) -> Isometry3<f32> {
+fn keyframe_pose(keyframe: &PoseKeyframe) -> FramedIsometry3<Camera, Field> {
     let [x, y, z, w] = keyframe.quaternion_xyzw;
     Isometry3::from_parts(
         Translation3::from(Vector3::from(keyframe.position)),
         UnitQuaternion::new_normalize(Quaternion::new(w, x, y, z)),
     )
+    .framed_transform()
 }
 
 #[cfg(test)]
@@ -343,7 +353,8 @@ mod tests {
                 ),
             ],
         );
-        let robot = robot_to_field_from_camera_to_field(&scenario.sample_camera_to_field(1.0));
+        let robot =
+            robot_to_field_from_camera_to_field(&scenario.sample_camera_to_field(1.0)).inner;
         assert!((robot.translation.vector - Vector3::new(1.0, 0.0, 0.5)).norm() < 1.0e-5);
         assert!((robot.rotation.euler_angles().2 - std::f32::consts::FRAC_PI_4).abs() < 1.0e-5);
     }
@@ -373,7 +384,7 @@ mod tests {
 
     #[test]
     fn fixed_alignment_maps_robot_axes_to_camera_convention() {
-        let alignment = fixed_robot_to_camera();
+        let alignment = fixed_robot_to_camera().inner;
         assert!((alignment * Vector3::x() - Vector3::z()).norm() < 1.0e-6);
         assert!((alignment * Vector3::y() + Vector3::x()).norm() < 1.0e-6);
         assert!((alignment * Vector3::z() + Vector3::y()).norm() < 1.0e-6);
@@ -381,10 +392,10 @@ mod tests {
 
     #[test]
     fn scenario_duration_is_bounded() {
-        let pose = PoseKeyframe::from_camera_to_field(0.0, Isometry3::identity());
+        let pose = PoseKeyframe::from_camera_to_field(0.0, FramedIsometry3::identity());
         let end = PoseKeyframe::from_camera_to_field(
             MAX_SCENARIO_DURATION_SECONDS + 0.02,
-            Isometry3::identity(),
+            FramedIsometry3::identity(),
         );
 
         assert!(
@@ -402,12 +413,12 @@ mod tests {
         let teleport = Scenario::pose_teleport();
         let before = teleport.sample_camera_to_field(1.0);
         let after = teleport.sample_camera_to_field(1.02);
-        assert!((after.translation.vector - before.translation.vector).norm() > 0.5);
+        assert!((after.translation() - before.translation()).norm() > 0.5);
 
         let vo_fault = Scenario::vo_fault();
         let before = vo_fault.sample_camera_to_field(1.0);
         let after = vo_fault.sample_camera_to_field(1.02);
-        assert!((after.translation.vector - before.translation.vector).norm() < 0.1);
+        assert!((after.translation() - before.translation()).norm() < 0.1);
     }
 
     #[test]
@@ -422,11 +433,11 @@ mod tests {
             .collect::<Vec<_>>();
         let max_x = samples
             .iter()
-            .map(|pose| pose.translation.x.abs())
+            .map(|pose| pose.translation().x().abs())
             .fold(0.0_f32, f32::max);
         let max_y = samples
             .iter()
-            .map(|pose| pose.translation.y.abs())
+            .map(|pose| pose.translation().y().abs())
             .fold(0.0_f32, f32::max);
         let start = &samples[0];
         let after_one_lap = &samples[600];
@@ -434,13 +445,19 @@ mod tests {
 
         assert!(max_x > 3.9);
         assert!(max_y > 2.4);
-        assert!(start.translation.x < 0.0);
-        assert!(start.translation.x < -3.9);
-        assert!(start.translation.y.abs() < 1.0e-5);
-        assert!((start.translation.vector - after_one_lap.translation.vector).norm() < 1.0e-5);
-        assert!((start.translation.vector - after_two_laps.translation.vector).norm() < 1.0e-5);
-        assert!(start.rotation.angle_to(&after_one_lap.rotation) < 1.0e-5);
-        assert!(start.rotation.angle_to(&after_two_laps.rotation) < 1.0e-5);
+        assert!(start.translation().x() < 0.0);
+        assert!(start.translation().x() < -3.9);
+        assert!(start.translation().y().abs() < 1.0e-5);
+        assert!((start.translation() - after_one_lap.translation()).norm() < 1.0e-5);
+        assert!((start.translation() - after_two_laps.translation()).norm() < 1.0e-5);
+        assert!(start.inner.rotation.angle_to(&after_one_lap.inner.rotation) < 1.0e-5);
+        assert!(
+            start
+                .inner
+                .rotation
+                .angle_to(&after_two_laps.inner.rotation)
+                < 1.0e-5
+        );
     }
 
     #[test]
@@ -455,7 +472,7 @@ mod tests {
             let robot_to_field =
                 robot_to_field_from_camera_to_field(&scenario.sample_camera_to_field(0.0));
             assert!(
-                robot_to_field.translation.x < -0.05,
+                robot_to_field.translation().x() < -0.05,
                 "{} starts outside its own half",
                 scenario.name()
             );

@@ -6,7 +6,10 @@ use std::{
 
 use color_eyre::{Result, eyre::eyre};
 use coordinate_systems::{Field, Local, Robot};
-use fagra::{BatchKey, GaussNewton, OptimizeOptions, Problem, SolverError, StateKey};
+use fagra::{
+    BatchKey, DenseNormalCholesky, GaussNewton, LevenbergMarquardt, OptimizeOptions, Problem,
+    SolverError, StateKey,
+};
 use linear_algebra::{Framed, Isometry3, Vector2, Vector3, vector};
 use localization_fagra::{
     factors::{
@@ -25,6 +28,7 @@ use types::{
     time_wrapper::TimeWrapper, visual_localization::VisualLocalizationFrame,
 };
 
+use crate::heading::HeadingReference;
 use crate::{diagnostics::SolveDiagnostics, parameters::Localization3dParameters};
 
 const KNOT_SPACING_NS: i64 = 200_000_000;
@@ -34,10 +38,12 @@ const HUBER_THRESHOLD: f64 = 2.0;
 const MIN_REPROJECTION_DEPTH: f64 = 0.01;
 const MIN_LANDMARK_RANGE: f64 = 0.01;
 
+mod acceleration;
 mod attitude;
 mod covariance;
 mod inertial;
 mod kinematic_odometry;
+mod recovery;
 mod vision;
 mod window;
 
@@ -73,32 +79,42 @@ pub(crate) struct SolveResult {
     pub estimate: Option<LocalizationEstimate>,
     pub diagnostics: SolveDiagnostics,
     pub converged: bool,
+    pub motion_invalid: bool,
+    pub visual_rejected: bool,
 }
 
 pub(crate) struct Estimator {
     graph: Graph,
-    optimizer: GaussNewton,
+    optimizer: LevenbergMarquardt<DenseNormalCholesky>,
     options: OptimizeOptions<f64>,
     origin: Time,
     epoch: u64,
+    generation: u64,
     controls: BTreeMap<i64, StateKey<PoseControl<f64>>>,
     imu_batches: BTreeMap<i64, BatchKey<ImuKinematics<f64>>>,
+    acceleration_batches: Vec<(i64, BatchKey<ImuKinematics<f64>>)>,
+    acceleration: acceleration::AccelerationIntegrator,
     foot_batches: BTreeMap<i64, BatchKey<FootGround<f64>>>,
     odometry_batches: BTreeMap<i64, BatchKey<VisualOdometry<f64>>>,
     reprojection_batches: Vec<(i64, BatchKey<FrameReprojections<f64>>)>,
     alignment: Option<StateKey<FieldAlignment<f64>>>,
     intrinsics: StateKey<CameraIntrinsics<f64>>,
     latest_time: Time,
+    last_converged_time: Option<Time>,
+    motion_checkpoint: Option<recovery::MotionCheckpoint>,
     latest_vo_epoch: Option<u64>,
     latest_kinematic_time: Option<Time>,
     measurements: BTreeMap<i64, usize>,
     latest_visual_frame: Option<TimeWrapper<VisualLocalizationFrame>>,
-    attitudes: BTreeMap<Time, nalgebra::UnitQuaternion<f64>>,
+    pending_visuals: Vec<vision::PendingVisual>,
+    attitudes: BTreeMap<Time, linear_algebra::Orientation3<coordinate_systems::ImuReference, f64>>,
     yaw_factors: BTreeMap<i64, fagra::FactorKey<localization_fagra::factors::RelativeYaw>>,
     current_yaw: Option<fagra::FactorKey<localization_fagra::factors::RelativeYaw>>,
     parameters: Localization3dParameters,
     field_half_extents: Vector2<Field, f64>,
     field: FieldDimensions,
+    motion_history: Vec<recovery::MotionRecord>,
+    history_start: Time,
 }
 
 impl Estimator {
@@ -110,92 +126,133 @@ impl Estimator {
         parameters: Localization3dParameters,
         field: &FieldDimensions,
     ) -> Result<Self> {
-        let mut graph = Graph::new();
+        let mut estimator = Self::empty(origin, epoch, camera, parameters, field)?;
         let pose = PoseControl {
             pose: Framed::wrap(initial_pose.inner.cast()),
         };
-        let mut controls = BTreeMap::new();
         for index in -1..=2 {
-            controls.insert(index, graph.add(pose.clone()));
+            estimator
+                .controls
+                .insert(index, estimator.graph.add(pose.clone()));
         }
+        estimator.add_anchor(
+            origin,
+            TrajectoryState {
+                pose: pose.pose,
+                velocity: Vector3::wrap(nalgebra::Vector3::zeros()),
+            },
+            Some(estimator.parameters.initial_height_sigma),
+        )?;
+        estimator.add_motion_prior(0, false)?;
+        Ok(estimator)
+    }
+
+    fn empty(
+        origin: Time,
+        epoch: u64,
+        camera: &CameraGeometry,
+        parameters: Localization3dParameters,
+        field: &FieldDimensions,
+    ) -> Result<Self> {
+        let mut graph = Graph::new();
         let intrinsics_value = CameraIntrinsics {
             focal_lengths: Framed::wrap(camera.intrinsics.focals.cast()),
             optical_center: Framed::wrap(camera.intrinsics.optical_center.inner.cast()),
         };
         let intrinsics = graph.add(intrinsics_value.clone());
-        let initial_controls = control_keys(&controls, 0)?;
-        let mut anchor_root = SMatrix::<f64, 9, 9>::identity() * 1.0e3;
-        // The local pose defines the gauge. Initial velocity is only a guess,
-        // not an observed zero-velocity constraint (one m/s standard deviation).
-        anchor_root
-            .fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&nalgebra::Matrix3::identity());
-        graph.add_factor(TrajectoryPrior {
-            controls: initial_controls,
-            duration: seconds_per_knot(),
-            tau: 0.0,
-            reference: TrajectoryState {
-                pose: pose.pose,
-                velocity: Vector3::wrap(nalgebra::Vector3::zeros()),
-            },
-            information_root: anchor_root,
-        })?;
         graph.add_factor(CameraIntrinsicsPrior {
             intrinsics,
             reference: intrinsics_value,
             information_root: SMatrix::identity() * 1.0e3,
         })?;
 
-        let mut estimator = Self {
+        Ok(Self {
             graph,
-            optimizer: GaussNewton::default(),
+            optimizer: {
+                let mut optimizer = LevenbergMarquardt::new(DenseNormalCholesky::default());
+                optimizer.options.max_trials = 8;
+                optimizer
+            },
             options: OptimizeOptions {
-                max_iterations: 5,
+                max_iterations: 10,
+                gradient_tolerance: 1.0e-3,
                 // Ten micrometres / microradians is below sensor precision.
                 step_tolerance: 1.0e-5,
                 cost_tolerance: 1.0e-8,
-                ..Default::default()
             },
             origin,
             epoch,
-            controls,
+            generation: 0,
+            controls: BTreeMap::new(),
             imu_batches: BTreeMap::new(),
+            acceleration_batches: Vec::new(),
+            acceleration: acceleration::AccelerationIntegrator::default(),
             foot_batches: BTreeMap::new(),
             odometry_batches: BTreeMap::new(),
             reprojection_batches: Vec::new(),
             alignment: None,
             intrinsics,
             latest_time: origin,
+            last_converged_time: None,
+            motion_checkpoint: None,
             latest_vo_epoch: None,
             latest_kinematic_time: None,
             measurements: BTreeMap::new(),
             latest_visual_frame: None,
+            pending_visuals: Vec::new(),
             attitudes: BTreeMap::new(),
             yaw_factors: BTreeMap::new(),
             current_yaw: None,
             parameters,
             field: *field,
+            motion_history: Vec::new(),
+            history_start: origin,
             field_half_extents: vector![
                 field.length as f64 * 0.5 + field.border_strip_width as f64,
                 field.width as f64 * 0.5 + field.border_strip_width as f64,
             ],
-        };
-        let information_root = MotionPrior::information_root(
-            seconds_per_knot(),
-            0.01,
-            estimator.parameters.accelerometer_process_noise_variance,
-        )?;
-        estimator.graph.add_factor(MotionPrior {
-            controls: initial_controls,
+        })
+    }
+
+    fn add_anchor(
+        &mut self,
+        time: Time,
+        reference: TrajectoryState,
+        height_sigma: Option<f64>,
+    ) -> Result<()> {
+        let (segment, tau) = self.segment_and_tau(time)?;
+        let mut root = SMatrix::<f64, 9, 9>::zeros();
+        let rotation = reference.pose.inner.rotation.to_rotation_matrix();
+        // The residual is in reference body axes. Only Local XY/yaw fix gauge;
+        // height and tilt are physical quantities constrained by sensor evidence.
+        root.fixed_view_mut::<1, 3>(2, 0)
+            .copy_from(&(rotation.matrix().row(2) * 1.0e3));
+        root.fixed_view_mut::<2, 3>(6, 6)
+            .copy_from(&(rotation.matrix().fixed_rows::<2>(0) * 1.0e3));
+        root.fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(&(rotation.matrix() / self.parameters.initial_velocity_sigma));
+        // Broad provisional startup height only; never count a visual seed as
+        // another height observation alongside those same reprojections.
+        if let Some(sigma) = height_sigma {
+            root.fixed_view_mut::<1, 3>(8, 6)
+                .copy_from(&(rotation.matrix().row(2) / sigma));
+        }
+        self.graph.add_factor(TrajectoryPrior {
+            controls: control_keys(&self.controls, segment)?,
             duration: seconds_per_knot(),
-            information_root,
-            use_start_velocity: true,
+            tau,
+            reference,
+            information_root: root,
         })?;
-        Ok(estimator)
+        Ok(())
     }
 
     pub(crate) fn latest_time(&self) -> Time {
         self.latest_time
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     fn segments(&self) -> Range<i64> {
@@ -213,16 +270,32 @@ impl Estimator {
     }
 
     pub(crate) fn update_parameters(&mut self, parameters: Localization3dParameters) {
+        if self.parameters.accelerometer != parameters.accelerometer {
+            self.acceleration = acceleration::AccelerationIntegrator::default();
+        }
         self.parameters = parameters;
     }
 
+    #[cfg(test)]
     pub(crate) fn solve(&mut self) -> SolveResult {
+        self.solve_with_heading(None)
+    }
+
+    pub(crate) fn solve_with_heading(&mut self, heading: Option<&HeadingReference>) -> SolveResult {
+        let had_visual_update = !self.pending_visuals.is_empty();
+        let mut visual_rejected = false;
         let start = Instant::now();
         let mut diagnostics = SolveDiagnostics {
             time: self.latest_time,
             epoch: self.epoch,
             duration: Duration::ZERO,
+            estimation_duration: Duration::ZERO,
+            ingestion_duration: Duration::ZERO,
             iterations: None,
+            lm_attempts: 0,
+            lm_rejected_steps: 0,
+            gradient_norm: None,
+            motion_rebuilt: false,
             initial_cost: None,
             final_cost: None,
             termination: "failed".into(),
@@ -231,11 +304,35 @@ impl Estimator {
             failure: None,
         };
         let result = (|| -> Result<_> {
-            self.prepare_attitude()?;
-            let result = self.solve_graph(&mut diagnostics);
+            let mut result = self
+                .prepare_attitude()
+                .and_then(|()| self.solve_graph(&mut diagnostics, heading));
+            if result.is_ok() {
+                self.accept_visuals();
+            } else {
+                self.discard_visuals()?;
+                if had_visual_update {
+                    visual_rejected = true;
+                    result = self.solve_graph(&mut diagnostics, heading);
+                }
+            }
             if let Some(key) = self.current_yaw.take() {
                 self.graph.remove_factor(key)?;
             }
+            if result.is_ok() {
+                let (segment, tau) = self.segment_and_tau(self.latest_time)?;
+                if let Some(attitude) = self.attitude_at(self.latest_time) {
+                    self.motion_checkpoint = Some(recovery::MotionCheckpoint {
+                        time: self.latest_time,
+                        state: self
+                            .spline(control_keys(&self.controls, segment)?)?
+                            .state(tau)?,
+                        attitude,
+                    });
+                }
+            }
+            // Retire the restored graph after rejection too; continuous motion
+            // must not grow an unbounded graph while field updates are withheld.
             self.retire_old_segments()?;
             result
         })();
@@ -246,6 +343,10 @@ impl Estimator {
                 (None, false)
             }
         };
+        if converged {
+            self.last_converged_time = Some(self.latest_time);
+        }
+        let motion_invalid = estimate.is_none() && self.alignment.is_some();
         diagnostics.duration = start.elapsed();
         diagnostics.state_count = self.controls.len() + 1 + usize::from(self.alignment.is_some());
         diagnostics.measurement_count = self.measurements.values().sum();
@@ -253,17 +354,20 @@ impl Estimator {
             estimate,
             diagnostics,
             converged,
+            motion_invalid,
+            visual_rejected,
         }
     }
 
     fn solve_graph(
         &mut self,
         diagnostics: &mut SolveDiagnostics,
+        heading: Option<&HeadingReference>,
     ) -> Result<(LocalizationEstimate, bool)> {
         let (segment, tau) = self.segment_and_tau(self.latest_time)?;
         let controls = self.ensure_segment(segment)?;
-        // Full-step GN can accept uphill intermediate steps. Restore the whole
-        // attempt on failure so later measurements never inherit a failed trial.
+        // LM rejects bad trials. Whole-update rollback is still needed when
+        // application validation fails after otherwise accepted LM steps.
         let controls_before = self
             .controls
             .values()
@@ -285,16 +389,53 @@ impl Estimator {
             .solve_batch(&mut self.graph, &evaluation)?
             .initial_cost;
         let result = self.optimizer.solve_batch(&mut self.graph, &self.options);
+        let statistics = self.optimizer.statistics();
+        diagnostics.lm_attempts = statistics.attempts;
+        diagnostics.lm_rejected_steps = statistics.rejected_steps;
+        diagnostics.gradient_norm = statistics.gradient_norm;
         let converged = result.is_ok();
+        let termination = match &result {
+            Err(SolverError::NoProgress) => "NoProgress",
+            _ => "MaxIterations",
+        };
         let result = match result {
-            Err(SolverError::NoConvergence) => {
+            Err(SolverError::NoConvergence | SolverError::NoProgress) => {
                 self.optimizer.solve_batch(&mut self.graph, &evaluation)
             }
             result => result,
         };
-        let report = match result {
-            Ok(report) if report.final_cost <= initial_cost => report,
-            result => {
+        let checked = (|| -> Result<_> {
+            let report = result?;
+            diagnostics.iterations = Some(if converged {
+                report.iterations
+            } else {
+                statistics.accepted_steps
+            });
+            diagnostics.initial_cost = Some(initial_cost);
+            diagnostics.final_cost = Some(report.final_cost);
+            diagnostics.termination = if converged {
+                format!("{:?}", report.termination)
+            } else {
+                termination.into()
+            };
+            if report.final_cost > initial_cost {
+                return Err(eyre!("optimizer increased the objective"));
+            }
+            if let Some(heading) = heading
+                && self.alignment.is_some()
+            {
+                self.validate_heading(heading)?;
+            }
+            if !converged && !self.pending_visuals.is_empty() {
+                return Err(eyre!("visual update did not converge"));
+            }
+            self.validate_pending_visuals()?;
+            self.validate_tilt()?;
+            self.estimate_with_covariance(controls, tau)
+        })();
+        let estimate = match checked {
+            Ok(result) => result,
+            Err(error) => {
                 for (key, value) in controls_before {
                     self.graph.set(key, value)?;
                 }
@@ -302,25 +443,10 @@ impl Estimator {
                     self.graph.set(key, value)?;
                 }
                 self.graph.set(self.intrinsics, intrinsics_before)?;
-                return Err(match result {
-                    Err(error) => eyre!(error),
-                    Ok(_) => eyre!("Gauss-Newton increased the objective"),
-                });
+                return Err(error);
             }
         };
-        diagnostics.iterations = Some(if converged {
-            report.iterations
-        } else {
-            self.options.max_iterations
-        });
-        diagnostics.initial_cost = Some(initial_cost);
-        diagnostics.final_cost = Some(report.final_cost);
-        diagnostics.termination = if converged {
-            format!("{:?}", report.termination)
-        } else {
-            "MaxIterations".into()
-        };
-        Ok((self.estimate_with_covariance(controls, tau)?, converged))
+        Ok((estimate, converged))
     }
 }
 
@@ -367,10 +493,17 @@ mod tests {
             nalgebra::Isometry3::identity().framed_transform(),
             &camera,
             Localization3dParameters {
-                kinematic_odometry_noise: Default::default(),
+                kinematic_odometry_noise: Some(Default::default()),
+                accelerometer: None,
+                initial_height_sigma: 1.0,
+                initial_velocity_sigma: 5.0,
+                recovery_height_gate: 9.0,
+                max_tilt_error: 20.0_f64.to_radians(),
                 accelerometer_process_noise_variance: 10.0,
                 visual_feature_noise_variance: 100.0,
                 field_containment_sigma: 1.0,
+                max_heading_error: 20.0_f64.to_radians(),
+                max_heading_reference_drift_per_second: 0.5_f64.to_radians(),
                 tracking_timeout: Duration::from_secs(2),
                 visual_tracking_timeout: Duration::from_secs(2),
             },
@@ -392,18 +525,7 @@ mod tests {
         assert_eq!(failed.diagnostics.iterations, Some(0));
         for index in 0..100 {
             let time = Time::from_nanos(1_000_000_000 + index * 2_000_000);
-            assert!(
-                estimator
-                    .ingest_imu(
-                        time,
-                        ImuState {
-                            roll_pitch_yaw: Vector3::wrap(nalgebra::Vector3::zeros()),
-                            angular_velocity: Vector3::wrap(nalgebra::Vector3::zeros()),
-                            linear_acceleration: Vector3::wrap(nalgebra::Vector3::zeros()),
-                        },
-                    )
-                    .unwrap()
-            );
+            assert!(estimator.ingest_imu(time, ImuState::default(),).unwrap());
         }
         let result = estimator.solve();
         assert!(
@@ -428,6 +550,10 @@ mod tests {
             (estimate.robot_to_local.covariance - repeated.robot_to_local.covariance).amax()
                 < 1.0e-10
         );
+        // Crossing the knot boundary must retain observability.
+        let boundary = Time::from_nanos(1_200_000_000);
+        estimator.ingest_imu(boundary, ImuState::default()).unwrap();
+        assert_eq!(estimator.solve().estimate.unwrap().time, boundary);
     }
 
     #[test]
@@ -556,20 +682,6 @@ mod tests {
     }
 
     #[test]
-    fn covariance_remains_observable_across_knot_boundary() {
-        let mut estimator = estimator();
-        for index in 0..=100 {
-            estimator
-                .ingest_imu(
-                    Time::from_nanos(1_000_000_000 + index * 2_000_000),
-                    ImuState::default(),
-                )
-                .unwrap();
-        }
-        estimator.solve().estimate.unwrap();
-    }
-
-    #[test]
     fn solve_retires_controls_outside_two_second_window() {
         let mut estimator = estimator();
         for index in 0..=110 {
@@ -600,32 +712,27 @@ mod tests {
         let mut estimator = estimator();
         assert!(
             !estimator
-                .ingest_visual(
-                    TimeWrapper {
-                        time: Time::from_nanos(2_000_000_000),
-                        inner: VisualLocalizationFrame {
-                            epoch: 7,
-                            source: types::visual_localization::VisualAssociationSource::Tracking,
-                            robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
-                            robot_to_local: nalgebra::Isometry3::identity().framed_transform(),
-                            camera_intrinsic: Intrinsic::new(
-                                nalgebra::vector![300.0, 300.0],
-                                point![160.0, 120.0],
-                            ),
-                            associations: Vec::new(),
-                        },
+                .ingest_visual(TimeWrapper {
+                    time: Time::from_nanos(2_000_000_000),
+                    inner: VisualLocalizationFrame {
+                        epoch: 7,
+                        source: types::visual_localization::VisualAssociationSource::Tracking,
+                        robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
+                        generation: 0,
+                        camera_intrinsic: Intrinsic::new(
+                            nalgebra::vector![300.0, 300.0],
+                            point![160.0, 120.0],
+                        ),
+                        associations: Vec::new(),
                     },
-                    None
-                )
+                })
                 .unwrap()
         );
         assert_eq!(estimator.latest_time, Time::from_nanos(1_000_000_000));
     }
 
-    #[test]
-    fn startup_replaces_drifted_height_prior_with_landmark_fit() {
-        use types::visual_localization::FieldMarkAssociation;
-        let camera = CameraGeometry {
+    fn recovery_camera() -> CameraGeometry {
+        CameraGeometry {
             robot_to_camera: Isometry3::wrap(
                 nalgebra::Isometry3::from_parts(
                     nalgebra::Translation3::new(0.12, -0.04, 0.2),
@@ -634,7 +741,13 @@ mod tests {
                 .inverse(),
             ),
             intrinsics: Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]),
-        };
+        }
+    }
+
+    #[test]
+    fn startup_replaces_drifted_height_prior_with_landmark_fit() {
+        use types::visual_localization::FieldMarkAssociation;
+        let camera = recovery_camera();
         let truth = nalgebra::Isometry3::from_parts(
             nalgebra::Translation3::new(-2.0, 1.0, 0.55),
             nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 0.4),
@@ -668,30 +781,37 @@ mod tests {
                 &estimator.field,
             )
             .unwrap();
-            estimator
-                .ingest_imu(Time::from_nanos(1_800_000_000), ImuState::default())
-                .unwrap();
             let time = Time::from_nanos(1_100_000_000);
-            assert!(
+            for index in 0..=400 {
                 estimator
-                    .ingest_visual(
-                        TimeWrapper {
-                            time,
-                            inner: VisualLocalizationFrame {
-                                epoch: 7,
-                                source:
-                                    types::visual_localization::VisualAssociationSource::Tracking,
-                                robot_to_local: wrong_pose,
-                                robot_to_camera: camera.robot_to_camera,
-                                camera_intrinsic: camera.intrinsics,
-                                associations: associations.clone(),
-                            }
+                    .ingest_imu(
+                        estimator.origin + Duration::from_millis(index * 2),
+                        ImuState {
+                            roll_pitch_yaw: vector![0.1, -0.05, 0.0],
+                            ..Default::default()
                         },
-                        None
                     )
-                    .unwrap()
-            );
-            assert_eq!(estimator.origin, time);
+                    .unwrap();
+            }
+            let origin = estimator.origin;
+            estimator = estimator
+                .bootstrap_candidate(
+                    TimeWrapper {
+                        time,
+                        inner: VisualLocalizationFrame {
+                            epoch: 7,
+                            source: types::visual_localization::VisualAssociationSource::Tracking,
+                            generation: 0,
+                            robot_to_camera: camera.robot_to_camera,
+                            camera_intrinsic: camera.intrinsics,
+                            associations: associations.clone(),
+                        },
+                    },
+                    None,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(estimator.origin, origin);
             let controls = control_keys(&estimator.controls, 0).unwrap();
             let seeded = estimator.spline(controls).unwrap().pose(0.0).unwrap();
             assert!((seeded.inner.translation.vector.z - 0.55).abs() < 1e-5);
@@ -721,19 +841,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn global_recovery_reseeds_the_trusted_symmetry_branch() {
+    fn recovery_fixture() -> (
+        Estimator,
+        TimeWrapper<VisualLocalizationFrame>,
+        HeadingReference,
+    ) {
         use types::visual_localization::{FieldMarkAssociation, VisualAssociationSource};
-        let camera = CameraGeometry {
-            robot_to_camera: Isometry3::wrap(
-                nalgebra::Isometry3::from_parts(
-                    nalgebra::Translation3::new(0.12, -0.04, 0.2),
-                    nalgebra::UnitQuaternion::from_euler_angles(std::f32::consts::PI, 0.0, 0.0),
-                )
-                .inverse(),
-            ),
-            intrinsics: Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]),
-        };
+        let camera = recovery_camera();
         let truth = nalgebra::Isometry3::from_parts(
             nalgebra::Translation3::new(-2.0, 1.0, 0.55),
             nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 0.4),
@@ -755,43 +869,134 @@ mod tests {
             })
             .collect();
         let mut estimator = estimator();
-        estimator.alignment = Some(estimator.graph.add(FieldAlignment {
-            local_to_field: nalgebra::Isometry2::identity().framed_transform(),
-        }));
-        let time = Time::from_nanos(1_100_000_000);
-        assert!(
-            estimator
-                .ingest_visual(
-                    TimeWrapper {
-                        time,
-                        inner: VisualLocalizationFrame {
-                            epoch: 7,
-                            source: VisualAssociationSource::Global,
-                            robot_to_local: Isometry3::wrap(nalgebra::Isometry3::from_parts(
-                                nalgebra::Translation3::new(10.0, -5.0, 4.0),
-                                nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 2.0),
-                            )),
-                            robot_to_camera: camera.robot_to_camera,
-                            camera_intrinsic: camera.intrinsics,
-                            associations,
-                        },
-                    },
-                    Some(-1.6),
-                )
-                .unwrap()
-        );
-        for index in 1..=20 {
+        let wrong_pose = Isometry3::wrap(nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(10.0, -5.0, 4.0),
+            nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 2.0),
+        ));
+        estimator = Estimator::new(
+            estimator.origin,
+            7,
+            wrong_pose,
+            &camera,
+            estimator.parameters.clone(),
+            &estimator.field,
+        )
+        .unwrap();
+        let time = Time::from_nanos(4_375_000_000);
+        let frame = TimeWrapper {
+            time,
+            inner: VisualLocalizationFrame {
+                epoch: 7,
+                source: VisualAssociationSource::Global,
+                generation: 0,
+                robot_to_camera: camera.robot_to_camera,
+                camera_intrinsic: camera.intrinsics,
+                associations,
+            },
+        };
+        for index in 0..=1800 {
             estimator
                 .ingest_imu(
-                    time + Duration::from_millis(index * 2),
+                    estimator.origin + Duration::from_millis(index * 2),
                     ImuState {
                         roll_pitch_yaw: Vector3::wrap(nalgebra::Vector3::new(0.1, -0.05, 2.0)),
                         ..Default::default()
                     },
                 )
                 .unwrap();
+            if index > 0 && index % 100 == 0 {
+                estimator.solve().estimate.unwrap();
+            }
         }
-        let recovered = estimator
+        // This whole interval spans exposure and adjacent knots. Moving the knot
+        // origin to exposure would make it unsupported or truncate its motion.
+        let delta = types::odometry::KinematicOdometryDelta {
+            previous_time: Time::from_nanos(4_210_000_000),
+            time: Time::from_nanos(4_590_000_000),
+            current_to_previous: linear_algebra::Isometry2::identity(),
+        };
+        assert!(estimator.ingest_kinematic_odometry(delta).unwrap());
+        assert!(
+            estimator
+                .ingest_visual_odometry(
+                    types::visual_odometry::VisualOdometer {
+                        time: delta.time,
+                        epoch: 4,
+                        delta: Some(types::visual_odometry::VisualOdometryDelta {
+                            previous_time: delta.previous_time,
+                            current_left_camera_to_previous_left_camera:
+                                nalgebra::Isometry3::identity(),
+                        }),
+                        current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
+                    },
+                    Some(&camera),
+                    Some(&camera)
+                )
+                .unwrap()
+        );
+        // Epoch resets without motion must also survive reconstruction.
+        assert!(
+            !estimator
+                .ingest_visual_odometry(
+                    types::visual_odometry::VisualOdometer {
+                        time: delta.time,
+                        epoch: 9,
+                        delta: None,
+                        current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
+                    },
+                    None,
+                    None
+                )
+                .unwrap()
+        );
+        let mut feet = kinematics::robot_kinematics::RobotKinematics::default();
+        let offset = wrong_pose.inner.rotation.inverse() * nalgebra::Vector3::new(0.0, 0.0, -0.55);
+        feet.left_leg.sole_to_robot.inner.translation.vector = offset;
+        feet.right_leg.sole_to_robot.inner.translation.vector = offset;
+        assert!(
+            estimator
+                .ingest_kinematics(TimeWrapper {
+                    time: delta.time,
+                    inner: feet
+                })
+                .unwrap()
+        );
+        let heading = HeadingReference::new(
+            estimator.origin,
+            linear_algebra::Orientation2::new(0.4),
+            linear_algebra::Orientation3::from_euler_angles(0.1, -0.05, 2.0),
+        );
+        (estimator, frame, heading)
+    }
+
+    #[test]
+    fn reconstruction_preserves_motion_and_admission_state() {
+        let (estimator, frame, heading) = recovery_fixture();
+        let delta = types::odometry::KinematicOdometryDelta {
+            previous_time: Time::from_nanos(4_210_000_000),
+            time: Time::from_nanos(4_590_000_000),
+            current_to_previous: linear_algebra::Isometry2::identity(),
+        };
+        assert!(estimator.motion_history.len() < 1200);
+        assert!(estimator.controls.len() < 20);
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.latest_time, estimator.latest_time);
+        assert_eq!(candidate.origin, estimator.origin);
+        assert_eq!(
+            candidate.motion_history.len(),
+            estimator.motion_history.len()
+        );
+        assert_eq!(candidate.latest_vo_epoch, Some(9));
+        assert_eq!(candidate.latest_kinematic_time, Some(delta.time));
+        assert!(!candidate.ingest_kinematic_odometry(delta).unwrap());
+        assert_eq!(
+            candidate.segment_and_tau(delta.previous_time).unwrap().0 + 1,
+            candidate.segment_and_tau(delta.time).unwrap().0
+        );
+        let recovered = candidate
             .solve()
             .estimate
             .unwrap()
@@ -799,10 +1004,95 @@ mod tests {
             .unwrap()
             .pose
             .inner;
+        assert!((recovered.translation.vector - nalgebra::vector![-2.0, 1.0, 0.55]).norm() < 1e-4);
         assert!(
-            (recovered.translation.vector - truth.translation.vector.cast::<f64>()).norm() < 1e-4
+            recovered
+                .rotation
+                .angle_to(&nalgebra::UnitQuaternion::from_euler_angles(
+                    0.1, -0.05, 0.4
+                ))
+                < 1e-4
         );
-        assert!(recovered.rotation.angle_to(&truth.rotation.cast::<f64>()) < 1e-4);
+    }
+
+    #[test]
+    fn bootstrap_height_is_not_a_millimetre_prior() {
+        let (estimator, frame, heading) = recovery_fixture();
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        let evaluate = OptimizeOptions {
+            gradient_tolerance: f64::MAX,
+            ..candidate.options
+        };
+        let before = candidate
+            .optimizer
+            .solve_batch(&mut candidate.graph, &evaluate)
+            .unwrap()
+            .initial_cost;
+        for key in candidate.controls.values() {
+            let mut control = candidate.graph.get(*key).unwrap().clone();
+            control.pose.inner.translation.z += 1.0;
+            candidate.graph.set(*key, control).unwrap();
+        }
+        let after = candidate
+            .optimizer
+            .solve_batch(&mut candidate.graph, &evaluate)
+            .unwrap()
+            .initial_cost;
+        // Reprojections disagree, but there is no extra 500,000-cost height pseudo-observation.
+        // Feet above the floor remain legal: this must not impose a contact equality.
+        assert!(
+            after > before && after - before < 1000.0,
+            "{before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn repeated_heading_rejection_keeps_the_window_bounded() {
+        let (estimator, frame, heading) = recovery_fixture();
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        candidate.solve().estimate.unwrap();
+        let wrong_heading = HeadingReference::new(
+            candidate.latest_time,
+            linear_algebra::Orientation2::new(-2.0),
+            linear_algebra::Orientation3::from_euler_angles(0.1, -0.05, 2.0),
+        );
+        let mut pending = candidate.latest_visual_frame.clone().unwrap();
+        pending.time = candidate.latest_time;
+        assert!(candidate.ingest_visual(pending).unwrap());
+        for index in 1..=150 {
+            candidate
+                .ingest_imu(
+                    Time::from_nanos(4_600_000_000) + Duration::from_millis(index * 20),
+                    ImuState {
+                        roll_pitch_yaw: vector![0.1, -0.05, 2.0],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let rejected = candidate.solve_with_heading(Some(&wrong_heading));
+            assert!(rejected.estimate.is_none());
+            assert!(rejected.motion_invalid);
+            assert_eq!(rejected.visual_rejected, index == 1);
+            assert!(
+                candidate.controls.len() < 20,
+                "rejection must still retire the restored graph"
+            );
+        }
+        assert!(candidate.motion_checkpoint.as_ref().unwrap().time < candidate.history_start);
+        let mut motion = candidate.motion_candidate().unwrap().unwrap();
+        assert!(motion.controls.len() < 20);
+        let recovered = motion.solve();
+        let estimate = recovered
+            .estimate
+            .expect("expired checkpoint remains usable");
+        assert!(estimate.robot_to_field.is_none());
+        assert!((estimate.robot_to_local.pose.inner.translation.z - 0.55).abs() < 0.01);
     }
 
     #[test]
@@ -818,7 +1108,7 @@ mod tests {
             inner: VisualLocalizationFrame {
                 epoch: 7,
                 source: types::visual_localization::VisualAssociationSource::Tracking,
-                robot_to_local: Isometry3::identity(),
+                generation: 0,
                 robot_to_camera: Isometry3::from_translation(0.0, 0.0, -1.0),
                 camera_intrinsic: Intrinsic::new(
                     nalgebra::vector![300.0, 300.0],
@@ -836,10 +1126,10 @@ mod tests {
                 .to_vec(),
             },
         };
-        assert!(estimator.ingest_visual(frame.clone(), None).unwrap());
+        assert!(estimator.ingest_visual(frame.clone()).unwrap());
         // A finite bearing objective does not authorize a physically invalid tracking result.
         assert!(estimator.visual_rms().is_none());
         frame.inner.robot_to_camera = Isometry3::identity();
-        assert!(!estimator.ingest_visual(frame, None).unwrap());
+        assert!(!estimator.ingest_visual(frame).unwrap());
     }
 }

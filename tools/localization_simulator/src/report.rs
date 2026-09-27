@@ -13,11 +13,13 @@ use crate::{
     SimulationConfig,
     config::{production_association_parameters, production_localization_parameters},
     production_vo::{ProductionVoDiagnostics, ProductionVoStatus},
-    simulation::{LandmarkClass, LandmarkFrameCounts, LocalizationSimulation},
+    simulation::{
+        LandmarkClass, LandmarkFrameCounts, LocalizationSimulation, SimulationHistorySample,
+    },
     trajectory::{Scenario, fixed_robot_to_camera},
 };
 
-pub const REPORT_SCHEMA_VERSION: u32 = 4;
+pub const REPORT_SCHEMA_VERSION: u32 = 5;
 
 /// Complete deterministic output from one headless localization run.
 #[derive(Debug, Serialize)]
@@ -48,8 +50,11 @@ pub struct AnalysisSummary {
 #[derive(Debug, Serialize)]
 pub struct AnalysisSample {
     pub time_ns: i64,
+    /// Source timestamp shared by the held backend and display-precision poses.
+    pub estimate_time_ns: Option<i64>,
     pub imu: ImuSample,
     pub truth_robot_to_field: Pose3,
+    pub truth_at_estimate_robot_to_field: Option<Pose3>,
     pub raw_backend_robot_to_field: Option<Pose3>,
     pub live_robot_to_field: Option<Pose3>,
     pub noisy_camera_to_visual_odometer: Pose3,
@@ -164,7 +169,14 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
     let report_config = config.clone();
     let mut simulation = LocalizationSimulation::new(scenario, config)?;
     simulation.run_to_end()?;
+    report_from_history(report_scenario, report_config, simulation.history())
+}
 
+fn report_from_history(
+    report_scenario: Scenario,
+    report_config: SimulationConfig,
+    history: &[SimulationHistorySample],
+) -> Result<AnalysisReport> {
     let localization_parameters =
         production_localization_parameters().map_err(|message| eyre!(message))?;
     let association_parameters =
@@ -177,10 +189,10 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
     let mut production_visual_odometry = ProductionVoAccumulator::default();
     let mut previous_backend = None;
     let mut previous_live = None;
+    let mut previous_estimate_time = None;
     let mut truth_camera_to_field_by_time = HashMap::new();
     let mut lock_acquired_at = None;
-    let samples = simulation
-        .history()
+    let samples = history
         .iter()
         .map(|sample| {
             let truth = sample.truth_robot_to_field.inner.cast::<f64>();
@@ -192,41 +204,61 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
                 .live_robot_to_field
                 .as_ref()
                 .map(|pose| pose.inner.cast::<f64>());
-            let backend_error = backend.map(|pose| pose_error(&truth, &pose));
-            let live_error = live.map(|pose| pose_error(&truth, &pose));
-            if let Some(error) = backend_error {
-                backend_errors.add(error);
-            }
-            if let Some(error) = live_error {
-                live_errors.add(error);
-            }
-            if let Some(pose) = backend {
-                backend_steps.add(previous_backend.as_ref(), &pose);
-                previous_backend = Some(pose);
-            }
-            if let Some(pose) = live {
-                live_steps.add(previous_live.as_ref(), &pose);
-                previous_live = Some(pose);
+            let estimate_truth = sample.estimate_time.map(|time| {
+                crate::trajectory::robot_to_field_from_camera_to_field(
+                    &report_scenario.sample_camera_to_field(time.as_nanos() as f32 * 1e-9),
+                )
+                .inner
+                .cast::<f64>()
+            });
+            let backend_error = backend
+                .zip(estimate_truth)
+                .map(|(pose, truth)| pose_error(&truth, &pose));
+            let live_error = live
+                .zip(estimate_truth)
+                .map(|(pose, truth)| pose_error(&truth, &pose));
+            // Held poses remain inspectable per tick but count only once in accuracy/step summaries.
+            if sample.estimate_time != previous_estimate_time {
+                if let Some(error) = backend_error {
+                    backend_errors.add(error);
+                }
+                if let Some(error) = live_error {
+                    live_errors.add(error);
+                }
+                if let Some(pose) = backend {
+                    backend_steps.add(previous_backend.as_ref(), &pose);
+                    previous_backend = Some(pose);
+                }
+                if let Some(pose) = live {
+                    live_steps.add(previous_live.as_ref(), &pose);
+                    previous_live = Some(pose);
+                }
+                previous_estimate_time = sample.estimate_time;
             }
             if lock_acquired_at.is_none() && sample.global_visual_lock == GlobalLock::Locked {
                 lock_acquired_at = Some(sample.time.as_nanos());
             }
             let truth_camera_to_field =
-                sample.truth_robot_to_field.inner * fixed_robot_to_camera().inverse();
+                sample.truth_robot_to_field * fixed_robot_to_camera().inverse();
             let visual_odometry_error = sample.visual_odometry_delta.as_ref().and_then(|delta| {
                 truth_camera_to_field_by_time
                     .get(&delta.previous_time.as_nanos())
-                    .map(|previous: &Isometry3<f32>| {
-                        let truth_delta = previous.inverse() * truth_camera_to_field;
-                        let error = pose_error(
-                            &truth_delta.cast::<f64>(),
-                            &delta
-                                .current_left_camera_to_previous_left_camera
-                                .cast::<f64>(),
-                        );
-                        visual_odometry_errors.add(error);
-                        error
-                    })
+                    .map(
+                        |previous: &linear_algebra::Isometry3<
+                            coordinate_systems::Camera,
+                            coordinate_systems::Field,
+                        >| {
+                            let truth_delta = previous.inverse() * truth_camera_to_field;
+                            let error = pose_error(
+                                &truth_delta.inner.cast::<f64>(),
+                                &delta
+                                    .current_left_camera_to_previous_left_camera
+                                    .cast::<f64>(),
+                            );
+                            visual_odometry_errors.add(error);
+                            error
+                        },
+                    )
             });
             truth_camera_to_field_by_time.insert(sample.time.as_nanos(), truth_camera_to_field);
             if let Some(diagnostics) = sample.production_vo_diagnostics {
@@ -235,8 +267,10 @@ pub fn run_analysis(scenario: Scenario, config: SimulationConfig) -> Result<Anal
 
             AnalysisSample {
                 time_ns: sample.time.as_nanos(),
+                estimate_time_ns: sample.estimate_time.map(|time| time.as_nanos()),
                 imu: sample.imu.into(),
                 truth_robot_to_field: Pose3::from_isometry(&truth),
+                truth_at_estimate_robot_to_field: estimate_truth.as_ref().map(Pose3::from_isometry),
                 raw_backend_robot_to_field: backend.as_ref().map(Pose3::from_isometry),
                 live_robot_to_field: live.as_ref().map(Pose3::from_isometry),
                 noisy_camera_to_visual_odometer: Pose3::from_isometry(
@@ -484,6 +518,65 @@ impl ProductionVoAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ros_z::time::Time;
+
+    fn sample_at(scenario: &Scenario, time: Time) -> SimulationHistorySample {
+        SimulationHistorySample {
+            time,
+            estimate_time: None,
+            imu: ImuState::default(),
+            truth_robot_to_field: crate::trajectory::robot_to_field_from_camera_to_field(
+                &scenario.sample_camera_to_field(time.as_nanos() as f32 * 1e-9),
+            ),
+            raw_backend_robot_to_field: None,
+            live_robot_to_field: None,
+            global_visual_lock: GlobalLock::Unlocked,
+            state: types::localization::LocalizationState3D::Startup,
+            diagnostics: None,
+            landmark_frame: None,
+            noisy_cumulative_camera_to_visual_odometer: Isometry3::identity(),
+            visual_odometry_delta: None,
+            production_vo_diagnostics: None,
+        }
+    }
+
+    #[test]
+    fn held_pose_errors_use_estimate_time_and_count_once() {
+        use linear_algebra::IntoTransform;
+        let scenario = Scenario::six_dof_loop();
+        let config = SimulationConfig::default();
+        let mut held = sample_at(&scenario, Time::from_nanos(0));
+        let pose = held.truth_robot_to_field;
+        held.estimate_time = Some(Time::from_nanos(0));
+        held.raw_backend_robot_to_field = Some(pose.inner.cast().framed_transform());
+        held.live_robot_to_field = Some(pose);
+        let samples: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|seconds| {
+                let mut sample = held.clone();
+                sample.time = Time::from_nanos(seconds * 1_000_000_000);
+                sample.truth_robot_to_field =
+                    crate::trajectory::robot_to_field_from_camera_to_field(
+                        &scenario.sample_camera_to_field(seconds as f32),
+                    );
+                sample
+            })
+            .collect();
+        let report = report_from_history(scenario, config, &samples).unwrap();
+        assert_eq!(report.summary.backend_error.sample_count, 1);
+        for sample in report.samples {
+            assert_eq!(sample.estimate_time_ns, Some(0));
+            assert_eq!(sample.backend_error.unwrap().translation_m, 0.0);
+            assert_eq!(sample.live_error.unwrap().rotation_rad, 0.0);
+            assert_ne!(
+                sample.truth_robot_to_field.translation_m,
+                sample
+                    .truth_at_estimate_robot_to_field
+                    .unwrap()
+                    .translation_m
+            );
+        }
+    }
 
     #[test]
     fn stationary_report_contains_complete_samples_and_summary() {
@@ -540,12 +633,6 @@ mod tests {
                 .iter()
                 .any(|sample| sample.solve_diagnostics.is_some())
         );
-    }
-
-    #[test]
-    fn report_serializes_as_json() {
-        let report = run_analysis(Scenario::stationary(), SimulationConfig::default())
-            .expect("report generation succeeds");
         let json = serde_json::to_string(&report).expect("report is JSON serializable");
 
         assert!(json.contains("truth_robot_to_field"));
@@ -554,33 +641,36 @@ mod tests {
     }
 
     #[test]
-    fn exact_moving_visual_odometry_has_negligible_reported_error() {
-        let report = run_analysis(
-            Scenario::six_dof_loop(),
-            SimulationConfig {
-                landmark_pixel_sigma: 0.0,
-                vo_translation_sigma_m: 0.0,
-                vo_rotation_sigma_rad: 0.0,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert!(
-            report
-                .summary
-                .visual_odometry_error
-                .translation_rms_m
-                .unwrap()
-                < 1.0e-6
-        );
-        assert!(
-            report
-                .summary
-                .visual_odometry_error
-                .rotation_rms_rad
-                .unwrap()
-                < 1.0e-6
-        );
+    fn visual_odometry_report_measures_known_errors() {
+        let scenario = Scenario::six_dof_loop();
+        let first = sample_at(&scenario, Time::from_nanos(0));
+        let mut second = sample_at(&scenario, Time::from_nanos(1_000_000_000));
+        let exact = (scenario.sample_camera_to_field(0.0).inverse()
+            * scenario.sample_camera_to_field(1.0))
+        .inner;
+        for (translation_error, rotation_error) in [(0.0, 0.0), (0.25, 0.1)] {
+            let mut measured = exact;
+            measured.translation.x += translation_error;
+            measured.rotation *=
+                nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.0, rotation_error);
+            second.visual_odometry_delta = Some(types::visual_odometry::VisualOdometryDelta {
+                previous_time: first.time,
+                current_left_camera_to_previous_left_camera: measured,
+            });
+            let report = report_from_history(
+                scenario.clone(),
+                SimulationConfig::default(),
+                &[first.clone(), second.clone()],
+            )
+            .unwrap();
+            let error = report.samples[1].visual_odometry_error.unwrap();
+            assert!((error.translation_m - f64::from(translation_error)).abs() < 1e-6);
+            assert!((error.rotation_rad - f64::from(rotation_error)).abs() < 1e-6);
+            assert_eq!(report.summary.visual_odometry_error.sample_count, 1);
+            assert_eq!(
+                report.summary.visual_odometry_error.translation_rms_m,
+                Some(error.translation_m)
+            );
+        }
     }
 }

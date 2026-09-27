@@ -5,8 +5,8 @@ use std::{
 };
 
 use color_eyre::{Result, eyre::Context as _};
-use coordinate_systems::{Camera, Robot};
-use linear_algebra::Isometry3;
+use coordinate_systems::{Camera, ImuReference, Robot};
+use linear_algebra::{Isometry3, Orientation3};
 use projection::intrinsic::Intrinsic;
 use ros_z::{
     cache::{Cache, CacheInner},
@@ -17,17 +17,17 @@ use ros_z::{
 use types::{
     camera_geometry::{CameraGeometry, camera_geometry_at},
     field_dimensions::FieldDimensions,
-    localization::{LocalizationEstimate, LocalizationState3D, LocalizationStatus},
+    localization::{LocalizationEstimate, LocalizationState, LocalizationStatus},
     object_detection::{Object, RobocupObjectLabel},
     time_wrapper::TimeWrapper,
-    visual_localization::{AssociationGeometry, GlobalLocalizationDebug, VisualLocalizationFrame},
+    visual_localization::{
+        AssociationGeometry, GlobalLocalizationDebug, VisualAssociationSource,
+        VisualLocalizationFrame,
+    },
 };
 
 use crate::{
-    api::{
-        AssociationInput, GlobalAssociationInput, associate_global_visual_features,
-        associate_visual_features,
-    },
+    api::{AssociationInput, associate_visual_features},
     parameters::FieldMarkAssociationParameters,
 };
 
@@ -39,8 +39,7 @@ pub(crate) struct DetectionProcessingContext<'a> {
     pub(crate) field_dimensions_cache: &'a Cache<FieldDimensions>,
     pub(crate) estimates: &'a Cache<LocalizationEstimate>,
     pub(crate) status: &'a Cache<LocalizationStatus>,
-    pub(crate) attitudes: std::sync::Mutex<CacheInner<TimeWrapper<nalgebra::UnitQuaternion<f32>>>>,
-    pub(crate) tracking_reference: std::sync::Mutex<Option<LocalizationEstimate>>,
+    pub(crate) attitudes: std::sync::Mutex<CacheInner<TimeWrapper<Orientation3<ImuReference>>>>,
     pub(crate) associations_publisher: Arc<Publisher<TimeWrapper<VisualLocalizationFrame>>>,
     pub(crate) global_localization_publisher: Arc<Publisher<Option<GlobalLocalizationDebug>>>,
     pub(crate) clock: &'a Clock,
@@ -54,49 +53,17 @@ impl DetectionProcessingContext<'_> {
                 time,
                 TimeWrapper {
                     time,
-                    inner: nalgebra::UnitQuaternion::from_euler_angles(rpy.x, rpy.y, 0.0),
+                    inner: Orientation3::from_euler_angles(rpy.x, rpy.y, rpy.z),
                 },
             );
         }
     }
 
-    fn startup_geometry(
-        &self,
-        time: Time,
-        status: &LocalizationStatus,
-    ) -> Option<AssociationGeometry> {
+    fn attitude_at(&self, time: Time) -> Option<Orientation3<ImuReference>> {
         let attitudes = self.attitudes.lock().unwrap();
         let before = attitudes.get_before(time)?;
         let after = attitudes.get_after(time)?;
-        startup_geometry(&before, &after, time, status.epoch)
-    }
-
-    fn tracking_reference(
-        &self,
-        estimate: &LocalizationEstimate,
-        status: &LocalizationStatus,
-    ) -> Option<LocalizationEstimate> {
-        use types::localization::LocalizationState;
-        let mut reference = self.tracking_reference.lock().unwrap();
-        if reference
-            .as_ref()
-            .is_some_and(|prior| prior.epoch != status.epoch)
-        {
-            *reference = None;
-        }
-        if estimate.epoch == status.epoch && status.state == LocalizationState::Tracking {
-            *reference = Some(*estimate);
-        } else if reference.is_none() && status.state == LocalizationState::LostTrack {
-            // A late-starting consumer may recover a pre-loss anchor from history.
-            *reference = self
-                .estimates
-                .get_interval(status.time - Duration::from_secs(2), status.time)
-                .iter()
-                .filter(|e| e.epoch == status.epoch && e.robot_to_field.is_some())
-                .max_by_key(|e| e.time)
-                .map(|e| **e);
-        }
-        *reference
+        interpolate_attitude(&before, &after, time)
     }
 }
 
@@ -105,7 +72,9 @@ struct PreparedDetectionFrame {
     objects: Vec<Object<RobocupObjectLabel>>,
     robot_to_camera: Isometry3<Robot, Camera>,
     camera_intrinsic: Intrinsic,
-    geometry: AssociationGeometry,
+    status: LocalizationStatus,
+    tracking: Option<AssociationGeometry>,
+    attitude: Option<Orientation3<ImuReference>>,
     field_dimensions: Arc<FieldDimensions>,
     parameters: Arc<FieldMarkAssociationParameters>,
 }
@@ -133,27 +102,19 @@ pub(crate) async fn process_detected_objects(
     let started = Instant::now();
     let (frame, localization) = tokio::task::spawn_blocking(move || {
         let visual_features = crate::find_detected_visual_features(&frame.objects);
-        let input = AssociationInput {
-            visual_features: &visual_features,
-            robot_to_camera: frame.robot_to_camera,
-            geometry: &frame.geometry,
-            camera_intrinsic: frame.camera_intrinsic,
-            field_dimensions: &frame.field_dimensions,
-            time: frame.image_time,
-        };
-        let mut localization = associate_visual_features(input, &frame.parameters);
-        if localization.associations.is_empty()
-            && matches!(frame.geometry.state, LocalizationState3D::LostTrack { .. })
-        {
-            localization = associate_global_visual_features(GlobalAssociationInput {
+        let localization = associate_visual_features(
+            AssociationInput {
+                status: &frame.status,
+                attitude: frame.attitude,
+                tracking: frame.tracking.as_ref(),
                 visual_features: &visual_features,
-                robot_to_local: frame.geometry.robot_to_local,
                 robot_to_camera: frame.robot_to_camera,
                 camera_intrinsic: frame.camera_intrinsic,
                 field_dimensions: &frame.field_dimensions,
-                parameters: &frame.parameters.global_localizer,
-            });
-        }
+                time: frame.image_time,
+            },
+            &frame.parameters,
+        );
         (frame, localization)
     })
     .await
@@ -162,7 +123,7 @@ pub(crate) async fn process_detected_objects(
     // A blocking job cannot be cancelled: retain its slot until it returns, then discard late work.
     // Reuse the calibrated age limit for the wall-time budget, including blocking-pool queue time.
     let max_age = frame.parameters.max_pose_hint_age;
-    if started.elapsed() > max_age || !frame_is_current(&frame, ctx, max_age) {
+    if started.elapsed() > max_age || !frame_is_current(&frame, ctx, max_age, localization.source) {
         return Ok(());
     }
     if !localization.associations.is_empty() {
@@ -170,10 +131,10 @@ pub(crate) async fn process_detected_objects(
         let message = TimeWrapper {
             time: frame.image_time,
             inner: VisualLocalizationFrame {
-                epoch: frame.geometry.epoch,
+                epoch: frame.status.epoch,
+                generation: frame.status.generation,
                 source: localization.source,
                 robot_to_camera: frame.robot_to_camera,
-                robot_to_local: frame.geometry.robot_to_local,
                 camera_intrinsic: frame.camera_intrinsic,
                 associations: localization.associations,
             },
@@ -185,7 +146,7 @@ pub(crate) async fn process_detected_objects(
             .await
             .wrap_err("field-mark association publisher failed")??;
     }
-    if started.elapsed() <= max_age && frame_is_current(&frame, ctx, max_age) {
+    if started.elapsed() <= max_age && frame_is_current(&frame, ctx, max_age, localization.source) {
         let publisher = Arc::clone(&ctx.global_localization_publisher);
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
@@ -206,103 +167,98 @@ fn prepare_detection_frame(
     let field_dimensions = ctx.field_dimensions_cache.get_latest()?;
     let parameters = ctx.parameters.snapshot().typed.clone();
     let status = ctx.status.get_latest()?;
-    let geometry = if status.state == types::localization::LocalizationState::Startup {
-        ctx.startup_geometry(image_time, &status)?
+    let attitude = if status.state != LocalizationState::Tracking {
+        ctx.attitude_at(image_time)
     } else {
-        let latest_estimate = ctx.estimates.get_latest()?;
-        let reference = ctx.tracking_reference(&latest_estimate, &status);
-        let latest = TimeWrapper {
-            time: latest_estimate.time,
-            inner: AssociationGeometry::from_estimate(
-                &latest_estimate,
-                &status,
-                reference.as_ref(),
-            )?,
-        };
-        let history: Vec<_> = ctx
-            .estimates
-            .get_interval(
-                image_time - parameters.max_pose_hint_age,
-                image_time + parameters.max_pose_hint_age,
-            )
-            .iter()
-            .filter_map(|estimate| {
-                Some(Arc::new(TimeWrapper {
-                    time: estimate.time,
-                    inner: AssociationGeometry::from_estimate(
-                        estimate,
-                        &status,
-                        reference.as_ref(),
-                    )?,
-                }))
-            })
-            .collect();
-        geometry_for_image(image_time, &history, &latest, parameters.max_pose_hint_age)?
+        None
     };
+    let tracking = if status.state != LocalizationState::Tracking {
+        None
+    } else {
+        tracking_geometry(image_time, ctx, &status, parameters.max_pose_hint_age)
+    };
+    if attitude.is_none() && tracking.is_none() {
+        return None;
+    }
     let frame = PreparedDetectionFrame {
         image_time,
         objects: objects.inner,
         robot_to_camera: camera.robot_to_camera,
         camera_intrinsic: camera.intrinsics,
-        geometry,
+        status: *status,
+        tracking,
+        attitude,
         field_dimensions,
         parameters,
     };
-    frame_is_current(&frame, ctx, frame.parameters.max_pose_hint_age).then_some(frame)
+    lifecycle_is_current(&frame, ctx, frame.parameters.max_pose_hint_age).then_some(frame)
 }
 
-fn startup_geometry(
-    before: &TimeWrapper<nalgebra::UnitQuaternion<f32>>,
-    after: &TimeWrapper<nalgebra::UnitQuaternion<f32>>,
-    time: Time,
-    epoch: u64,
+fn tracking_geometry(
+    image_time: Time,
+    ctx: &DetectionProcessingContext<'_>,
+    status: &LocalizationStatus,
+    max_age: Duration,
 ) -> Option<AssociationGeometry> {
+    let latest_estimate = ctx.estimates.get_latest()?;
+    let latest = TimeWrapper {
+        time: latest_estimate.time,
+        inner: AssociationGeometry::from_estimate(&latest_estimate, status, None)?,
+    };
+    let history = ctx.estimates.get_interval(image_time - max_age, image_time);
+    let snapshots = history.iter().rev().filter_map(|estimate| {
+        Some(TimeWrapper {
+            time: estimate.time,
+            inner: AssociationGeometry::from_estimate(estimate, status, None)?,
+        })
+    });
+    geometry_for_image(image_time, snapshots, &latest, max_age)
+}
+
+fn interpolate_attitude(
+    before: &TimeWrapper<Orientation3<ImuReference>>,
+    after: &TimeWrapper<Orientation3<ImuReference>>,
+    time: Time,
+) -> Option<Orientation3<ImuReference>> {
     if time < before.time || time > after.time {
         return None;
     }
     let gap = after.time.duration_since(before.time);
-    if gap > types::camera_geometry::MAX_CAMERA_GEOMETRY_GAP {
+    if gap > types::localization::MAX_IMU_ATTITUDE_GAP {
         return None;
     }
     let mut orientation = if gap.is_zero() {
         before.inner
     } else {
         before.inner.slerp(
-            &after.inner,
+            after.inner,
             time.duration_since(before.time).as_secs_f32() / gap.as_secs_f32(),
         )
     };
-    orientation.renormalize();
-    Some(AssociationGeometry {
-        epoch,
-        state: LocalizationState3D::Startup,
-        robot_to_local: Isometry3::wrap(nalgebra::Isometry3::from_parts(
-            nalgebra::Translation3::identity(),
-            orientation,
-        )),
-        local_to_field: None,
-    })
+    orientation.inner.renormalize();
+    Some(orientation)
 }
 
 fn geometry_for_image(
     image_time: Time,
-    history: &[Arc<TimeWrapper<AssociationGeometry>>],
+    history: impl IntoIterator<Item = TimeWrapper<AssociationGeometry>>,
     latest: &TimeWrapper<AssociationGeometry>,
     max_age: Duration,
 ) -> Option<AssociationGeometry> {
     // Select complete snapshots; never attach a new state/covariance to an old branch's pose.
     // Include latest because the independently populated history may not contain it yet.
-    std::iter::once(latest)
-        .chain(history.iter().rev().map(Arc::as_ref))
+    std::iter::once(latest.clone())
+        .chain(history)
         .filter(|geometry| {
-            geometry.time.abs_diff(image_time) <= max_age
+            geometry.time <= image_time
+                && geometry.time.abs_diff(image_time) <= max_age
                 && same_lifecycle(&geometry.inner, &latest.inner)
         })
         .min_by_key(|geometry| (geometry.time.abs_diff(image_time), geometry.time))
-        .map(|geometry| geometry.inner.clone())
+        .map(|geometry| geometry.inner)
 }
 
-fn frame_is_current(
+fn lifecycle_is_current(
     frame: &PreparedDetectionFrame,
     ctx: &DetectionProcessingContext<'_>,
     max_age: Duration,
@@ -316,13 +272,35 @@ fn frame_is_current(
     {
         return false;
     }
-    if matches!(frame.geometry.state, LocalizationState3D::Startup) {
-        return frame.image_time.abs_diff(ctx.clock.now()) <= max_age
-            && ctx.status.get_latest().is_some_and(|status| {
-                status.epoch == frame.geometry.epoch
-                    && status.state == types::localization::LocalizationState::Startup
-            });
+    frame.image_time.abs_diff(ctx.clock.now()) <= max_age
+        && ctx.status.get_latest().is_some_and(|status| {
+            status.epoch == frame.status.epoch
+                && status.generation == frame.status.generation
+                && status.state == frame.status.state
+                && status.time == frame.status.time
+        })
+}
+
+fn frame_is_current(
+    frame: &PreparedDetectionFrame,
+    ctx: &DetectionProcessingContext<'_>,
+    max_age: Duration,
+    source: VisualAssociationSource,
+) -> bool {
+    if !lifecycle_is_current(frame, ctx, max_age) {
+        return false;
     }
+    // Global recovery needs a trusted heading and fresh exposure IMU, not a fresh
+    // optimized pose: rejecting field estimates must not starve its own recovery.
+    if source == VisualAssociationSource::Global {
+        return ctx
+            .status
+            .get_latest()
+            .is_some_and(|status| status.heading == frame.status.heading);
+    }
+    let Some(geometry) = frame.tracking.as_ref() else {
+        return false;
+    };
     let latest = ctx
         .estimates
         .get_latest()
@@ -330,16 +308,12 @@ fn frame_is_current(
         .and_then(|(estimate, status)| {
             Some(TimeWrapper {
                 time: estimate.time,
-                inner: AssociationGeometry::from_estimate(
-                    &estimate,
-                    &status,
-                    ctx.tracking_reference(&estimate, &status).as_ref(),
-                )?,
+                inner: AssociationGeometry::from_estimate(&estimate, &status, None)?,
             })
         });
     result_is_current(
         frame.image_time,
-        &frame.geometry,
+        geometry,
         latest.as_ref(),
         ctx.clock.now(),
         max_age,
@@ -361,50 +335,69 @@ fn result_is_current(
 
 fn same_lifecycle(geometry: &AssociationGeometry, latest: &AssociationGeometry) -> bool {
     geometry.epoch == latest.epoch
-        && matches!(
-            (geometry.state, latest.state),
-            (LocalizationState3D::Startup, LocalizationState3D::Startup)
-                | (
-                    LocalizationState3D::Tracking { .. },
-                    LocalizationState3D::Tracking { .. }
-                )
-                | (
-                    LocalizationState3D::LostTrack { .. },
-                    LocalizationState3D::LostTrack { .. }
-                )
-        )
+        && geometry.generation == latest.generation
+        && std::mem::discriminant(&geometry.state) == std::mem::discriminant(&latest.state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::localization::LocalizationEstimate3D;
+    use types::localization::{LocalizationEstimate3D, LocalizationState3D};
 
     #[test]
-    fn startup_uses_bracketed_imu_without_a_localization_estimate() {
+    fn snapshot_selection_uses_preceding_pose_from_the_same_generation() {
+        let pose = LocalizationEstimate3D {
+            robot_to_field: Isometry3::identity(),
+            covariance: nalgebra::SMatrix::identity(),
+        };
+        let previous = TimeWrapper {
+            time: Time::from_nanos(90_000_000),
+            inner: AssociationGeometry {
+                epoch: 7,
+                generation: 2,
+                state: LocalizationState3D::Tracking {
+                    estimate: pose,
+                    last_successful_solve: Time::from_nanos(90_000_000),
+                },
+                robot_to_local: Isometry3::from_translation(1.0, 0.0, 0.0),
+                local_to_field: None,
+            },
+        };
+        let mut future = previous.clone();
+        future.time = Time::from_nanos(105_000_000);
+        future.inner.robot_to_local.inner.translation.x = 2.0;
+        future.inner.state = LocalizationState3D::Tracking {
+            estimate: pose,
+            last_successful_solve: future.time,
+        };
+        let image = Time::from_nanos(100_000_000);
+        let age = Duration::from_millis(20);
+        let selected = geometry_for_image(image, [previous.clone()], &future, age).unwrap();
+        assert_eq!(selected.robot_to_local.translation().x(), 1.0);
+        assert!(geometry_for_image(image, [], &future, age).is_none());
+        future.inner.generation += 1;
+        assert!(geometry_for_image(image, [previous], &future, age).is_none());
+    }
+
+    #[test]
+    fn attitude_interpolation_requires_bracketing_samples() {
         let before = TimeWrapper {
             time: Time::from_nanos(0),
-            inner: nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.0, 0.0),
+            inner: Orientation3::from_euler_angles(0.0, 0.0, 0.0),
         };
         let after = TimeWrapper {
             time: Time::from_nanos(10_000_000),
-            inner: nalgebra::UnitQuaternion::from_euler_angles(0.2, 0.0, 0.0),
+            inner: Orientation3::from_euler_angles(0.2, 0.0, 0.0),
         };
         let time = Time::from_nanos(5_000_000);
-        let geometry = startup_geometry(&before, &after, time, 7).unwrap();
-        assert_eq!(geometry.epoch, 7);
-        assert!(matches!(geometry.state, LocalizationState3D::Startup));
-        assert_eq!(
-            geometry.robot_to_local.inner.translation.vector,
-            nalgebra::Vector3::zeros()
-        );
-        assert!((geometry.robot_to_local.inner.rotation.euler_angles().0 - 0.1).abs() < 1e-6);
-        assert!(startup_geometry(&before, &after, Time::from_nanos(11_000_000), 7).is_none());
+        let attitude = interpolate_attitude(&before, &after, time).unwrap();
+        assert!((attitude.euler_angles().0 - 0.1).abs() < 1e-6);
+        assert!(interpolate_attitude(&before, &after, Time::from_nanos(11_000_000)).is_none());
         let late = TimeWrapper {
             time: Time::from_nanos(30_000_000),
             ..after
         };
-        assert!(startup_geometry(&before, &late, time, 7).is_none());
+        assert!(interpolate_attitude(&before, &late, time).is_none());
     }
 
     #[test]
@@ -420,7 +413,6 @@ mod tests {
             );
         }
         assert_eq!(pending.take().unwrap().time, Time::from_nanos(4));
-        assert!(pending.is_none());
     }
 
     #[test]
@@ -436,6 +428,7 @@ mod tests {
         let tracking = TimeWrapper {
             time,
             inner: AssociationGeometry {
+                generation: 0,
                 epoch: 7,
                 state: LocalizationState3D::Tracking {
                     estimate,
@@ -480,7 +473,11 @@ mod tests {
 
         let selected = geometry_for_image(
             time,
-            &history.get_interval(time - age, time + age),
+            history
+                .get_interval(time - age, time + age)
+                .iter()
+                .rev()
+                .map(|g| (**g).clone()),
             &latest,
             age,
         )
@@ -490,13 +487,16 @@ mod tests {
         // Latest remains usable before the history subscriber receives the transition.
         let old_branch = [Arc::new(tracking)];
         assert_eq!(
-            geometry_for_image(time, &old_branch, &latest, age)
+            geometry_for_image(time, old_branch.iter().map(|g| (**g).clone()), &latest, age)
                 .unwrap()
                 .state,
             lost.inner.state
         );
         lost.time = time - age - Duration::from_nanos(1);
-        assert!(geometry_for_image(time, &old_branch, &lost, age).is_none());
+        assert!(
+            geometry_for_image(time, old_branch.iter().map(|g| (**g).clone()), &lost, age)
+                .is_none()
+        );
     }
 
     #[test]
@@ -520,6 +520,7 @@ mod tests {
         ];
         for (index, state) in states.into_iter().enumerate() {
             let geometry = AssociationGeometry {
+                generation: 0,
                 epoch: 7,
                 state,
                 robot_to_local: Isometry3::identity(),

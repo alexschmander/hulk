@@ -1,9 +1,38 @@
 use std::time::Duration;
 
+use coordinate_systems::Robot;
+use linear_algebra::Vector3;
 use ros_z::Message;
 use serde::{Deserialize, Serialize};
 
 const MAX_TRACKING_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AccelerometerParameters {
+    /// SDK specific force is already expressed in Robot axes, in m/s².
+    pub bias: Vector3<Robot, f64>,
+    /// Per-axis multiplicative calibration, applied after subtracting bias.
+    pub scale: nalgebra::Vector3<f64>,
+    /// Robot origin to IMU, expressed in Robot, in metres.
+    pub position: Vector3<Robot, f64>,
+    /// Specific-force white-noise density in m/s² sqrt(s), including model error.
+    pub noise_density: f64,
+    /// Integrate rather than discard high-rate impulses before spline fitting.
+    pub averaging_interval: Duration,
+}
+
+impl Default for AccelerometerParameters {
+    fn default() -> Self {
+        Self {
+            bias: Vector3::zeros(),
+            scale: nalgebra::Vector3::repeat(1.0),
+            position: Vector3::zeros(),
+            noise_density: 0.3,
+            averaging_interval: Duration::from_millis(10),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, Message)]
 #[serde(deny_unknown_fields)]
@@ -28,7 +57,15 @@ impl Default for KinematicOdometryNoise {
 #[serde(deny_unknown_fields)]
 pub struct Localization3dParameters {
     #[serde(default)]
-    pub kinematic_odometry_noise: KinematicOdometryNoise,
+    pub kinematic_odometry_noise: Option<KinematicOdometryNoise>,
+    pub accelerometer: Option<AccelerometerParameters>,
+    /// Broad initialization distributions, not measured standing height or zero velocity.
+    pub initial_height_sigma: f64,
+    pub initial_velocity_sigma: f64,
+    /// Squared normalized innovation allowed between old and candidate height predictions.
+    pub recovery_height_gate: f64,
+    /// Maximum discrepancy between estimated and measured up directions, in radians.
+    pub max_tilt_error: f64,
     /// Translational white-noise-on-acceleration spectral density.
     pub accelerometer_process_noise_variance: f64,
     /// Pixel-noise variance used to set isotropic angular noise for accepted visual
@@ -37,6 +74,10 @@ pub struct Localization3dParameters {
     pub visual_feature_noise_variance: f64,
     /// Soft field containment sigma in meters outside field plus border strip.
     pub field_containment_sigma: f64,
+    /// Maximum field-heading innovation against propagated IMU heading, in radians (< pi/2).
+    pub max_heading_error: f64,
+    /// Maximum correction of the IMU-to-field reference during visual tracking, in rad/s.
+    pub max_heading_reference_drift_per_second: f64,
     /// Time without a converged aligned backend result before localization is declared lost.
     #[serde(default = "default_tracking_timeout")]
     pub tracking_timeout: Duration,
@@ -51,14 +92,62 @@ fn default_tracking_timeout() -> Duration {
 
 impl Localization3dParameters {
     pub(crate) fn validate(&self) -> std::result::Result<(), String> {
-        let noise = &self.kinematic_odometry_noise;
-        if !noise
-            .position_sigma
-            .iter()
-            .chain(noise.translation_variance_per_second.iter())
-            .all(|v| valid_scale(*v) && (*v * *v).is_finite())
+        if !self.max_heading_error.is_finite()
+            || self.max_heading_error <= 0.0
+            || self.max_heading_error >= std::f64::consts::FRAC_PI_2
+            || !self.max_heading_reference_drift_per_second.is_finite()
+            || self.max_heading_reference_drift_per_second < 0.0
+        {
+            return Err(
+                "heading error must be in (0, pi/2), and heading drift finite and >= 0".into(),
+            );
+        }
+        if let Some(noise) = &self.kinematic_odometry_noise
+            && !noise
+                .position_sigma
+                .iter()
+                .chain(noise.translation_variance_per_second.iter())
+                .all(|v| valid_scale(*v) && (*v * *v).is_finite())
         {
             return Err("kinematic odometry noise must be finite and > 0".into());
+        }
+        for value in [
+            self.initial_height_sigma,
+            self.initial_velocity_sigma,
+            self.recovery_height_gate,
+        ] {
+            if !valid_scale(value) || !(value * value).is_finite() {
+                return Err(
+                    "initial uncertainties and recovery height gate must be finite and positive"
+                        .into(),
+                );
+            }
+        }
+        if !self.max_tilt_error.is_finite()
+            || self.max_tilt_error <= 0.0
+            || self.max_tilt_error >= std::f64::consts::FRAC_PI_2
+        {
+            return Err("tilt error must be in (0, pi/2)".into());
+        }
+        if let Some(accel) = &self.accelerometer
+            && (!accel
+                .bias
+                .inner
+                .iter()
+                .chain(accel.position.inner.iter())
+                .all(|v| v.is_finite())
+                || !accel
+                    .scale
+                    .iter()
+                    .all(|v| valid_scale(*v) && (v * v).is_finite())
+                || !valid_scale(accel.noise_density)
+                || !(accel.noise_density * accel.noise_density).is_finite()
+                || accel.averaging_interval.is_zero()
+                || accel.averaging_interval > Duration::from_millis(50))
+        {
+            return Err(
+                "invalid accelerometer calibration, noise density or averaging interval".into(),
+            );
         }
         if !valid_scale(self.accelerometer_process_noise_variance) {
             return Err("accelerometer_process_noise_variance must be finite and > 0".to_string());
@@ -90,16 +179,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_tuning_rejects_unusable_whitening_and_timer_ranges_before_commit() {
+    fn validation_rejects_unusable_whitening_and_timer_ranges() {
         let parameters = Localization3dParameters {
-            kinematic_odometry_noise: Default::default(),
+            kinematic_odometry_noise: Some(Default::default()),
+            accelerometer: None,
+            initial_height_sigma: 1.0,
+            initial_velocity_sigma: 5.0,
+            recovery_height_gate: 9.0,
+            max_tilt_error: 20.0_f64.to_radians(),
             accelerometer_process_noise_variance: 10.0,
             visual_feature_noise_variance: 10000.0,
             field_containment_sigma: 1.0,
+            max_heading_error: 20.0_f64.to_radians(),
+            max_heading_reference_drift_per_second: 0.5_f64.to_radians(),
             tracking_timeout: Duration::from_secs(2),
             visual_tracking_timeout: Duration::from_secs(2),
         };
         assert!(parameters.validate().is_ok());
+        let mut calibrated = parameters.clone();
+        calibrated.accelerometer = Some(AccelerometerParameters::default());
+        assert!(calibrated.validate().is_ok());
+        calibrated.accelerometer.as_mut().unwrap().scale.x = 0.0;
+        assert!(calibrated.validate().is_err());
+        calibrated.accelerometer = Some(AccelerometerParameters {
+            noise_density: f64::NAN,
+            ..Default::default()
+        });
+        assert!(calibrated.validate().is_err());
+        for error in [0.0, f64::NAN, std::f64::consts::FRAC_PI_2] {
+            let mut invalid = parameters.clone();
+            invalid.max_heading_error = error;
+            assert!(invalid.validate().is_err());
+        }
+        for drift in [-1.0, f64::INFINITY, f64::NAN] {
+            let mut invalid = parameters.clone();
+            invalid.max_heading_reference_drift_per_second = drift;
+            assert!(invalid.validate().is_err());
+        }
         let mut invalid = parameters.clone();
         invalid.accelerometer_process_noise_variance = 1.0e-250;
         assert!(invalid.validate().is_err());

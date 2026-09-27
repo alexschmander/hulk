@@ -1,9 +1,12 @@
+use coordinate_systems::{Camera, Field, Pixel};
 use field_mark_association::{
     DetectedVisualFeature, DetectedVisualFeatures, FieldFeatureLandmark, VisualFeatureClass,
     field_feature_landmarks,
 };
-use linear_algebra::Framed;
-use nalgebra::{Isometry3, Point2, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
+use linear_algebra::{
+    Isometry3 as FramedIsometry3, Point2 as FramedPoint2, Point3 as FramedPoint3,
+};
+use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector2, Vector3};
 use projection::{Projection as _, camera_matrix::CameraMatrix};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -35,7 +38,7 @@ pub(crate) struct SyntheticSensors {
     config: SimulationConfig,
     vo_rng: ChaCha8Rng,
     landmark_rng: ChaCha8Rng,
-    previous_camera_to_field: Option<Isometry3<f32>>,
+    previous_camera_to_field: Option<FramedIsometry3<Camera, Field>>,
     previous_time: Option<Time>,
     current_camera_to_visual_odometer: Isometry3<f32>,
     transition_index: usize,
@@ -59,14 +62,14 @@ impl SyntheticSensors {
     pub(crate) fn measure_visual_odometry(
         &mut self,
         time: Time,
-        camera_to_field: &Isometry3<f32>,
+        camera_to_field: &FramedIsometry3<Camera, Field>,
     ) -> VisualOdometryMeasurement {
         let previous_camera_to_field = self.previous_camera_to_field;
         let delta = previous_camera_to_field.zip(self.previous_time).map(
             |(previous_camera_to_field, previous_time)| {
                 let exact_current_camera_to_previous_camera =
-                    previous_camera_to_field.inverse() * camera_to_field;
-                let measured = self.noisy_delta(exact_current_camera_to_previous_camera);
+                    previous_camera_to_field.inverse() * *camera_to_field;
+                let measured = self.noisy_delta(exact_current_camera_to_previous_camera.inner);
                 self.current_camera_to_visual_odometer *= measured;
                 // Bound numerical drift independently of the configured sensor noise.
                 self.current_camera_to_visual_odometer
@@ -116,13 +119,13 @@ impl SyntheticSensors {
 
     pub(crate) fn observe_landmarks(
         &mut self,
-        camera_to_field: &Isometry3<f32>,
+        camera_to_field: &FramedIsometry3<Camera, Field>,
         camera_matrix: &CameraMatrix,
     ) -> LandmarkObservations {
         let field_to_camera = camera_to_field.inverse();
         let mut observations = LandmarkObservations::default();
         for landmark in &self.landmarks {
-            let field_point = Point3::new(landmark.position.x(), landmark.position.y(), 0.0);
+            let field_point = landmark.position.extend(0.0);
             let camera_point = field_to_camera * field_point;
             let Some(ideal_pixel) = project_in_bounds(camera_point, camera_matrix) else {
                 continue;
@@ -135,40 +138,40 @@ impl SyntheticSensors {
                 self.landmark_rng.sample::<f32, _>(StandardNormal),
                 self.landmark_rng.sample::<f32, _>(StandardNormal),
             ) * self.config.landmark_pixel_sigma;
-            let pixel = ideal_pixel + noise;
+            let pixel = ideal_pixel + linear_algebra::Vector2::<Pixel>::wrap(noise);
             if !pixel_in_bounds(pixel, camera_matrix) {
                 continue;
             }
-            let framed_pixel = Framed::wrap(pixel);
             push_detection(
                 &mut observations.detections,
                 landmark.class,
                 DetectedVisualFeature {
-                    pixel: framed_pixel,
+                    pixel,
                     confidence: 1.0,
                 },
             );
             observations.true_associations.push(FieldMarkAssociation {
-                detection: framed_pixel,
-                field_point: Framed::wrap(field_point),
+                detection: pixel,
+                field_point,
             });
         }
         observations
     }
 }
 
-fn project_in_bounds(point: Point3<f32>, camera_matrix: &CameraMatrix) -> Option<Point2<f32>> {
-    if point.coords.iter().any(|value| !value.is_finite()) {
+fn project_in_bounds(
+    point: FramedPoint3<Camera>,
+    camera_matrix: &CameraMatrix,
+) -> Option<FramedPoint2<Pixel>> {
+    if point.inner.coords.iter().any(|value| !value.is_finite()) {
         return None;
     }
-    let pixel = camera_matrix
-        .camera_to_pixel(Framed::wrap(point.coords))
-        .ok()?
-        .inner;
+    let pixel = camera_matrix.camera_to_pixel(point.coords()).ok()?;
     pixel_in_bounds(pixel, camera_matrix).then_some(pixel)
 }
 
-fn pixel_in_bounds(pixel: Point2<f32>, camera_matrix: &CameraMatrix) -> bool {
+fn pixel_in_bounds(pixel: FramedPoint2<Pixel>, camera_matrix: &CameraMatrix) -> bool {
+    let pixel = pixel.inner;
     pixel.x.is_finite()
         && pixel.y.is_finite()
         && pixel.x >= 0.0
@@ -194,6 +197,7 @@ fn push_detection(
 #[cfg(test)]
 mod tests {
     use approx::assert_relative_eq;
+    use linear_algebra::point;
 
     use super::*;
     use crate::{
@@ -228,7 +232,8 @@ mod tests {
             Translation3::new(1.0, 1.0, 0.0),
             UnitQuaternion::from_euler_angles(0.0, 0.0, 0.2),
         );
-        let first_measurement = sensors.measure_visual_odometry(Time::from_nanos(0), &first);
+        let first_measurement =
+            sensors.measure_visual_odometry(Time::from_nanos(0), &FramedIsometry3::wrap(first));
         assert!(first_measurement.delta.is_none());
         assert_isometry_close(
             &first_measurement
@@ -237,8 +242,8 @@ mod tests {
             &Isometry3::identity(),
         );
 
-        let second_measurement =
-            sensors.measure_visual_odometry(Time::from_nanos(20_000_000), &second);
+        let second_measurement = sensors
+            .measure_visual_odometry(Time::from_nanos(20_000_000), &FramedIsometry3::wrap(second));
         let expected_current_camera_to_previous_camera = first.inverse() * second;
         let measured = second_measurement.delta.unwrap();
         assert_isometry_close(
@@ -259,15 +264,15 @@ mod tests {
             image_size: linear_algebra::vector![640.0, 480.0],
             ..Default::default()
         };
-        assert!(pixel_in_bounds(Point2::new(0.0, 0.0), &matrix));
-        assert!(pixel_in_bounds(Point2::new(639.5, 479.5), &matrix));
+        assert!(pixel_in_bounds(point![0.0, 0.0], &matrix));
+        assert!(pixel_in_bounds(point![639.5, 479.5], &matrix));
         for pixel in [
-            Point2::new(-1.0, 0.0),
-            Point2::new(0.0, -1.0),
-            Point2::new(640.0, 0.0),
-            Point2::new(0.0, 480.0),
-            Point2::new(f32::NAN, 0.0),
-            Point2::new(0.0, f32::INFINITY),
+            point![-1.0, 0.0],
+            point![0.0, -1.0],
+            point![640.0, 0.0],
+            point![0.0, 480.0],
+            point![f32::NAN, 0.0],
+            point![0.0, f32::INFINITY],
         ] {
             assert!(!pixel_in_bounds(pixel, &matrix));
         }
@@ -313,7 +318,8 @@ mod tests {
             max_norm_error =
                 max_norm_error.max((cumulative.rotation.quaternion().norm() - 1.0).abs());
             max_translation_error = max_translation_error.max(
-                (cumulative.translation.vector - (initial.inverse() * pose).translation.vector)
+                (cumulative.translation.vector
+                    - (initial.inverse() * pose).inner.translation.vector)
                     .norm(),
             );
         }
@@ -388,7 +394,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let pose = Isometry3::identity();
+        let pose = FramedIsometry3::identity();
         let mut sensors = SyntheticSensors::new(&config, &FieldDimensions::SPL_2025);
         sensors.measure_visual_odometry(Time::from_nanos(0), &pose);
         let outlier = sensors
