@@ -7,7 +7,7 @@ use fagra::{
 use linear_algebra::{Framed, Transform};
 use nalgebra::{Isometry2, Isometry3, SVector, UnitComplex, UnitQuaternion, Vector3};
 
-use super::{CameraIntrinsics, FieldAlignment, PoseControl, TrajectoryState};
+use super::{CameraIntrinsics, FieldAlignment, ImuBias, PoseControl, TrajectoryState};
 
 impl<R: TestScalar> TestVariable for PoseControl<R> {
     type Dual = PoseControl<R::Dual>;
@@ -220,6 +220,27 @@ impl<R: TestScalar> TestVariable for CameraIntrinsics<R> {
     }
 }
 
+impl<R: TestScalar> TestVariable for ImuBias<R> {
+    type Dual = ImuBias<R::Dual>;
+    fn states() -> impl Strategy<Value = Self> {
+        Self::increments().prop_map(|v| Self::exp(&v))
+    }
+    fn increments() -> impl Strategy<Value = Tangent<Self>> {
+        prop::array::uniform6(-0.2..0.2)
+            .prop_map(|v| SVector::from_column_slice(&v.map(R::from_test_value)))
+    }
+    fn to_dual(&self) -> Self::Dual {
+        Self::Dual {
+            gyroscope: Framed::wrap(self.gyroscope.inner.map(|x| x.dual(0.0))),
+            accelerometer: Framed::wrap(self.accelerometer.inner.map(|x| x.dual(0.0))),
+        }
+    }
+    fn equivalent(&self, other: &Self, tolerance: Tolerance) -> bool {
+        close(self.log().as_slice(), other.log().as_slice(), tolerance)
+    }
+}
+fagra::variable_tests!(bias_f64, ImuBias<f64>);
+fagra::variable_tests!(bias_f32, ImuBias<f32>);
 fagra::variable_tests!(trajectory_f64, TrajectoryState<f64>);
 fagra::variable_tests!(pose_control_f64, PoseControl<f64>);
 fagra::variable_tests!(pose_control_f32, PoseControl<f32>);

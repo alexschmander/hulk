@@ -8,8 +8,10 @@ mod node;
 mod parameters;
 mod pose;
 
-pub use diagnostics::SolveDiagnostics;
+pub use diagnostics::{ImuBiasEstimate, SolveDiagnostics};
 pub use localization::{Localization, SolveOutput};
 pub use node::{run, run_boxed};
-pub use parameters::{AccelerometerParameters, KinematicOdometryNoise, Localization3dParameters};
+pub use parameters::{
+    AccelerometerParameters, ImuBiasParameters, KinematicOdometryNoise, Localization3dParameters,
+};
 pub use pose::initial_robot_to_local_from_imu;

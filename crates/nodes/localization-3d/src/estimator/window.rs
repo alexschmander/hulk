@@ -115,15 +115,22 @@ impl Estimator {
     pub(super) fn retire_old_segments(&mut self) -> Result<()> {
         let (latest_segment, _) = self.segment_and_tau(self.latest_time)?;
         let oldest = (latest_segment - WINDOW_NS / KNOT_SPACING_NS).max(0);
-        let old_controls: Vec<_> = self
+        let mut old_states: Vec<_> = self
             .controls
             .range(..oldest - 1)
             .map(|(_, key)| key.block_id())
             .collect();
-        if old_controls.is_empty() {
+        if old_states.is_empty() {
             return Ok(());
         }
-        self.graph.marginalize(&old_controls)?;
+        let oldest_bias = oldest * KNOT_SPACING_NS / super::bias::BIAS_KNOT_SPACING_NS;
+        old_states.extend(
+            self.biases
+                .range(..oldest_bias)
+                .map(|(_, key)| key.block_id()),
+        );
+        self.graph.marginalize(&old_states)?;
+        self.biases.retain(|index, _| *index >= oldest_bias);
         self.controls.retain(|index, _| *index >= oldest - 1);
         self.measurements.retain(|index, _| *index >= oldest);
         self.yaw_factors.retain(|index, _| *index >= oldest);
@@ -158,13 +165,14 @@ impl Estimator {
         }
         self.reprojection_batches
             .retain(|(index, _)| *index >= oldest);
-        for &(index, batch) in &self.acceleration_batches {
-            if index < oldest {
-                self.graph.remove_batch(batch)?;
-            }
+        while self
+            .acceleration_batches
+            .first_key_value()
+            .is_some_and(|(index, _)| *index < oldest)
+        {
+            let (_, batch) = self.acceleration_batches.pop_first().unwrap();
+            self.graph.remove_batch(batch)?;
         }
-        self.acceleration_batches
-            .retain(|(index, _)| *index >= oldest);
         Ok(())
     }
 }

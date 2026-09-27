@@ -400,7 +400,10 @@ impl<R: RealField + Copy> LinearizedPoseSpline<'_, R> {
             let beta_dot = basis.cumulative_first[i] * self.spline.inverse_duration;
             let j = rotated.cross_matrix() * increment_jacobians[i]
                 + Matrix3::<R>::identity() * beta_dot;
-            for derivative in &mut derivatives {
+            // Earlier increments have introduced no derivatives, then controls
+            // 0..=1, then 0..=2. The remaining matrices are structurally zero.
+            let active = if i == 0 { 0 } else { i + 1 };
+            for derivative in &mut derivatives[..active] {
                 *derivative = inverse * *derivative;
             }
             derivatives[i] += j * self.delta_jacobians[i][0];

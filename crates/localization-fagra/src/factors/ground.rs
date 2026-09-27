@@ -68,10 +68,23 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>>> FactorBatch<S> for Foot
         }
         let inverse_sigma = common::positive(self.sigma)?;
         let spline = common::spline(states, &self.controls, self.duration)?;
-        let linearized = spline.linearize()?;
+        let mut linearized = None;
         for (id, observation) in factors {
-            let pose = linearized.pose(observation.tau)?;
-            let (residual, active) = foot_residuals(&pose.pose.inner, observation, inverse_sigma)?;
+            // Recheck activity and input validity at the current state. Inactive
+            // rows contribute no information; their factor scope still gets visited.
+            let value = spline.pose(observation.tau)?;
+            let (residual, active) = foot_residuals(&value.inner, observation, inverse_sigma)?;
+            if !active[0] && !active[1] {
+                sink.factor(id, |_| Ok(()))?;
+                continue;
+            }
+            if linearized.is_none() {
+                linearized = Some(spline.linearize()?);
+            }
+            let pose = linearized
+                .as_ref()
+                .expect("initialized for active constraint")
+                .pose(observation.tau)?;
             let rotation = pose.pose.inner.rotation.to_rotation_matrix().into_inner();
             let mut h = SMatrix::<R, 2, 6>::zeros();
             for (row, sole) in [observation.left_sole, observation.right_sole]

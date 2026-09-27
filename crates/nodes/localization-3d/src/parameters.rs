@@ -7,6 +7,27 @@ use serde::{Deserialize, Serialize};
 
 const MAX_TRACKING_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
+#[derive(Clone, Debug, Deserialize, Serialize, Message)]
+#[serde(deny_unknown_fields)]
+pub struct ImuBiasParameters {
+    pub accelerometer_initial_sigma: f64,
+    pub gyroscope_initial_sigma: f64,
+    /// Bias random-walk standard deviation per sqrt(second).
+    pub accelerometer_random_walk: f64,
+    pub gyroscope_random_walk: f64,
+}
+
+impl Default for ImuBiasParameters {
+    fn default() -> Self {
+        Self {
+            accelerometer_initial_sigma: 1.0,
+            gyroscope_initial_sigma: 0.02,
+            accelerometer_random_walk: 0.002,
+            gyroscope_random_walk: 0.0002,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AccelerometerParameters {
@@ -59,6 +80,8 @@ pub struct Localization3dParameters {
     #[serde(default)]
     pub kinematic_odometry_noise: Option<KinematicOdometryNoise>,
     pub accelerometer: Option<AccelerometerParameters>,
+    #[serde(default)]
+    pub imu_bias: ImuBiasParameters,
     /// Broad initialization distributions, not measured standing height or zero velocity.
     pub initial_height_sigma: f64,
     pub initial_velocity_sigma: f64,
@@ -92,6 +115,16 @@ fn default_tracking_timeout() -> Duration {
 
 impl Localization3dParameters {
     pub(crate) fn validate(&self) -> std::result::Result<(), String> {
+        for value in [
+            self.imu_bias.accelerometer_initial_sigma,
+            self.imu_bias.gyroscope_initial_sigma,
+            self.imu_bias.accelerometer_random_walk,
+            self.imu_bias.gyroscope_random_walk,
+        ] {
+            if !valid_scale(value) || !(value * value).is_finite() {
+                return Err("IMU bias uncertainties must be finite and positive".into());
+            }
+        }
         if !self.max_heading_error.is_finite()
             || self.max_heading_error <= 0.0
             || self.max_heading_error >= std::f64::consts::FRAC_PI_2
@@ -181,6 +214,7 @@ mod tests {
     #[test]
     fn validation_rejects_unusable_whitening_and_timer_ranges() {
         let parameters = Localization3dParameters {
+            imu_bias: Default::default(),
             kinematic_odometry_noise: Some(Default::default()),
             accelerometer: None,
             initial_height_sigma: 1.0,
@@ -196,6 +230,14 @@ mod tests {
             visual_tracking_timeout: Duration::from_secs(2),
         };
         assert!(parameters.validate().is_ok());
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut invalid = parameters.clone();
+            invalid.imu_bias.accelerometer_initial_sigma = value;
+            assert!(invalid.validate().is_err());
+            invalid = parameters.clone();
+            invalid.imu_bias.gyroscope_random_walk = value;
+            assert!(invalid.validate().is_err());
+        }
         let mut calibrated = parameters.clone();
         calibrated.accelerometer = Some(AccelerometerParameters::default());
         assert!(calibrated.validate().is_ok());

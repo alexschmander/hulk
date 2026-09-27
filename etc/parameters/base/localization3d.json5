@@ -1,6 +1,14 @@
 {
   // Leg odometry assumes a stationary support foot. Enable only with justified stance evidence.
   kinematic_odometry_noise: null,
+  // Residual Robot-frame offsets are optimized at independent 5-second knots,
+  // linearly interpolated. Drift densities are per sqrt(second).
+  imu_bias: {
+    accelerometer_initial_sigma: 1.0,
+    gyroscope_initial_sigma: 0.02,
+    accelerometer_random_walk: 0.002,
+    gyroscope_random_walk: 0.0002,
+  },
   accelerometer: {
     bias: [0.0, 0.0, 0.0],
     scale: [1.0, 1.0, 1.0],

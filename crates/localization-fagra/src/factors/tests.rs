@@ -9,7 +9,7 @@ use linear_algebra::{Framed, Transform};
 use nalgebra::{DimName, Isometry2, Isometry3, RealField, SMatrix, UnitQuaternion, Vector3};
 
 use super::*;
-use crate::variables::{CameraIntrinsics, FieldAlignment, PoseControl, TrajectoryState};
+use crate::variables::{CameraIntrinsics, FieldAlignment, ImuBias, PoseControl, TrajectoryState};
 
 fn c<R: RealField>(x: f64) -> R {
     R::from_f64(x).unwrap()
@@ -218,6 +218,31 @@ fn calibration<R: RealField + Copy>() -> CameraIntrinsics<R> {
     }
 }
 
+ordinary_case!(BiasPriorCase, ImuBiasPrior, |input, states| {
+    ImuBiasPrior {
+        bias: states.insert(ImuBias::exp(&nalgebra::SVector::<R, 6>::from_fn(|i, _| {
+            c(input.values[i])
+        }))),
+        reference: ImuBias::identity(),
+        information_root: root(),
+    }
+});
+ordinary_case!(BiasWalkCase, ImuBiasWalk, |input, states| {
+    ImuBiasWalk {
+        biases: [
+            states.insert(ImuBias::identity()),
+            states.insert(ImuBias::exp(&nalgebra::SVector::<R, 6>::from_fn(|i, _| {
+                c(input.values[i])
+            }))),
+        ],
+        information_root: root(),
+    }
+});
+fagra::factor_tests!(bias_prior_f64, BiasPriorCase, f64);
+fagra::factor_tests!(bias_prior_f32, BiasPriorCase, f32);
+fagra::factor_tests!(bias_walk_f64, BiasWalkCase, f64);
+fagra::factor_tests!(bias_walk_f32, BiasWalkCase, f32);
+
 #[derive(Debug)]
 struct ImuCase(Inputs);
 impl TestFactorBatch for ImuCase {
@@ -238,16 +263,44 @@ impl TestFactorBatch for ImuCase {
     ) -> (ImuKinematics<R>, Vec<ImuObservation<R>>) {
         let model = ImuKinematics {
             controls: self.0.controls(states),
+            biases: std::array::from_fn(|i| {
+                states.insert(ImuBias {
+                    gyroscope: Framed::wrap(Vector3::new(c(self.0.values[i]), c(0.03), c(-0.02))),
+                    accelerometer: Framed::wrap(Vector3::new(
+                        c(0.04),
+                        c(self.0.values[i + 2]),
+                        c(0.01),
+                    )),
+                })
+            }),
             duration: c(0.25),
             gravity_compensation: Framed::wrap(Vector3::new(c(0.1), c(-0.2), c(9.81))),
             gyroscope_information_root: root(),
-            accelerometer_information_root: root(),
+            tilt_information_root: root(),
         };
         let observations = [0.0, 0.4, 1.0]
             .into_iter()
             .enumerate()
             .map(|(i, tau)| ImuObservation {
                 tau: c(tau),
+                bias_tau: c(0.1 + 0.8 * tau),
+                accelerometer_information_root: root::<R, 3>() * c::<R>(0.5 + 0.5 * tau),
+                measured_up: (i != 1).then(|| self.0.measured_up()),
+                force_bias: (i == 2).then(|| ForceBias {
+                    accelerometer_weights: [
+                        root::<R, 3>() * c::<R>(0.3),
+                        root::<R, 3>() * c::<R>(0.7),
+                    ],
+                    position: Framed::wrap(Vector3::new(c(0.12), c(-0.03), c(0.08))),
+                    duration: c(5.0),
+                    lever_samples: [0.2, 0.8]
+                        .map(|u| LeverArmSample {
+                            weight: root::<R, 3>() * c::<R>(0.5),
+                            tau: c(u),
+                            angular_velocity: Framed::wrap(Vector3::new(c(0.3), c(-0.2), c(0.5))),
+                        })
+                        .to_vec(),
+                }),
                 angular_velocity: Framed::wrap(Vector3::new(
                     c(self.0.values[6]),
                     c(self.0.values[7]),
@@ -470,7 +523,7 @@ fn huber_cost_and_frozen_weight_reference() {
     }
 }
 
-fagra::states! { States { poses: PoseControl, alignments: FieldAlignment, intrinsics: CameraIntrinsics } }
+fagra::states! { States { poses: PoseControl, alignments: FieldAlignment, intrinsics: CameraIntrinsics, biases: ImuBias } }
 fagra::factors! { Factors {
     trajectory: TrajectoryPrior, calibration: CameraIntrinsicsPrior, motion: MotionPrior,
     tilt: RollPitchPrior, yaw: RelativeYaw, containment: FieldContainment,
@@ -572,6 +625,55 @@ impl LinearizationSink for Capture {
 }
 
 #[test]
+fn shared_imu_tilt_has_the_same_objective_as_separate_factors() {
+    let mut scene = Scene::new();
+    let input = Inputs {
+        values: [0.1; 9],
+        bridge: false,
+        stationary: false,
+    };
+    for (i, key) in scene.controls.iter().enumerate() {
+        scene.graph.set(*key, input.control(i)).unwrap();
+    }
+    let controls = scene.segment();
+    let biases = std::array::from_fn(|_| scene.graph.add(ImuBias::identity()));
+    let root = root::<f64, 3>();
+    let up = input.measured_up();
+    let combined = scene.graph.add_batch(ImuKinematics {
+        controls,
+        biases,
+        duration: 0.25,
+        gravity_compensation: Framed::wrap(Vector3::new(0.0, 0.0, 9.81)),
+        gyroscope_information_root: root,
+        tilt_information_root: root,
+    });
+    let mut observation = ImuObservation {
+        tau: 0.4,
+        bias_tau: 0.3,
+        angular_velocity: Framed::wrap(Vector3::new(0.1, -0.2, 0.3)),
+        measured_up: Some(up),
+        specific_force: Some(Framed::wrap(Vector3::new(0.0, 0.0, 9.81))),
+        accelerometer_information_root: root,
+        force_bias: None,
+    };
+    let with_tilt = scene
+        .graph
+        .add_factor_to(combined, observation.clone())
+        .unwrap();
+    observation.measured_up = None;
+    let without_tilt = scene.graph.add_factor_to(combined, observation).unwrap();
+    let tilt = RollPitchPrior {
+        controls,
+        duration: 0.25,
+        tau: 0.4,
+        measured_up: up,
+        information_root: root,
+    };
+    let separate = scene.graph.factor_cost(without_tilt).unwrap() + tilt.cost(&scene).unwrap();
+    assert!((scene.graph.factor_cost(with_tilt).unwrap() - separate).abs() < 1e-10);
+}
+
+#[test]
 fn exact_static_measurements_and_one_sided_constraints() {
     let mut scene = Scene::new();
     let controls = scene.segment();
@@ -613,12 +715,14 @@ fn exact_static_measurements_and_one_sided_constraints() {
     assert_eq!(motion.cost(&scene).unwrap(), 0.0);
     motion.linearize(&scene, &mut Capture::default()).unwrap();
 
+    let biases = std::array::from_fn(|_| scene.graph.add(ImuBias::identity()));
     let imu = scene.graph.add_batch(ImuKinematics {
         controls,
+        biases,
         duration: 0.25,
         gravity_compensation: Framed::wrap(Vector3::new(0.0, 0.0, 9.81)),
         gyroscope_information_root: nalgebra::Matrix3::identity(),
-        accelerometer_information_root: nalgebra::Matrix3::identity(),
+        tilt_information_root: nalgebra::Matrix3::identity(),
     });
     let observation = scene
         .graph
@@ -626,8 +730,12 @@ fn exact_static_measurements_and_one_sided_constraints() {
             imu,
             ImuObservation {
                 tau: 0.5,
+                bias_tau: 0.4,
+                measured_up: None,
+                force_bias: None,
                 angular_velocity: Framed::wrap(Vector3::zeros()),
                 specific_force: Some(Framed::wrap(Vector3::new(0.0, 0.0, 9.81))),
+                accelerometer_information_root: nalgebra::Matrix3::identity(),
             },
         )
         .unwrap();

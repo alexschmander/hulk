@@ -96,7 +96,29 @@ pub(super) fn emit<
     jacobians: &[SMatrix<R, M, 6>; N],
 ) -> Result<(), EvaluationError> {
     let blocks: [_; N] = std::array::from_fn(|i| JacobianBlock::new(keys[i], &jacobians[i]));
-    sink.residual(r, &blocks)
+    emit_blocks(sink, r, blocks)
+}
+
+/// Omit exactly-zero blocks without allocating or dropping constant residual
+/// cost. Nonfinite blocks remain present so the sink still rejects them.
+pub(super) fn emit_blocks<
+    R: RealField + Copy,
+    L: LinearizationSink<Scalar = R>,
+    const M: usize,
+    const N: usize,
+>(
+    sink: &mut L,
+    residual: &SVector<R, M>,
+    mut blocks: [JacobianBlock<'_, R>; N],
+) -> Result<(), EvaluationError> {
+    let mut count = 0;
+    for i in 0..N {
+        if blocks[i].jacobian().iter().any(|v| *v != R::zero()) {
+            blocks.swap(count, i);
+            count += 1;
+        }
+    }
+    sink.residual(residual, &blocks[..count])
 }
 
 pub(super) fn rotation_log<R: RealField + Copy>(

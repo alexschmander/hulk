@@ -23,12 +23,13 @@ pub(super) struct MotionCheckpoint {
 }
 
 /// Accepted, normalized observations. Replay bypasses stream admission, not factor construction.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum MotionRecord {
     Acceleration {
         time: Time,
         force: Vector3<Robot, f64>,
         information_root: f64,
+        bias: localization_fagra::factors::ForceBias,
     },
     Imu {
         time: Time,
@@ -54,24 +55,24 @@ pub(super) enum MotionRecord {
 }
 
 impl MotionRecord {
-    fn start(self) -> Time {
+    fn start(&self) -> Time {
         match self {
             Self::Imu { time, .. } | Self::Feet { time, .. } | Self::Acceleration { time, .. } => {
-                time
+                *time
             }
             Self::Kinematic { previous_time, .. } | Self::Visual { previous_time, .. } => {
-                previous_time
+                *previous_time
             }
         }
     }
 
-    fn end(self) -> Time {
+    fn end(&self) -> Time {
         match self {
             Self::Imu { time, .. }
             | Self::Feet { time, .. }
             | Self::Kinematic { time, .. }
-            | Self::Visual { time, .. } => time,
-            Self::Acceleration { time, .. } => time,
+            | Self::Visual { time, .. } => *time,
+            Self::Acceleration { time, .. } => *time,
         }
     }
 
@@ -81,7 +82,8 @@ impl MotionRecord {
                 time,
                 force,
                 information_root,
-            } => estimator.insert_acceleration(time, force, information_root),
+                bias,
+            } => estimator.insert_acceleration(time, force, information_root, bias),
             Self::Imu {
                 time,
                 angular_velocity,
@@ -110,7 +112,7 @@ impl MotionRecord {
 
 impl Estimator {
     pub(super) fn accept_motion(&mut self, record: MotionRecord) -> Result<bool> {
-        record.insert(self)?;
+        record.clone().insert(self)?;
         self.commit_time(record.end());
         let latest_segment = self.segment_and_tau(self.latest_time)?.0;
         let first = (latest_segment - WINDOW_NS / KNOT_SPACING_NS - 1).max(0);
@@ -254,6 +256,7 @@ impl Estimator {
         )?;
         candidate.options = self.options;
         candidate.generation = self.generation;
+        candidate.initialize_biases(self.history_start, self.bias_at(self.history_start)?)?;
         let first = self.segment_and_tau(self.history_start)?.0;
         let last = self.segment_and_tau(self.latest_time)?.0;
         let reference_attitude = self
@@ -290,7 +293,7 @@ impl Estimator {
         for segment in first..=last {
             candidate.add_motion_prior(segment, false)?;
         }
-        for &record in &self.motion_history {
+        for record in self.motion_history.iter().cloned() {
             record.insert(&mut candidate)?;
         }
         candidate.attitudes.clone_from(&self.attitudes);

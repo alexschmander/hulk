@@ -1,5 +1,7 @@
 use coordinate_systems::{ImuReference, Robot};
 use linear_algebra::{Orientation3, Vector3};
+use localization_fagra::factors::{ForceBias, LeverArmSample};
+use nalgebra::Matrix3;
 use ros_z::time::Time;
 use types::localization::MAX_IMU_ATTITUDE_GAP;
 
@@ -10,6 +12,8 @@ pub(super) struct AccelerationIntegrator {
     previous: Option<Sample>,
     start: Option<Time>,
     integral: Vector3<ImuReference, f64>,
+    bias_weights: [Matrix3<f64>; 2],
+    lever_samples: Vec<LeverArmSample>,
 }
 
 #[derive(Clone)]
@@ -17,12 +21,14 @@ struct Sample {
     time: Time,
     gyro: Vector3<Robot, f64>,
     force: Option<Vector3<ImuReference, f64>>,
+    rotation: Matrix3<f64>,
 }
 
 pub(super) struct AveragedAcceleration {
     pub time: Time,
     pub force: Vector3<ImuReference, f64>,
     pub information_root: f64,
+    pub bias: ForceBias,
 }
 
 impl AccelerationIntegrator {
@@ -33,18 +39,19 @@ impl AccelerationIntegrator {
         gyro: Vector3<Robot, f64>,
         raw: Vector3<Robot, f64>,
         parameters: &AccelerometerParameters,
-    ) -> Option<AveragedAcceleration> {
+        origin: Time,
+    ) -> Vec<AveragedAcceleration> {
         // Late samples still enter gyro/attitude fitting, but must not integrate time twice.
         if self
             .previous
             .as_ref()
             .is_some_and(|previous| time <= previous.time)
         {
-            return None;
+            return Vec::new();
         }
         if !raw.inner.iter().all(|v| v.is_finite()) {
             *self = Self::default();
-            return None;
+            return Vec::new();
         }
         if self
             .previous
@@ -69,33 +76,84 @@ impl AccelerationIntegrator {
         } else {
             None
         };
-        let sample = Sample { time, gyro, force };
+        let sample = Sample {
+            time,
+            gyro,
+            force,
+            rotation: attitude.inner.to_rotation_matrix().into_inner(),
+        };
+        let current = sample.clone();
         let previous = self.previous.replace(sample);
         let Some((previous, a, b)) =
             previous.and_then(|previous| previous.force.zip(force).map(|(a, b)| (previous, a, b)))
         else {
             self.start = Some(time);
             self.integral = Vector3::zeros();
-            return None;
+            self.bias_weights = [Matrix3::zeros(); 2];
+            self.lever_samples.clear();
+            return Vec::new();
         };
-        let dt = time.duration_since(previous.time).as_secs_f64();
-        self.integral += (a + b) * (0.5 * dt);
-        let start = self.start.get_or_insert(previous.time);
-        let elapsed = time.duration_since(*start);
-        if elapsed < parameters.averaging_interval {
-            return None;
+        let mut result = Vec::new();
+        let mut left = previous.time;
+        self.start.get_or_insert(left);
+        while left < time {
+            let (segment, _) = super::bias::bias_segment_and_tau(origin, left);
+            let boundary = Time::from_nanos(
+                origin.as_nanos() + (segment + 1) * super::bias::BIAS_KNOT_SPACING_NS,
+            );
+            let right = time.min(boundary);
+            let weight = right.duration_since(left).as_secs_f64() * 0.5;
+            for stamp in [left, right] {
+                let fraction = stamp.duration_since(previous.time).as_secs_f64()
+                    / time.duration_since(previous.time).as_secs_f64();
+                let rotation = previous.rotation * (1.0 - fraction) + current.rotation * fraction;
+                let tau = (stamp.as_nanos()
+                    - origin.as_nanos()
+                    - segment * super::bias::BIAS_KNOT_SPACING_NS) as f64
+                    / super::bias::BIAS_KNOT_SPACING_NS as f64;
+                self.integral += (a * (1.0 - fraction) + b * fraction) * weight;
+                self.bias_weights[0] += rotation * (weight * (1.0 - tau));
+                self.bias_weights[1] += rotation * (weight * tau);
+                if parameters.position.norm_squared() > 0.0 {
+                    self.lever_samples.push(LeverArmSample {
+                        weight: rotation * weight,
+                        tau,
+                        angular_velocity: previous.gyro * (1.0 - fraction) + gyro * fraction,
+                    });
+                }
+            }
+            let start = self.start.unwrap();
+            let elapsed = right.duration_since(start);
+            if right == boundary || elapsed >= parameters.averaging_interval {
+                let seconds = elapsed.as_secs_f64();
+                let mut samples = std::mem::take(&mut self.lever_samples);
+                for sample in &mut samples {
+                    sample.weight /= seconds;
+                }
+                let mean = AveragedAcceleration {
+                    time: start + elapsed / 2,
+                    force: self.integral / seconds,
+                    information_root: seconds.sqrt() / parameters.noise_density,
+                    bias: ForceBias {
+                        accelerometer_weights: self.bias_weights.map(|w| w / seconds),
+                        position: parameters.position,
+                        duration: super::bias::BIAS_KNOT_SPACING_NS as f64 * 1e-9,
+                        lever_samples: samples,
+                    },
+                };
+                self.start = Some(right);
+                self.integral = Vector3::zeros();
+                self.bias_weights = [Matrix3::zeros(); 2];
+                if (mean.force.inner * mean.information_root)
+                    .norm_squared()
+                    .is_finite()
+                {
+                    result.push(mean);
+                }
+            }
+            left = right;
         }
-        let mean = AveragedAcceleration {
-            time: *start + elapsed / 2,
-            force: self.integral / elapsed.as_secs_f64(),
-            information_root: elapsed.as_secs_f64().sqrt() / parameters.noise_density,
-        };
-        self.start = Some(time);
-        self.integral = Vector3::zeros();
-        (mean.force.inner * mean.information_root)
-            .norm_squared()
-            .is_finite()
-            .then_some(mean)
+        result
     }
 }
 
@@ -122,18 +180,72 @@ mod tests {
                 + alpha.cross(&offset)
                 + gyro.cross(&gyro.cross(&offset));
             let raw = sensor_force.component_div(&parameters.scale) + parameters.bias.inner;
-            if let Some(mean) = integrator.observe(
+            for mean in integrator.observe(
                 Time::from_nanos(index * 2_000_000),
                 Orientation3::from_euler_angles(0.0, 0.0, 0.5 * t + t * t),
                 Vector3::wrap(gyro),
                 Vector3::wrap(raw),
                 &parameters,
+                Time::from_nanos(0),
             ) {
                 assert!((mean.force.inner - nalgebra::vector![0.0, 0.0, 9.81]).norm() < 1e-10);
                 averages += 1;
             }
         }
         assert!(averages >= 4);
+    }
+
+    #[test]
+    fn interpolation_survives_averaging_and_a_bias_boundary_with_lever_arm() {
+        use localization_fagra::variables::ImuBias;
+        let parameters = AccelerometerParameters {
+            position: Vector3::wrap(nalgebra::vector![0.12, -0.03, 0.08]),
+            ..Default::default()
+        };
+        let bias_at = |t: f64| ImuBias {
+            gyroscope: Vector3::wrap(nalgebra::vector![
+                0.01 + 0.002 * t,
+                -0.02 + 0.001 * t,
+                0.03 - 0.001 * t
+            ]),
+            accelerometer: Vector3::wrap(nalgebra::vector![
+                0.03 + 0.001 * t,
+                -0.04 + 0.002 * t,
+                0.01
+            ]),
+        };
+        let omega = nalgebra::vector![0.0, 0.0, 0.4];
+        let mut integrator = AccelerationIntegrator::default();
+        let mut before = false;
+        let mut after = false;
+        for i in 0..30 {
+            let stamp = 4_979_000_000 + i * 3_000_000;
+            let t = stamp as f64 * 1e-9;
+            let bias = bias_at(t);
+            let raw = nalgebra::vector![0.0, 0.0, 9.81]
+                + omega.cross(&omega.cross(&parameters.position.inner))
+                + bias.accelerometer.inner;
+            for mean in integrator.observe(
+                Time::from_nanos(stamp),
+                Orientation3::from_euler_angles(0.0, 0.0, 0.4 * t),
+                Vector3::wrap(omega + bias.gyroscope.inner),
+                Vector3::wrap(raw),
+                &parameters,
+                Time::from_nanos(0),
+            ) {
+                let start =
+                    (mean.time.as_nanos() / super::super::bias::BIAS_KNOT_SPACING_NS) as f64 * 5.0;
+                let biases = [bias_at(start), bias_at(start + 5.0)];
+                let (correction, _) = mean.bias.evaluate([&biases[0], &biases[1]]).unwrap();
+                assert!(
+                    (mean.force.inner - correction - nalgebra::vector![0.0, 0.0, 9.81]).norm()
+                        < 1e-6
+                );
+                before |= mean.time.as_nanos() < 5_000_000_000;
+                after |= mean.time.as_nanos() > 5_000_000_000;
+            }
+        }
+        assert!(before && after);
     }
 
     #[test]
@@ -155,7 +267,10 @@ mod tests {
                         Vector3::zeros(),
                         Vector3::wrap(nalgebra::vector![0.0, 0.0, force]),
                         &parameters,
+                        Time::from_nanos(0),
                     )
+                    .into_iter()
+                    .next()
                     .or(mean);
             }
             let mean = mean.unwrap();
@@ -168,9 +283,10 @@ mod tests {
                         Orientation3::default(),
                         Vector3::zeros(),
                         Vector3::zeros(),
-                        &parameters
+                        &parameters,
+                        Time::from_nanos(0)
                     )
-                    .is_none()
+                    .is_empty()
             );
             assert!(
                 integrator
@@ -179,9 +295,10 @@ mod tests {
                         Orientation3::default(),
                         Vector3::zeros(),
                         Vector3::zeros(),
-                        &parameters
+                        &parameters,
+                        Time::from_nanos(0)
                     )
-                    .is_none()
+                    .is_empty()
             );
         }
     }

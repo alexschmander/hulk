@@ -43,12 +43,15 @@
 //!         trajectory: PoseControl<R>,
 //!         alignment: FieldAlignment<R>,
 //!         intrinsics: CameraIntrinsics<R>,
+//!         biases: ImuBias<R>,
 //!     }
 //! }
 //! fagra::factors! {
 //!     Factors<R> {
 //!         trajectory_priors: TrajectoryPrior<R>,
 //!         intrinsics_priors: CameraIntrinsicsPrior<R>,
+//!         bias_priors: ImuBiasPrior<R>,
+//!         bias_walks: ImuBiasWalk<R>,
 //!         motion: MotionPrior<R>,
 //!         imu: Batch<ImuKinematics<R>, ImuObservation<R>>,
 //!         tilt: RollPitchPrior<R>,
@@ -68,6 +71,7 @@ mod common;
 mod field_containment;
 mod ground;
 mod imu;
+mod imu_bias;
 mod kinematic_odometry;
 mod motion;
 mod prior;
@@ -79,7 +83,10 @@ mod tests;
 
 pub use field_containment::FieldContainment;
 pub use ground::{FootGround, FootObservation};
-pub use imu::{ImuKinematics, ImuObservation, RelativeYaw, RollPitchPrior};
+pub use imu::{
+    ForceBias, ImuKinematics, ImuObservation, LeverArmSample, RelativeYaw, RollPitchPrior,
+};
+pub use imu_bias::{ImuBiasPrior, ImuBiasWalk};
 pub use kinematic_odometry::{AdjacentKinematicOdometry, KinematicOdometry};
 pub use motion::MotionPrior;
 pub use prior::{CameraIntrinsicsPrior, TrajectoryPrior};

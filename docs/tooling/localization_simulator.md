@@ -84,6 +84,21 @@ implementation or dependency patch is needed. Diagnostics include `lm_attempts`,
 `gradient_norm`, and `motion_rebuilt`, alongside cost and termination. Covariance includes
 control/alignment cross-correlations; numerical damping is not a physical observation.
 
+For CPU hotspots and scheduling-delay measurements on robot 43, see the
+[perf profiling report](localization_perf.md).
+
+The estimator now reuses LM's final undamped linearization for covariance and takes costs
+from solver reports/statistics instead of running extra evaluation-only solves. Accepted
+nonconverged motion results still get a fresh covariance. `initial_cost` is unavailable on
+failures after accepted steps when fagra does not return a report; final cost and termination
+remain available. Gyro and SDK tilt share batched spline evaluation. Exactly inactive foot
+constraints and zero Jacobian blocks avoid assembly work without dropping measurements.
+Acceleration means are grouped by their shared pose/bias segment, with whitening stored per
+observation so unequal averaging durations and insertion-time noise settings are preserved.
+Small local spline optimizations borrow the tilt Jacobians and propagate only the already-active
+angular derivative prefix. Their incremental measured impact is recorded in the
+[local refinement results](localization_perf.md#local-refinements-complexity-versus-measured-gain).
+
 Rejected visual updates are rolled back and removed before retrying the restored motion graph.
 If the field-conditioned graph remains invalid, localization reconstructs local motion from an
 owned validated pose/velocity/IMU checkpoint and retained observations, enters LostTrack, and keeps
@@ -105,6 +120,55 @@ Bundled settings enable acceleration with 10 ms averaging and noise density 0.3,
 and unit scale are provisional: the physical mounting offset and calibration have not been measured.
 The simulation IMU site's origin is not hardware calibration. The 200 ms spline also limits the motion
 bandwidth represented by these averaged observations.
+
+### Online IMU bias calibration
+
+The graph estimates residual accelerometer and gyroscope biases in Robot axes, after the
+configured fixed calibration. Bias has independent **5-second knots with linear interpolation**,
+not a 200 ms spline. Each observation references two bracketing six-dimensional bias states;
+the two-second trajectory window normally retains two knots, or three across a boundary.
+
+For interpolation fraction `u`, `b(t) = (1-u) b0 + u b1`. Gyro residuals are
+`omega_predicted + b_g(t) - omega_measured`; point accelerometer residuals are
+`Rᵀ(p̈ + g) + b_a(t) - f_measured`. Bias tangent/covariance order is gyro XYZ, then
+accelerometer XYZ. The bias walk penalizes consecutive differences with variance `density² * 5 s`.
+
+`localization3d.imu_bias` configures initial uncertainties and drift densities:
+
+| Parameter | Default | Units |
+| --- | ---: | --- |
+| `accelerometer_initial_sigma` | 1.0 | m/s² |
+| `gyroscope_initial_sigma` | 0.02 | rad/s |
+| `accelerometer_random_walk` | 0.002 | (m/s²)/sqrt(s) |
+| `gyroscope_random_walk` | 0.0002 | (rad/s)/sqrt(s) |
+
+The initial bias mean is zero; the broad initial accelerometer prior allows uncalibrated offsets
+to be learned. The knot interval is structural, like the pose-knot spacing. Parameter changes
+affect newly constructed priors/walks, not already marginalized information.
+Fixed sensor bias/scale/mounting calibration is assumed constant within an epoch; start a
+fresh epoch after changing those physical calibration parameters.
+
+Acceleration averaging retains both interpolation-weighted rotation matrices, rather than
+pretending the average has a single body-axis bias. Averages split at bias boundaries without
+dropping the intervening impulse. For nonzero IMU mounting offsets, retained quadrature samples
+also account for corrected angular velocity and the interpolated gyro-bias time derivative in
+tangential/centripetal compensation. All corresponding bias Jacobians are analytical.
+
+Bias knots retire through joint marginalization with pose controls, retaining cross-correlations.
+Rejected updates restore bias along with pose/alignment/intrinsics. Recovery candidates start
+from the existing bias estimate but reset its confidence using the original zero-mean calibration
+prior, broadened for elapsed drift; they do not duplicate an active posterior alongside replayed
+measurements. Full epoch resets start calibration anew.
+
+`debug/solve_diagnostics.imu_bias` exposes the estimated gyro/accelerometer offsets and their
+interpolated 6×6 marginal covariance (array of rows), at the diagnostic's estimate timestamp.
+It is absent when no estimate was accepted. Rebuild diagnostic consumers for this schema change.
+
+Bias requires independent motion evidence, such as VO or landmarks; it is not identifiable from
+IMU alone at startup. No stationary/contact detector, zero-velocity factor, or standing-height
+constraint is introduced. Scale, mounting geometry, and the SDK attitude filter are not optimized.
+See [robot 43 calibration results](localization_robot43_investigation.md#online-calibration-validation)
+for the measured learning transient, VO outage, and unobservable-startup behavior.
 
 Kinematic odometry is optional and disabled in the bundled configuration because there is no reliable
 contact signal. Foot factors enforce nonpenetration only; both feet may be airborne. The anchor fixes

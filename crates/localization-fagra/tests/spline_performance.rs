@@ -178,13 +178,14 @@ mod factor_workload {
     use linear_algebra::{Framed, Transform};
     use localization_fagra::{
         factors::*,
-        variables::{CameraIntrinsics, FieldAlignment, TrajectoryState},
+        variables::{CameraIntrinsics, FieldAlignment, ImuBias, TrajectoryState},
     };
     use nalgebra::{Matrix3, SMatrix};
 
-    fagra::states! { States<R> { controls: PoseControl<R>, alignment: FieldAlignment<R>, intrinsics: CameraIntrinsics<R> } }
+    fagra::states! { States<R> { controls: PoseControl<R>, alignment: FieldAlignment<R>, intrinsics: CameraIntrinsics<R>, biases: ImuBias<R> } }
     fagra::factors! { Factors<R> {
         trajectory: TrajectoryPrior<R>, calibration: CameraIntrinsicsPrior<R>, motion: MotionPrior<R>,
+        bias_prior: ImuBiasPrior<R>, bias_walk: ImuBiasWalk<R>,
         tilt: RollPitchPrior<R>, yaw: RelativeYaw<R>, containment: FieldContainment<R>,
         imu: Batch<ImuKinematics<R>, ImuObservation<R>>,
         feet: Batch<FootGround<R>, FootObservation<R>>,
@@ -277,12 +278,27 @@ mod factor_workload {
                 huber_threshold: c(2.0),
             })
             .unwrap();
+        let biases = std::array::from_fn(|_| graph.add(ImuBias::identity()));
+        graph
+            .add_factor(ImuBiasPrior {
+                bias: biases[0],
+                reference: ImuBias::identity(),
+                information_root: SMatrix::identity(),
+            })
+            .unwrap();
+        graph
+            .add_factor(ImuBiasWalk {
+                biases,
+                information_root: SMatrix::identity(),
+            })
+            .unwrap();
         let imu = graph.add_batch(ImuKinematics {
             controls,
+            biases,
             duration: c(0.2),
             gravity_compensation: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(9.81))),
             gyroscope_information_root: Matrix3::identity(),
-            accelerometer_information_root: Matrix3::identity(),
+            tilt_information_root: Matrix3::identity(),
         });
         let feet = graph.add_batch(FootGround {
             controls,
@@ -302,8 +318,12 @@ mod factor_workload {
                     imu,
                     ImuObservation {
                         tau,
+                        bias_tau: tau,
+                        measured_up: Some(Framed::wrap(Vector3::z())),
+                        force_bias: None,
                         angular_velocity: Framed::wrap(Vector3::zeros()),
                         specific_force: Some(Framed::wrap(Vector3::new(c(0.0), c(0.0), c(9.81)))),
+                        accelerometer_information_root: Matrix3::identity(),
                     },
                 )
                 .unwrap();

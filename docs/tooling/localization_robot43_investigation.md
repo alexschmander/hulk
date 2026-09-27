@@ -117,3 +117,79 @@ the compiled host ablation can be rerun as:
 ```sh
 target/debug/examples/replay_stationary /tmp/opencode/robot43-recording.mcap
 ```
+
+## Online calibration validation
+
+The implementation now includes independent, linearly interpolated 5-second bias knots,
+joint marginalization, calibrated averaging/lever-arm Jacobians, and bias covariance diagnostics.
+The earlier investigation above describes the original fixed-calibration implementation.
+
+Tested the new release executable **on robot 43**, with the full robot application still running,
+against the first 30 seconds of the same confirmed-stationary recording. Initialization uses the
+first recorded Local pose; the roughly 29-second replay supplies actual IMU, sole kinematics,
+and optionally VO. It schedules solves every 50 ms of delivery time. It does not supply global
+landmarks, stationary constraints, or a measured calibration value to the graph. The stationary
+force residual from the first five seconds is printed solely as an independent reference.
+
+The final learned accelerometer bias with VO was:
+
+```
+Graph estimate:       [0.011807, 0.028303, 0.001680] m/s²
+Stationary reference: [0.011520, 0.028122, 0.001464] m/s²
+```
+
+| Mode | Final displacement | Maximum displacement, entire run | Estimates | Gradient-converged solves | Median cycle | p95 cycle |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bias constrained near zero, VO on | 0.597 m | 0.609 m | 564/565 | 445/565 | 232.8 ms | 341.7 ms |
+| Online bias, VO on | **0.030 m** | 0.430 m | 564/565 | 565/565 | 153.4 ms | 248.4 ms |
+| Online bias, VO disabled after 20 s | **0.008 m** | 0.430 m | 564/565 | 565/565 | 166.2 ms | 306.5 ms |
+| Online bias, no VO from startup | 7.326 m | 7.326 m | 564/565 | 565/565 | 155.6 ms | 245.0 ms |
+
+All runs have one initial covariance failure; a gradient-converged solve can still fail covariance.
+The fixed-zero ablation uses the same augmented graph with very tight zero-bias priors/walks,
+not the old executable, so its conditioning and timing differ from the old benchmark. These are
+single runs under varying live-system load, not a controlled speed comparison. Total processing
+was 130.91, 87.61, 97.38, and 87.36 seconds respectively, excluding recording I/O and decoding.
+
+A separate back-to-back check of the original 6-second synthetic tracking workload on the loaded
+robot took 9.95 s with the pre-calibration executable (80.0 ms median, 154.7 ms p95), and 20.03 s
+with online bias (146.2 ms median, 371.2 ms p95). Both published 119/121 field estimates; maximum
+errors changed from 1.98 mm / 0.069° to 9.63 mm / 0.241°. The extra calibration states and their
+coupling have a material runtime cost despite the coarse grid. This is not a real-time-performance
+fix; further profiling/solver conditioning work is still needed under the live robot workload.
+Subsequent unchanged-objective optimizations and matched before/after measurements are recorded
+in the [perf improvement report](localization_perf.md#implemented-improvements-and-matched-measurements).
+
+The graph learns the observed offset and materially reduces stationary drift. There remains a
+**learning transient**: initial displacement reaches 43 cm before VO identifies the offset;
+maximum displacement after ten seconds is 19 cm. Calibration is not immediately known at startup.
+In the no-VO run, estimated accelerometer sigma remains approximately 0.507 m/s² per axis,
+versus roughly 0.062–0.069 with VO. Adding variables does not make IMU-only bias observable.
+The lower endpoint error during the short VO outage is not evidence that removing VO helps:
+it is one short continuation after learning on the same stationary record.
+
+A separate 60-second host replay with continuous VO remained stable through repeated bias-knot
+retirement, finishing at `[0.012170, 0.028201, 0.001670]` m/s² estimated accelerometer bias and
+approximately 2.4 cm displacement. Temperature changes and general multi-orientation hardware
+calibration have not been validated by this stationary experiment.
+
+Validation also passed:
+
+- 26 localization tests on robot 43, including biased-motion recovery, marginalization, rollback,
+  averaged bias interpolation across a knot boundary with nonzero lever arm, and double flight.
+- 144 factor/variable tests on the host, including independent AD Jacobian checks in f32/f64.
+- 42 simulator tests, two allocation checks, and the factor-schema doctest.
+- The older divergence recording: 330/333 local estimates, no field estimates, max |height| 0.605 m.
+
+Reproduction:
+
+```sh
+target/debug/pepsi build crates/nodes/localization-3d --env podman --release --example imu_calibration_replay --tests
+# Copy release/examples/imu_calibration_replay to the robot, then run:
+/tmp/imu_calibration_replay /home/booster/hulk/logs/2026-09-27T17:24:08.443+08:00/recording.mcap 30
+# Optional third argument selects fixed-zero, learn-with-vo, learn-vo-outage, or learn-without-vo.
+```
+
+Robot executable SHA-256: `7021062c3334e72421c377ec050130ca8e2b42f926d17b71f29ed931fd249093`.
+Raw results: `/tmp/opencode/robot43-calibration-robot.txt` on the host. This was an isolated
+recorded-data replay on the robot, not a deployment of the updated controller service.
