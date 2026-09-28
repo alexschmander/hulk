@@ -6,12 +6,13 @@ use kinematics::{
     joints::{Joints, leg::LegJoints},
 };
 use linear_algebra::{Point2, Point3, Vector2, point};
+use ros_z::time::Time;
 use types::joint_limits::JointLimits;
 use types::motor_command::MotorCommand;
 
 use crate::{
     config::{HISTORY_FRAME_SIZE, HISTORY_LENGTH, LEGS, Parameters, Policy},
-    inference::position_targets,
+    inference::{InferenceCommand, WalkCommand, position_targets},
     observation::SensorFrame,
 };
 
@@ -29,6 +30,16 @@ pub struct KickRequest {
 }
 
 impl KickRequest {
+    /// Change only the orientation of the reference frame, as in B-Human.
+    pub fn rotated(mut self, angle: f32) -> Self {
+        let rotation = nalgebra::UnitComplex::new(angle);
+        self.ball_position = Point2::wrap(rotation * self.ball_position.inner);
+        self.ball_velocity = Vector2::wrap(rotation * self.ball_velocity.inner);
+        self.direction =
+            (self.direction + angle + std::f32::consts::PI).rem_euclid(TAU) - std::f32::consts::PI;
+        self
+    }
+
     pub fn is_finite(self) -> bool {
         self.ball_position
             .inner
@@ -47,7 +58,8 @@ pub struct Locomotion {
     previous_target: Joints<f32>,
     pub phase: f32,
     pub frequency_offset: f32,
-    previous_ball: Option<Point2<Ground>>,
+    previous_ball: Option<(Point2<Ground>, Point2<Ground>)>,
+    last_fast_motion: Option<Time>,
 }
 
 impl Locomotion {
@@ -72,6 +84,7 @@ impl Locomotion {
             frequency_offset: parameters.locomotion.initial_frequency_offset,
             parameters,
             previous_ball: None,
+            last_fast_motion: None,
         }
     }
 
@@ -103,6 +116,30 @@ impl Locomotion {
         }
     }
 
+    pub fn standing(&mut self, now: Time, request: InferenceCommand) -> bool {
+        let InferenceCommand::Walk(WalkCommand {
+            velocity,
+            angular_velocity,
+        }) = request
+        else {
+            self.last_fast_motion = Some(now);
+            return false;
+        };
+        let command = [velocity.x(), velocity.y(), angular_velocity];
+        let stopped = command == [0.0; 3];
+        let slow = command
+            .into_iter()
+            .zip(self.parameters.locomotion.slow_velocity_thresholds)
+            .all(|(value, threshold)| value.abs() < threshold);
+        if !slow {
+            self.last_fast_motion = Some(now);
+        }
+        stopped
+            && self.last_fast_motion.is_none_or(|last| {
+                now.duration_since(last) >= self.parameters.locomotion.stand_delay
+            })
+    }
+
     pub fn record_walk_sample(&mut self, sensor: &SensorFrame, joints: &JointLimits) {
         self.record_history(sensor, joints);
         self.previous_ball = None;
@@ -112,16 +149,31 @@ impl Locomotion {
         &mut self,
         sensor: &SensorFrame,
         request: KickRequest,
+        soft: bool,
         joints: &JointLimits,
     ) -> (Point2<Ground>, Point2<Ground>) {
         self.record_history(sensor, joints);
-        let ball = kick::shifted_ball(sensor, request, &self.parameters.kick);
+        let ball = Point2::wrap(
+            request
+                .ball_position
+                .inner
+                .coords
+                .cap_magnitude(self.parameters.kick.ball_position_limit)
+                .into(),
+        );
+        let shifted = kick::shifted_ball(sensor, request, &self.parameters.kick);
         let previous = self
             .previous_ball
-            .filter(|previous| (ball - *previous).norm() <= self.parameters.kick.ball_jump_distance)
-            .unwrap_or(ball);
-        self.previous_ball = Some(ball);
-        (ball, previous)
+            .filter(|(previous, _)| {
+                (ball - *previous).norm() <= self.parameters.kick.ball_jump_distance
+            })
+            .unwrap_or((ball, shifted));
+        self.previous_ball = Some((ball, shifted));
+        if soft {
+            (ball, previous.0)
+        } else {
+            (shifted, previous.1)
+        }
     }
 
     fn record_history(&mut self, sensor: &SensorFrame, joints: &JointLimits) {
@@ -158,7 +210,12 @@ impl Locomotion {
             // RLWalkPhase::calcJoints retains these targets before downstream composition/clipping.
             self.previous_target[joint] = position[joint];
         }
-        self.frequency_offset = actions[LEGS.len()].clamp(-action_limit, action_limit);
+        let frequency_limit = if policy == Policy::Walk {
+            self.parameters.locomotion.frequency_offset_limit
+        } else {
+            action_limit
+        };
+        self.frequency_offset = actions[LEGS.len()].clamp(-frequency_limit, frequency_limit);
         position_targets(position, kp, kd)
     }
 }
@@ -188,5 +245,122 @@ pub fn leg(angles: &LegJoints<f32>, left: bool) -> (Point3<Robot>, Point3<Robot>
             foot_to_robot * point![0.026, 0.0, -0.038],
             tibia_to_robot.translation(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        inference::KickCommand,
+        test_support::{limits, parameters, sensor, time},
+    };
+    use linear_algebra::vector;
+
+    fn kick_request() -> KickRequest {
+        KickRequest {
+            ball_position: point![0.2, 0.2],
+            ball_velocity: vector![1.0, 0.0],
+            direction: 0.0,
+            target_speed: 1.0,
+            strong: true,
+            quick: true,
+        }
+    }
+
+    #[test]
+    fn walk_clips_frequency_feedback_independently_of_joint_actions() {
+        let parameters = parameters();
+        let sensor = sensor();
+        let mut state = Locomotion::new(&sensor, parameters.clone(), &limits());
+        for (raw, expected) in [(1.8, 0.5), (-1.8, -0.5), (0.2, 0.2)] {
+            let mut actions = [0.0; 13];
+            actions[0] = 10.0;
+            actions[12] = raw;
+            let target = state.decode(Policy::Walk, &actions, &sensor);
+            assert_eq!(
+                target[LEGS[0]].position,
+                Policy::Walk.offset(&parameters)[LEGS[0]] + Policy::Walk.action_limit(&parameters)
+            );
+            let tensor =
+                walk::Observation::new(&state, &Joints::fill(0.0), false, Vector2::zeros(), 0.0)
+                    .to_tensor();
+            assert_eq!(tensor[337], expected);
+            state.decode(Policy::Kick, &actions, &sensor);
+            assert_eq!(state.frequency_offset, raw);
+            state.phase = 0.0;
+            state.advance(0.02, false);
+            assert!((state.phase - 0.02 * (1.5 + expected)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn standing_requires_slow_command_dwell_after_walking_or_kicking() {
+        let mut state = Locomotion::new(&sensor(), parameters(), &limits());
+        let stand = InferenceCommand::Walk(WalkCommand::stand());
+        let moving = InferenceCommand::Walk(WalkCommand {
+            velocity: vector![0.2, 0.0],
+            angular_velocity: 0.0,
+        });
+        assert!(state.standing(time(0), stand));
+        assert!(!state.standing(time(20), moving));
+        assert!(!state.standing(time(1000), stand));
+        assert!(state.standing(time(1020), stand));
+        let tiny = InferenceCommand::Walk(WalkCommand {
+            velocity: vector![0.001, 0.0],
+            angular_velocity: 0.0,
+        });
+        assert!(!state.standing(time(2000), tiny));
+        assert!(state.standing(time(2020), stand));
+        let kick = InferenceCommand::Kick(KickCommand {
+            reference_time: time(2040),
+            soft: false,
+            request: kick_request(),
+        });
+        assert!(!state.standing(time(2040), kick));
+        assert!(!state.standing(time(3020), stand));
+        assert!(state.standing(time(3040), stand));
+    }
+
+    #[test]
+    fn kick_variants_keep_separate_shifted_and_unshifted_history() {
+        let mut parameters = (*parameters()).clone();
+        // Force the shift to be observable regardless of the fixture's stance.
+        parameters.kick.shift_foot_distance = [0.0, 0.001];
+        let sensor = sensor();
+        let limits = limits();
+        let mut state = Locomotion::new(&sensor, std::sync::Arc::new(parameters), &limits);
+        let first = kick_request();
+        let (shifted, previous) = state.record_kick_sample(&sensor, first, false, &limits);
+        assert_eq!(shifted, previous);
+        assert!((shifted - first.ball_position).norm() > 0.001);
+        let mut second = first;
+        second.ball_position = point![0.21, 0.2];
+        let (raw, old_raw) = state.record_kick_sample(&sensor, second, true, &limits);
+        assert_eq!(raw, second.ball_position);
+        assert_eq!(old_raw, first.ball_position);
+        let expected_previous = kick::shifted_ball(&sensor, second, &state.parameters.kick);
+        let (_, old_shifted) = state.record_kick_sample(&sensor, first, false, &limits);
+        assert_eq!(old_shifted, expected_previous);
+        second.ball_position = point![-0.5, -0.5];
+        let (current, previous) = state.record_kick_sample(&sensor, second, true, &limits);
+        assert_eq!(current, previous);
+        state.record_walk_sample(&sensor, &limits);
+        let (current, previous) = state.record_kick_sample(&sensor, first, false, &limits);
+        assert_eq!(current, previous);
+    }
+
+    #[test]
+    fn kick_rotation_transforms_position_velocity_and_direction_together() {
+        let transformed = kick_request().rotated(-std::f32::consts::FRAC_PI_2);
+        assert!((transformed.ball_position - point![0.2, -0.2]).norm() < 1e-6);
+        assert!((transformed.ball_velocity - vector![0.0, -1.0]).norm() < 1e-6);
+        assert!((transformed.direction + std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        let wrapped = KickRequest {
+            direction: 3.0,
+            ..kick_request()
+        }
+        .rotated(0.4);
+        assert!((wrapped.direction - (3.4 - TAU)).abs() < 1e-6);
     }
 }

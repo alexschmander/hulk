@@ -20,3 +20,7 @@ serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 types.workspace = true
+
+[dev-dependencies]
+json5.workspace = true
+serde_json.workspace = true

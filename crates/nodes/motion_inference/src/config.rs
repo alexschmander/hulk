@@ -105,6 +105,9 @@ pub struct LocomotionParameters {
     pub base_frequency: f32,
     pub initial_frequency_offset: f32,
     pub frequency_offset_limit: f32,
+    pub stand_delay: Duration,
+    /// Absolute command thresholds in m/s, m/s, rad/s.
+    pub slow_velocity_thresholds: [f32; 3],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ros_z::Message)]
@@ -182,6 +185,14 @@ impl Parameters {
             "quaternion norm tolerance must be in (0, 1]"
         );
         let locomotion = &self.locomotion;
+        ensure!(
+            !locomotion.stand_delay.is_zero()
+                && locomotion
+                    .slow_velocity_thresholds
+                    .iter()
+                    .all(|v| v.is_finite() && *v > 0.0),
+            "invalid standing transition parameters"
+        );
         let kick = &self.kick;
         let get_up = &self.get_up;
         ensure!(
@@ -318,3 +329,18 @@ pub const LEGS: [JointsName; 12] = [
     JointsName::RightLeg(LegJoint::AnkleUp),
     JointsName::RightLeg(LegJoint::AnkleDown),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shipped_slow_getup_ankle_gains_include_reference_stiffness() {
+        let parameters = crate::test_support::parameters();
+        let (kp, kd) = Policy::SlowGetUp.gains(&parameters);
+        assert_eq!(kp.left_leg.ankle_up, 25.0);
+        assert_eq!(kp.right_leg.ankle_up, 25.0);
+        assert_eq!(kd.left_leg.ankle_up, 1.0);
+        assert_eq!(kd.right_leg.ankle_up, 1.0);
+    }
+}

@@ -7,6 +7,52 @@ use ros_z::time::Time;
 
 use crate::config::Parameters;
 
+/// Odometry uses IMU yaw minus a fixed startup offset. The offset cancels in
+/// relative rotations, so retaining source-stamped IMU yaw avoids another async
+/// lookup when aligning kick observations with the selected sensor frame.
+#[derive(Default)]
+pub(crate) struct YawHistory(std::collections::VecDeque<(Time, f32)>);
+
+impl YawHistory {
+    pub fn record(&mut self, time: Time, yaw: f32) {
+        if self.0.back().is_some_and(|(last, _)| time <= *last) {
+            return;
+        }
+        self.0.push_back((time, yaw));
+        while self.0.len() > 256
+            || self.0.front().is_some_and(|(old, _)| {
+                time.duration_since(*old) > std::time::Duration::from_millis(500)
+            })
+        {
+            self.0.pop_front();
+        }
+    }
+
+    pub fn at(&self, time: Time, maximum_gap: std::time::Duration) -> Option<f32> {
+        let before = self.0.iter().rev().find(|(stamp, _)| *stamp <= time);
+        let after = self.0.iter().find(|(stamp, _)| *stamp >= time);
+        match (before, after) {
+            (Some(&(a, yaw_a)), Some(&(b, yaw_b))) => {
+                if time.duration_since(a) > maximum_gap || b.duration_since(time) > maximum_gap {
+                    return None;
+                }
+                if a == b {
+                    return Some(yaw_a);
+                }
+                let delta = (yaw_b - yaw_a).sin().atan2((yaw_b - yaw_a).cos());
+                Some(
+                    yaw_a
+                        + delta * time.duration_since(a).as_secs_f32()
+                            / b.duration_since(a).as_secs_f32(),
+                )
+            }
+            (Some(&(stamp, yaw)), None) if time.duration_since(stamp) <= maximum_gap => Some(yaw),
+            (None, Some(&(stamp, yaw))) if stamp.duration_since(time) <= maximum_gap => Some(yaw),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SensorFrame {
     pub timestamp: Time,
@@ -101,5 +147,27 @@ impl VelocityEstimator {
         }
         self.previous = Some((sensor.timestamp, sensor.position));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::time;
+    use std::{f32::consts::PI, time::Duration};
+
+    #[test]
+    fn yaw_interpolation_crosses_wrap_and_rejects_old_epochs() {
+        let mut history = YawHistory::default();
+        history.record(time(100), 179.0_f32.to_radians());
+        history.record(time(120), -179.0_f32.to_radians());
+        let gap = Duration::from_millis(30);
+        assert!((history.at(time(110), gap).unwrap().abs() - PI).abs() < 1e-6);
+        assert!(history.at(time(60), gap).is_none());
+        assert!(history.at(time(160), gap).is_none());
+        history.record(time(110), 0.0); // Out-of-order samples cannot rewrite history.
+        assert!((history.at(time(110), gap).unwrap().abs() - PI).abs() < 1e-6);
+        history.record(time(700), 0.1);
+        assert!(history.at(time(110), gap).is_none());
     }
 }

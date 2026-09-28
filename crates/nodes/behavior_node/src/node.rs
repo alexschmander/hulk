@@ -477,6 +477,8 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         additional_black_board_pub
             .publish_if_subscribed(|| async { blackboard.clone() })
             .await?;
-        motion_command_pub.publish(&motion_command).await?;
+        motion_command_pub
+            .publish_with_source_time(&motion_command, blackboard.world_state.now)
+            .await?;
     }
 }

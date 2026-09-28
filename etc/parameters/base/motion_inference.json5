@@ -24,6 +24,8 @@
     // The startup observation intentionally exceeds the subsequent correction limit.
     initial_frequency_offset: 1.5,
     frequency_offset_limit: 0.5,
+    stand_delay: { secs: 1, nanos: 0 },
+    slow_velocity_thresholds: [0.075, 0.03, 0.17453293],
   },
   // Speeds: m/s; distances: metres; direction ramps: degrees.
   kick: {
@@ -136,15 +138,15 @@
         head: { yaw: 10.0, pitch: 10.0 },
         left_arm: { shoulder_pitch: 40.0, shoulder_roll: 40.0, shoulder_yaw: 40.0, elbow: 40.0 },
         right_arm: { shoulder_pitch: 40.0, shoulder_roll: 40.0, shoulder_yaw: 40.0, elbow: 40.0 },
-        left_leg: { hip_pitch: 80.0, hip_roll: 80.0, hip_yaw: 80.0, knee: 80.0, ankle_up: 50.0, ankle_down: 25.0 },
-        right_leg: { hip_pitch: 80.0, hip_roll: 80.0, hip_yaw: 80.0, knee: 80.0, ankle_up: 50.0, ankle_down: 25.0 },
+        left_leg: { hip_pitch: 80.0, hip_roll: 80.0, hip_yaw: 80.0, knee: 80.0, ankle_up: 25.0, ankle_down: 25.0 },
+        right_leg: { hip_pitch: 80.0, hip_roll: 80.0, hip_yaw: 80.0, knee: 80.0, ankle_up: 25.0, ankle_down: 25.0 },
       },
       kd: {
         head: { yaw: 1.2, pitch: 1.2 },
         left_arm: { shoulder_pitch: 1.0, shoulder_roll: 1.0, shoulder_yaw: 1.0, elbow: 1.0 },
         right_arm: { shoulder_pitch: 1.0, shoulder_roll: 1.0, shoulder_yaw: 1.0, elbow: 1.0 },
-        left_leg: { hip_pitch: 4.0, hip_roll: 4.0, hip_yaw: 4.0, knee: 4.0, ankle_up: 2.0, ankle_down: 2.0 },
-        right_leg: { hip_pitch: 4.0, hip_roll: 4.0, hip_yaw: 4.0, knee: 4.0, ankle_up: 2.0, ankle_down: 2.0 },
+        left_leg: { hip_pitch: 4.0, hip_roll: 4.0, hip_yaw: 4.0, knee: 4.0, ankle_up: 1.0, ankle_down: 2.0 },
+        right_leg: { hip_pitch: 4.0, hip_roll: 4.0, hip_yaw: 4.0, knee: 4.0, ankle_up: 1.0, ankle_down: 2.0 },
       },
     },
     FastGetUp: {

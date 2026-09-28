@@ -21,7 +21,39 @@ use crate::{
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ros_z::Message)]
 pub struct KickCommand {
     pub soft: bool,
+    /// Source epoch of the robot-relative ball and direction observations.
+    pub reference_time: Time,
     pub request: KickRequest,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ros_z::Message)]
+pub struct InferenceRequest<C> {
+    pub generation: u64,
+    pub requested_at: Time,
+    pub valid_until: Time,
+    pub command: C,
+}
+
+impl<C> InferenceRequest<C> {
+    pub fn is_current(&self, now: Time) -> bool {
+        self.requested_at <= now && now < self.valid_until
+    }
+
+    pub fn map_command<D>(self, map: impl FnOnce(C) -> D) -> InferenceRequest<D> {
+        InferenceRequest {
+            generation: self.generation,
+            requested_at: self.requested_at,
+            valid_until: self.valid_until,
+            command: map(self.command),
+        }
+    }
+}
+
+/// Motion invalidates the generation when it stops using policy outputs.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ros_z::Message)]
+pub struct ExecutionState {
+    pub generation: u64,
+    pub active: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ros_z::Message)]
@@ -195,12 +227,10 @@ impl Inference {
     }
 
     fn advance_gait(&mut self, now: Time, request: InferenceCommand) -> bool {
-        // Only exact zero requests standing; tiny nonzero commands must retain gait phase.
-        let standing = matches!(
-            request,
-            InferenceCommand::Walk(WalkCommand { velocity, angular_velocity })
-                if velocity.x() == 0.0 && velocity.y() == 0.0 && angular_velocity == 0.0
-        );
+        let standing = match self.active.as_mut().map(|active| &mut active.state) {
+            Some(State::Locomotion(state)) => state.standing(now, request),
+            _ => false,
+        };
         let elapsed = self
             .previous_update
             .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
@@ -283,8 +313,8 @@ impl Execution {
     ) -> Vec<f32> {
         match &mut self.state {
             State::Locomotion(state) => match request {
-                InferenceCommand::Kick(KickCommand { soft, request }) => {
-                    let ball_positions = state.record_kick_sample(sensor, request, joints);
+                InferenceCommand::Kick(KickCommand { soft, request, .. }) => {
+                    let ball_positions = state.record_kick_sample(sensor, request, soft, joints);
                     kick::Observation::new(
                         state,
                         sensor,
@@ -375,4 +405,83 @@ pub fn joints_are_finite(joints: &Joints<MotorCommand>) -> bool {
             ]
         })
         .all(f32::is_finite)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::test_support::{limits, parameters, sensor, time};
+
+    pub(crate) fn controller() -> Inference {
+        Inference {
+            parameters: parameters(),
+            networks: HashMap::new(),
+            active: None,
+            velocity: VelocityEstimator::default(),
+            previous_update: None,
+        }
+    }
+
+    #[test]
+    fn locomotion_switches_preserve_state_but_reset_reseeds_from_measurements() {
+        let mut controller = controller();
+        let mut sensor = sensor();
+        let limits = limits();
+        controller.activate(time(0), &sensor, Policy::Walk, &limits);
+        let moving = InferenceCommand::Walk(WalkCommand {
+            velocity: linear_algebra::vector![0.2, 0.0],
+            angular_velocity: 0.0,
+        });
+        controller.advance_gait(time(20), moving);
+        let phase = match &controller.active.as_ref().unwrap().state {
+            State::Locomotion(s) => s.phase,
+            _ => unreachable!(),
+        };
+        for policy in [Policy::Kick, Policy::SoftKick, Policy::Walk] {
+            controller.activate(time(40), &sensor, policy, &limits);
+            assert!(
+                matches!(&controller.active.as_ref().unwrap().state, State::Locomotion(s) if s.phase == phase)
+            );
+        }
+        controller.reset();
+        assert!(controller.active.is_none());
+        assert!(controller.previous_update.is_none());
+        sensor.last_commanded_position = Joints::fill(0.3);
+        controller.activate(time(2000), &sensor, Policy::Walk, &limits);
+        assert!(controller.advance_gait(time(2000), InferenceCommand::Walk(WalkCommand::stand())));
+        let active = controller.active.as_mut().unwrap();
+        let input = active.prepare_input(
+            time(2000),
+            &sensor,
+            &VelocityEstimator::default(),
+            InferenceCommand::Walk(WalkCommand::stand()),
+            true,
+            &limits,
+        );
+        let offset = Policy::Walk.offset(&controller.parameters);
+        for frame in input[..320].as_chunks::<32>().0 {
+            for (index, joint) in crate::config::LEGS.into_iter().enumerate() {
+                assert_eq!(frame[18 + index], 0.3 - offset[joint]);
+            }
+        }
+        assert_eq!(
+            input[337],
+            controller.parameters.locomotion.initial_frequency_offset
+        );
+    }
+
+    #[test]
+    fn getup_progress_restarts_after_reset() {
+        let mut controller = controller();
+        let sensor = sensor();
+        controller.activate(time(0), &sensor, Policy::SlowGetUp, &limits());
+        assert!(
+            matches!(&controller.active.as_ref().unwrap().state, State::SlowGetUp(s) if s.progress(time(1000)) > 0.0)
+        );
+        controller.reset();
+        controller.activate(time(2000), &sensor, Policy::SlowGetUp, &limits());
+        assert!(
+            matches!(&controller.active.as_ref().unwrap().state, State::SlowGetUp(s) if s.progress(time(2000)) == 0.0)
+        );
+    }
 }

@@ -8,4 +8,8 @@ pub mod locomotion;
 pub mod network;
 pub mod observation;
 
+mod execution;
 mod services;
+
+#[cfg(test)]
+mod test_support;

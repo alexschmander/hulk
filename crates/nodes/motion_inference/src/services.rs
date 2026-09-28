@@ -1,5 +1,5 @@
 use crate::{
-    inference::InferenceCommand,
+    inference::{InferenceCommand, InferenceRequest},
     node::{
         GETUP_INFERENCE_SERVICE, GetUpInferenceService, InferenceResult, KICK_INFERENCE_SERVICE,
         KickInferenceService, WALK_INFERENCE_SERVICE, WalkInferenceService,
@@ -40,19 +40,21 @@ impl Requests {
                 .await?,
         })
     }
-    pub async fn receive(&mut self) -> ros_z::Result<(InferenceCommand, InferenceReply)> {
+    pub async fn receive(
+        &mut self,
+    ) -> ros_z::Result<(InferenceRequest<InferenceCommand>, InferenceReply)> {
         tokio::select! {
             received = self.walk.take_request_async() => {
                 let (request, reply) = received?.into_parts();
-                Ok((InferenceCommand::Walk(request), InferenceReply::Walk(reply)))
+                Ok((request.map_command(InferenceCommand::Walk), InferenceReply::Walk(reply)))
             }
             received = self.kick.take_request_async() => {
                 let (request, reply) = received?.into_parts();
-                Ok((InferenceCommand::Kick(request), InferenceReply::Kick(reply)))
+                Ok((request.map_command(InferenceCommand::Kick), InferenceReply::Kick(reply)))
             }
             received = self.get_up.take_request_async() => {
                 let (request, reply) = received?.into_parts();
-                Ok((InferenceCommand::GetUp(request), InferenceReply::GetUp(reply)))
+                Ok((request.map_command(InferenceCommand::GetUp), InferenceReply::GetUp(reply)))
             }
         }
     }
