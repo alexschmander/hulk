@@ -167,6 +167,99 @@ fn new_localization_with_parameters(parameters: &Localization3dParameters) -> Lo
     .unwrap()
 }
 
+#[test]
+#[ignore = "release timing benchmark, run with --ignored --nocapture"]
+fn benchmark_tracking_estimation() {
+    let parameters = json5::from_str(include_str!(
+        "../../../../../etc/parameters/base/localization3d.json5"
+    ))
+    .unwrap();
+    let mut localization = new_localization_with_parameters(&parameters);
+    let camera = camera();
+    let mut cycles = Vec::new();
+    let mut ingestion = Duration::ZERO;
+    let mut total_ingestion = Duration::ZERO;
+    let mut fields = 0;
+    let mut failures = 0;
+    let mut max_position_error = 0.0_f64;
+    let mut max_rotation_error = 0.0_f64;
+    for index in 0..=3000 {
+        let t = index as f64 * 0.002;
+        let time = Time::from_nanos(1_000_000_000 + index * 2_000_000);
+        let (yaw, rate) = turn(t);
+        let imu = ImuState {
+            roll_pitch_yaw: vector![0.0, 0.0, (2.7 + yaw) as f32],
+            angular_velocity: vector![0.0, 0.0, rate as f32],
+            linear_acceleration: vector![0.0, 0.0, 9.81],
+        };
+        let vo = (index > 0 && index % 10 == 0).then(|| VisualOdometer {
+            time,
+            epoch: 0,
+            delta: Some(VisualOdometryDelta {
+                previous_time: time - Duration::from_millis(20),
+                current_left_camera_to_previous_left_camera: camera.robot_to_camera.inner
+                    * (truth(t - 0.02).inverse() * truth(t)).cast::<f32>()
+                    * camera.robot_to_camera.inner.inverse(),
+            }),
+            current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
+        });
+        let visual = (index % 50 == 0).then(|| {
+            let mut frame = frame(t, false);
+            frame.inner.generation = localization.status().generation;
+            if localization.status().state == LocalizationState::Tracking {
+                frame.inner.source = VisualAssociationSource::Tracking;
+            }
+            frame
+        });
+        let started = std::time::Instant::now();
+        localization.ingest_imu(time, imu).unwrap();
+        if let Some(vo) = vo {
+            localization
+                .ingest_visual_odometry(vo, Some(&camera), Some(&camera))
+                .unwrap();
+        }
+        if let Some(frame) = visual {
+            localization
+                .ingest_visual_localization_frame(frame)
+                .unwrap();
+        }
+        let elapsed = started.elapsed();
+        ingestion += elapsed;
+        total_ingestion += elapsed;
+        if index % 25 != 0 {
+            continue;
+        }
+        let output = localization.solve(time);
+        cycles.push(ingestion + output.diagnostics.estimation_duration);
+        ingestion = Duration::ZERO;
+        failures += usize::from(output.diagnostics.failure.is_some());
+        fields += usize::from(output.estimate.is_some_and(|e| e.robot_to_field.is_some()));
+        if let Some(estimate) = output.estimate
+            && let Some(field) = estimate.robot_to_field
+        {
+            let expected = truth((estimate.time.as_nanos() - 1_000_000_000) as f64 * 1e-9);
+            max_position_error = max_position_error
+                .max((field.pose.inner.translation.vector - expected.translation.vector).norm());
+            max_rotation_error =
+                max_rotation_error.max(field.pose.inner.rotation.angle_to(&expected.rotation));
+        }
+    }
+    let cycle_count = cycles.len();
+    eprintln!("tracking field estimates: {fields}/{}", cycles.len());
+    eprintln!(
+        "tracking max position error={max_position_error:.6} m, rotation error={:.6} deg",
+        max_rotation_error.to_degrees()
+    );
+    super::flight_recording_tests::report_timing(
+        "synthetic-tracking",
+        cycles,
+        6.0,
+        total_ingestion,
+        failures,
+    );
+    assert!(fields > cycle_count * 9 / 10, "{fields} field estimates");
+}
+
 fn lost_localization(with_vo: bool) -> (Localization, LocalizationEstimate) {
     let mut localization = new_localization();
     let mut latest = None;
