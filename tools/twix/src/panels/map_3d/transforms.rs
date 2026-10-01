@@ -1,5 +1,5 @@
 use super::{CameraMatrix, PoseSource, ViewerData};
-use bevy::prelude::*;
+use bevy::{asset::RenderAssetUsages, mesh::PrimitiveTopology, prelude::*};
 
 pub(super) fn robot_to_display(data: &ViewerData) -> nalgebra::Isometry3<f32> {
     match data.pose_source {
@@ -22,7 +22,11 @@ fn visual_odometer_robot_to_display(data: &ViewerData) -> Option<nalgebra::Isome
 pub(super) fn robot_to_camera(camera_matrix: &CameraMatrix) -> nalgebra::Isometry3<f32> {
     (camera_matrix.head_to_camera * camera_matrix.robot_to_head).inner
 }
-
+pub(super) fn empty_mesh(topology: PrimitiveTopology) -> Mesh {
+    let mut mesh = Mesh::new(topology, RenderAssetUsages::RENDER_WORLD);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+    mesh
+}
 pub(super) fn transform_from_isometry(isometry: nalgebra::Isometry3<f32>) -> Transform {
     Transform::from_translation(convert_point(isometry.translation.vector.into()))
         .with_rotation(convert_rotation(isometry.rotation))
