@@ -1,44 +1,76 @@
 use std::sync::Arc;
 
 use bevy::{camera_controller::pan_orbit_camera::prelude::PanOrbitCamera, prelude::*};
-use eframe::egui::Ui;
+use coordinate_systems::{Field, Robot};
+use eframe::egui::{ComboBox, Ui};
 use egui_bevy::BevyWidget;
+use kinematics::robot_kinematics::RobotKinematics;
+use linear_algebra::Isometry3;
+use projection::camera_matrix::CameraMatrix;
 use ros_z::qos::{QosDurability, QosProfile};
 use ros_z_debug::{ObservationPolicy, SampleRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use types::field_dimensions::FieldDimensions;
+use types::{
+    field_dimensions::FieldDimensions, time_wrapper::TimeWrapper, visual_odometry::VisualOdometer,
+};
 
 use crate::{
     panel::{Panel, PanelCreationContext, PanelUiContext},
     repaint::ObservationContext,
 };
 use observation::Observation;
+use transforms::*;
 
 mod field;
 #[cfg(test)]
 mod gpu_test;
 mod observation;
+mod robot;
+mod transforms;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum PoseSource {
+    #[default]
+    Localization,
+    VisualOdometer,
+}
 
 #[derive(Clone, Resource, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     field: bool,
+    robot: bool,
+    pose_source: PoseSource,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { field: true }
+        Self {
+            field: true,
+            robot: true,
+            pose_source: PoseSource::Localization,
+        }
     }
 }
 
 #[derive(Default, Resource)]
 struct ViewerData {
+    pose_source: PoseSource,
     field_dimensions: Option<Arc<SampleRecord<FieldDimensions>>>,
+    localization: Option<Isometry3<Field, Robot>>,
+    visual_odometer: Option<nalgebra::Isometry3<f32>>,
+    robot_kinematics: Option<Arc<SampleRecord<TimeWrapper<RobotKinematics>>>>,
+    camera_matrix: Option<CameraMatrix>,
 }
 
 struct Observations {
     dimensions: Observation<FieldDimensions>,
+    localization: Observation<types::localization::LocalizationEstimate>,
+    localization_status: Observation<types::localization::LocalizationStatus>,
+    odometer: Observation<VisualOdometer>,
+    kinematics: Observation<TimeWrapper<RobotKinematics>>,
+    matrix: Observation<TimeWrapper<CameraMatrix>>,
 }
 
 impl Observations {
@@ -53,7 +85,58 @@ impl Observations {
                     ..Default::default()
                 }),
             )?,
+            localization: Observation::new(
+                context,
+                "localization/estimate",
+                1,
+                Default::default(),
+            )?,
+            localization_status: Observation::new(
+                context,
+                "localization/status",
+                1,
+                ObservationPolicy::default().with_subscriber_qos(QosProfile {
+                    durability: QosDurability::TransientLocal,
+                    ..Default::default()
+                }),
+            )?,
+            odometer: Observation::new(
+                context,
+                "visual_odometry/current_left_camera_to_visual_odometer",
+                64,
+                Default::default(),
+            )?,
+            kinematics: Observation::new(context, "robot_kinematics", 1024, Default::default())?,
+            matrix: Observation::new(context, "camera_matrix", 1024, Default::default())?,
         })
+    }
+
+    fn snapshot(&self, namespace: &str, settings: &Settings) -> ViewerData {
+        let frame_id = self
+            .localization_status
+            .latest(namespace)
+            .map(|status| (status.value.epoch, status.value.generation));
+        ViewerData {
+            pose_source: settings.pose_source,
+            field_dimensions: self.dimensions.latest(namespace),
+            localization: self
+                .localization
+                .latest(namespace)
+                .filter(|record| frame_id == Some((record.value.epoch, record.value.generation)))
+                .and_then(|record| record.value.robot_to_field)
+                .map(|field| Isometry3::wrap(field.pose.inner.cast::<f32>().inverse())),
+            visual_odometer: self
+                .odometer
+                .all(namespace)
+                .into_iter()
+                .max_by_key(|record| record.value.time)
+                .map(|record| record.value.current_left_camera_to_visual_odometer),
+            robot_kinematics: self.kinematics.aligned(namespace, None),
+            camera_matrix: self
+                .matrix
+                .aligned(namespace, None)
+                .map(|record| record.value.inner.clone()),
+        }
     }
 }
 
@@ -85,13 +168,14 @@ impl Panel for Map3DPanel {
                     brightness: 600.0,
                     ..default()
                 })
-                .add_systems(Startup, field::setup)
+                .add_systems(Startup, (field::setup, robot::setup))
                 .add_systems(
                     Update,
                     (
                         position_camera_once,
                         field::visibility,
                         field::update_field_plane,
+                        robot::update,
                         field::update_field_markings
                             .run_if(|settings: Res<Settings>| settings.field),
                     ),
@@ -113,14 +197,30 @@ impl Panel for Map3DPanel {
 
     fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
         ui.checkbox(&mut self.settings.field, "Field");
+        ui.checkbox(&mut self.settings.robot, "Robot");
+        ComboBox::from_id_salt(ui.id().with("pose_source"))
+            .selected_text(match self.settings.pose_source {
+                PoseSource::Localization => "Localization",
+                PoseSource::VisualOdometer => "Visual odometry",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.settings.pose_source,
+                    PoseSource::Localization,
+                    "Localization",
+                );
+                ui.selectable_value(
+                    &mut self.settings.pose_source,
+                    PoseSource::VisualOdometer,
+                    "Visual odometry",
+                );
+            });
         let Some(widget) = &mut self.widget else {
             ui.label("3D rendering requires the WGPU renderer.");
             return;
         };
         let data = match &self.observations {
-            Ok(observations) => ViewerData {
-                field_dimensions: observations.dimensions.latest(&context.backend.namespace()),
-            },
+            Ok(observations) => observations.snapshot(&context.backend.namespace(), &self.settings),
             Err(error) => {
                 ui.colored_label(ui.visuals().error_fg_color, error);
                 ViewerData::default()
