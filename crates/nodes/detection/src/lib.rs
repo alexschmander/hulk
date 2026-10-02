@@ -135,6 +135,7 @@ impl TaskHead {
 #[derive(Debug)]
 struct ModelOutputs<'a> {
     objects: ArrayView2<'a, f32>,
+    nao_objects: Option<ArrayView2<'a, f32>>,
     poses: Option<ArrayView2<'a, f32>>,
     robot_poses: Option<ArrayView2<'a, f32>>,
     field_features: Option<ArrayView2<'a, f32>>,
@@ -564,31 +565,63 @@ fn extract_outputs<'a>(
     outputs: &'a SessionOutputs<'a>,
     contract: &ModelOutputContract,
 ) -> Result<ModelOutputs<'a>> {
-    model_outputs_from_arrays(
-        extract_output(outputs, TaskHead::ObjectDetection)?,
+    let hslvision = extract_named_output(outputs, "hslvision_output")?;
+    let nao = extract_named_output(outputs, "nao_output")?;
+    let combined = if hslvision.is_some() || nao.is_some() {
+        Some(combined_object_outputs(hslvision.clone(), nao)?)
+    } else {
+        None
+    };
+    let objects = if combined.is_some() {
+        hslvision
+    } else {
+        extract_output(outputs, TaskHead::ObjectDetection)?
+    };
+    let mut result = model_outputs_from_arrays(
+        objects,
         extract_output(outputs, TaskHead::LegacyPose)?,
         extract_output(outputs, TaskHead::PersonPose)?,
         extract_output(outputs, TaskHead::RobotPose)?,
         extract_output(outputs, TaskHead::FieldFeature)?,
         contract,
-    )
+    )?;
+    result.nao_objects = combined.map(|(_, nao)| nao);
+    Ok(result)
 }
 
 fn extract_output<'a>(
     outputs: &'a SessionOutputs<'a>,
     task_head: TaskHead,
 ) -> Result<Option<ArrayViewD<'a, f32>>> {
+    extract_named_output(outputs, task_head.output_name())
+}
+
+fn extract_named_output<'a>(
+    outputs: &'a SessionOutputs<'a>,
+    name: &str,
+) -> Result<Option<ArrayViewD<'a, f32>>> {
     outputs
-        .get(task_head.output_name())
+        .get(name)
         .map(|output| {
             output.try_extract_array::<f32>().map_err(|error| {
-                eyre!(error).wrap_err(format!(
-                    "failed to extract model output `{}`",
-                    task_head.output_name()
-                ))
+                eyre!(error).wrap_err(format!("failed to extract model output `{}`", name))
             })
         })
         .transpose()
+}
+
+fn combined_object_outputs<'a>(
+    hslvision: Option<ArrayViewD<'a, f32>>,
+    nao: Option<ArrayViewD<'a, f32>>,
+) -> Result<(ArrayView2<'a, f32>, ArrayView2<'a, f32>)> {
+    let shape = TaskHead::ObjectDetection.expected_shape();
+    let hslvision =
+        hslvision.ok_or_else(|| eyre!("mandatory model output `hslvision_output` is missing"))?;
+    let nao = nao.ok_or_else(|| eyre!("mandatory model output `nao_output` is missing"))?;
+    Ok((
+        validate_and_reshape_named_output("hslvision_output", shape, hslvision)?,
+        validate_and_reshape_named_output("nao_output", shape, nao)?,
+    ))
 }
 
 fn model_outputs_from_arrays<'a>(
@@ -639,6 +672,7 @@ fn model_outputs_from_arrays<'a>(
 
     Ok(ModelOutputs {
         objects,
+        nao_objects: None,
         poses,
         robot_poses,
         field_features,
@@ -674,7 +708,7 @@ fn extract_candidate_object_detections(
     outputs: &ModelOutputs,
     confidence_threshold: f32,
 ) -> Result<Vec<Object<RobocupObjectLabel>>> {
-    Ok(outputs
+    let mut objects: Vec<Object<RobocupObjectLabel>> = outputs
         .objects
         .axis_iter(Axis(0))
         .filter_map(|row| {
@@ -691,9 +725,26 @@ fn extract_candidate_object_detections(
                     panic!("slice is not of length {}", NUMBER_OF_VALUES_PER_OBJECT)
                 });
 
-            Some(Object::from(object_values))
+            let object = Object::from(object_values);
+            if outputs.nao_objects.is_some() && matches!(object.label, RobocupObjectLabel::GoalPost)
+            {
+                return None;
+            }
+            Some(object)
         })
-        .collect())
+        .collect();
+    if let Some(nao) = &outputs.nao_objects {
+        objects.extend(nao.axis_iter(Axis(0)).filter_map(|row| {
+            let confidence = row[4];
+            if !confidence.is_finite() || confidence < confidence_threshold {
+                return None;
+            }
+            let values: [f32; NUMBER_OF_VALUES_PER_OBJECT] = row.as_slice()?.try_into().ok()?;
+            let object = Object::from(values);
+            matches!(object.label, RobocupObjectLabel::GoalPost).then_some(object)
+        }));
+    }
+    Ok(objects)
 }
 
 fn extract_candidate_pose_detections(
@@ -890,6 +941,73 @@ mod tests {
     #[test]
     fn default_provider_preserves_production_behavior() {
         assert_eq!(ExecutionProvider::default(), ExecutionProvider::Automatic);
+    }
+
+    #[test]
+    fn combined_detection_uses_hslvision_objects_and_nao_goalposts() {
+        let mut hslvision = Array3::zeros((1, NUMBER_OF_DETECTIONS, NUMBER_OF_VALUES_PER_OBJECT));
+        let mut nao = hslvision.clone();
+        for (array, rows) in [
+            (
+                &mut hslvision,
+                [
+                    [1.0, 2.0, 11.0, 12.0, 0.9, 0.0],
+                    [3.0, 4.0, 13.0, 14.0, 0.9, 1.0],
+                ],
+            ),
+            (
+                &mut nao,
+                [
+                    [5.0, 6.0, 15.0, 16.0, 0.9, 0.0],
+                    [7.0, 8.0, 17.0, 18.0, 0.9, 1.0],
+                ],
+            ),
+        ] {
+            for (index, row) in rows.into_iter().enumerate() {
+                for (column, value) in row.into_iter().enumerate() {
+                    array[[0, index, column]] = value;
+                }
+            }
+        }
+        let (objects, nao_objects) = combined_object_outputs(
+            Some(hslvision.view().into_dyn()),
+            Some(nao.view().into_dyn()),
+        )
+        .unwrap();
+        let outputs = ModelOutputs {
+            objects,
+            nao_objects: Some(nao_objects),
+            poses: None,
+            robot_poses: None,
+            field_features: None,
+            field_feature_poses: None,
+        };
+        let detections = extract_candidate_object_detections(&outputs, 0.5).unwrap();
+        assert_eq!(detections.len(), 2);
+        assert!(matches!(detections[0].label, RobocupObjectLabel::Ball));
+        assert_eq!(detections[0].bounding_box.area.min.x(), 1.0);
+        assert!(matches!(detections[1].label, RobocupObjectLabel::GoalPost));
+        assert_eq!(detections[1].bounding_box.area.min.x(), 7.0);
+        assert!(
+            extract_candidate_object_detections(&outputs, 0.95)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn combined_detection_requires_both_outputs_and_checks_shape() {
+        let objects = Array3::zeros((1, NUMBER_OF_DETECTIONS, NUMBER_OF_VALUES_PER_OBJECT));
+        let malformed = Array3::zeros((1, NUMBER_OF_DETECTIONS, 5));
+        assert!(combined_object_outputs(Some(objects.view().into_dyn()), None).is_err());
+        assert!(combined_object_outputs(None, Some(objects.view().into_dyn())).is_err());
+        assert!(
+            combined_object_outputs(
+                Some(objects.view().into_dyn()),
+                Some(malformed.view().into_dyn())
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1114,6 +1232,7 @@ mod tests {
         robot_poses[[0, 4]] = 0.9;
         let outputs = ModelOutputs {
             objects: objects.view(),
+            nao_objects: None,
             poses: None,
             robot_poses: Some(robot_poses.view()),
             field_features: None,
@@ -1139,6 +1258,7 @@ mod tests {
         field_features[[0, 3]] = 2.0;
         let outputs = ModelOutputs {
             objects: objects.view(),
+            nao_objects: None,
             poses: Some(poses.view()),
             robot_poses: Some(robot_poses.view()),
             field_features: Some(field_features.view()),
@@ -1229,6 +1349,7 @@ mod tests {
         field_features[[0, 2]] = f32::NAN;
         let outputs = ModelOutputs {
             objects: objects.view(),
+            nao_objects: None,
             poses: Some(poses.view()),
             robot_poses: Some(robot_poses.view()),
             field_features: Some(field_features.view()),
