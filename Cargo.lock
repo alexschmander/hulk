@@ -4159,6 +4159,7 @@ dependencies = [
  "itertools 0.14.0",
  "linear_algebra",
  "linear_sum_assignment",
+ "localization-fagra",
  "log",
  "nalgebra 0.34.2",
  "ndarray 0.16.1",

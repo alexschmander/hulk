@@ -12,6 +12,7 @@ coordinate_systems = { workspace = true }
 itertools = { workspace = true }
 linear_algebra = { workspace = true }
 linear_sum_assignment = { workspace = true }
+localization-fagra = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
 ndarray = { workspace = true }
