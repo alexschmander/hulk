@@ -36,6 +36,13 @@
     "gap_tilt_sigma": 0.1,
     "containment_tau": 0.5
   },
+  "solver": {
+    "max_trials": 8,
+    "max_iterations": 10,
+    "gradient_tolerance": 0.001,
+    "step_tolerance": 1e-05,
+    "cost_tolerance": 1e-08
+  },
   "visual": {
     "min_associations": 3,
     "max_associations": 32,

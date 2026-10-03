@@ -1,8 +1,15 @@
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::BTreeMap,
+    ops::Range,
+    time::{Duration, Instant},
+};
 
 use color_eyre::{Result, eyre::eyre};
 use coordinate_systems::{Field, Local, Robot};
-use fagra::{BatchKey, Problem, StateKey};
+use fagra::{
+    BatchKey, DenseNormalCholesky, LevenbergMarquardt, OptimizeOptions, Problem, SolverError,
+    StateKey,
+};
 use linear_algebra::{Framed, Isometry3, Vector2, Vector3, vector};
 use localization_fagra::{
     factors::{
@@ -15,18 +22,22 @@ use localization_fagra::{
 use nalgebra::SMatrix;
 use projection::intrinsic::Intrinsic;
 use ros_z::time::Time;
-use types::field_dimensions::FieldDimensions;
-use types::{time_wrapper::TimeWrapper, visual_localization_next::VisualLocalizationFrame};
+use types::{
+    field_dimensions::FieldDimensions, localization::LocalizationEstimate,
+    time_wrapper::TimeWrapper, visual_localization_next::VisualLocalizationFrame,
+};
 
-use crate::parameters::Localization3dParameters;
+use crate::heading::HeadingReference;
+use crate::{diagnostics::SolveDiagnostics, parameters::Localization3dParameters};
 
 mod attitude;
 mod bias;
+mod covariance;
 mod inertial;
+
 mod preintegration;
 mod recovery;
 mod vision;
-
 mod window;
 
 fagra::states! {
@@ -56,10 +67,20 @@ fagra::factors! {
 
 type Graph = Problem<States, Factors>;
 
+pub struct SolveResult {
+    pub estimate: Option<LocalizationEstimate>,
+    pub diagnostics: SolveDiagnostics,
+    pub converged: bool,
+    pub motion_invalid: bool,
+    pub visual_rejected: bool,
+}
+
 pub struct Estimator {
     graph: Graph,
+    optimizer: LevenbergMarquardt<DenseNormalCholesky>,
+    options: OptimizeOptions<f64>,
     origin: Time,
-    pub epoch: u64,
+    epoch: u64,
     generation: u64,
     controls: BTreeMap<i64, StateKey<PoseControl<f64>>>,
     biases: BTreeMap<i64, StateKey<ImuBias>>,
@@ -67,17 +88,20 @@ pub struct Estimator {
     foot_batches: BTreeMap<i64, BatchKey<FootGround<f64>>>,
     /// Accepted batches awaiting retirement; pending batches belong to PendingVisual.
     reprojection_batches: Vec<(i64, BatchKey<FrameReprojections<f64>>)>,
+    alignment: Option<StateKey<FieldAlignment<f64>>>,
     intrinsics: StateKey<CameraIntrinsics<f64>>,
+    latest_time: Time,
+    last_converged_time: Option<Time>,
+    measurements: BTreeMap<i64, usize>,
     latest_visual_frame: Option<TimeWrapper<VisualLocalizationFrame>>,
     pending_visuals: Vec<vision::PendingVisual>,
-    measurements: BTreeMap<i64, usize>,
     attitudes: BTreeMap<Time, linear_algebra::Orientation3<coordinate_systems::ImuReference, f64>>,
-    motion_history: Vec<recovery::MotionRecord>,
-    history_start: Time,
-    alignment: Option<StateKey<FieldAlignment<f64>>>,
-    latest_time: Time,
+    yaw_factors: BTreeMap<i64, fagra::FactorKey<localization_fagra::factors::RelativeYaw>>,
+    current_yaw: Option<fagra::FactorKey<localization_fagra::factors::RelativeYaw>>,
     parameters: Localization3dParameters,
     field_half_extents: Vector2<Field, f64>,
+    motion_history: Vec<recovery::MotionRecord>,
+    history_start: Time,
 }
 
 impl Estimator {
@@ -142,6 +166,17 @@ impl Estimator {
 
         Ok(Self {
             graph,
+            optimizer: {
+                let mut optimizer = LevenbergMarquardt::new(DenseNormalCholesky::default());
+                optimizer.options.max_trials = parameters.solver.max_trials;
+                optimizer
+            },
+            options: OptimizeOptions {
+                max_iterations: parameters.solver.max_iterations,
+                gradient_tolerance: parameters.solver.gradient_tolerance,
+                step_tolerance: parameters.solver.step_tolerance,
+                cost_tolerance: parameters.solver.cost_tolerance,
+            },
             origin,
             epoch,
             generation: 0,
@@ -150,16 +185,19 @@ impl Estimator {
             preintegration: preintegration::ImuIntervals::new(&parameters.timing),
             foot_batches: BTreeMap::new(),
             reprojection_batches: Vec::new(),
+            alignment: None,
             intrinsics,
+            latest_time: origin,
+            last_converged_time: None,
+            measurements: BTreeMap::new(),
             latest_visual_frame: None,
             pending_visuals: Vec::new(),
-            measurements: BTreeMap::new(),
             attitudes: BTreeMap::new(),
+            yaw_factors: BTreeMap::new(),
+            current_yaw: None,
+            parameters,
             motion_history: Vec::new(),
             history_start: origin,
-            alignment: None,
-            latest_time: origin,
-            parameters,
             field_half_extents,
         })
     }
@@ -202,14 +240,6 @@ impl Estimator {
         self.latest_time
     }
 
-    pub fn update_parameters(&mut self, parameters: Localization3dParameters) -> Result<()> {
-        self.parameters
-            .validate_update(&parameters)
-            .map_err(|message| eyre!(message))?;
-        self.parameters = parameters;
-        Ok(())
-    }
-
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -226,6 +256,234 @@ impl Estimator {
             .last_key_value()
             .map_or(0, |(&index, _)| index - 1);
         start..end
+    }
+
+    pub fn update_parameters(&mut self, parameters: Localization3dParameters) -> Result<()> {
+        self.parameters
+            .validate_update(&parameters)
+            .map_err(|message| eyre!(message))?;
+        self.optimizer.options.max_trials = parameters.solver.max_trials;
+        self.options = OptimizeOptions {
+            max_iterations: parameters.solver.max_iterations,
+            gradient_tolerance: parameters.solver.gradient_tolerance,
+            step_tolerance: parameters.solver.step_tolerance,
+            cost_tolerance: parameters.solver.cost_tolerance,
+        };
+        self.parameters = parameters;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn solve(&mut self) -> SolveResult {
+        self.solve_with_heading(None)
+    }
+
+    pub fn solve_with_heading(&mut self, heading: Option<&HeadingReference>) -> SolveResult {
+        let had_visual_update = !self.pending_visuals.is_empty();
+        let mut visual_rejected = false;
+        let start = Instant::now();
+        let mut diagnostics = SolveDiagnostics {
+            time: self.latest_time,
+            epoch: self.epoch,
+            duration: Duration::ZERO,
+            estimation_duration: Duration::ZERO,
+            ingestion_duration: Duration::ZERO,
+            iterations: None,
+            lm_attempts: 0,
+            lm_rejected_steps: 0,
+            gradient_norm: None,
+            motion_rebuilt: false,
+            initial_cost: None,
+            final_cost: None,
+            termination: "failed".into(),
+            state_count: 0,
+            measurement_count: 0,
+            failure: None,
+            imu_bias: None,
+        };
+        let result = (|| -> Result<_> {
+            let result = self
+                .prepare_preintegration()
+                .and_then(|()| self.prepare_attitude())
+                .and_then(|()| {
+                    let mut result = self.solve_graph(&mut diagnostics, heading);
+                    if result.is_err() && had_visual_update {
+                        self.discard_visuals()?;
+                        visual_rejected = true;
+                        result = self.solve_graph(&mut diagnostics, heading);
+                    }
+                    result
+                });
+            if result.is_ok() {
+                self.accept_visuals();
+            } else {
+                self.discard_visuals()?;
+            }
+            if let Some(key) = self.current_yaw.take() {
+                self.graph.remove_factor(key)?;
+            }
+            // Retire the restored graph after rejection too; continuous motion
+            // must not grow an unbounded graph while field updates are withheld.
+            self.retire_old_segments()?;
+            result
+        })();
+        let (estimate, converged) = match result {
+            Ok((estimate, converged)) => (Some(estimate), converged),
+            Err(error) => {
+                diagnostics.failure = Some(format!("{error:#}"));
+                (None, false)
+            }
+        };
+        if converged {
+            self.last_converged_time = Some(self.latest_time);
+        }
+        if estimate.is_none() {
+            diagnostics.imu_bias = None;
+        }
+        let motion_invalid = estimate.is_none() && self.alignment.is_some();
+        diagnostics.duration = start.elapsed();
+        diagnostics.state_count =
+            self.controls.len() + self.biases.len() + 1 + usize::from(self.alignment.is_some());
+        diagnostics.measurement_count = self.measurements.values().sum();
+        SolveResult {
+            estimate,
+            diagnostics,
+            converged,
+            motion_invalid,
+            visual_rejected,
+        }
+    }
+
+    fn solve_graph(
+        &mut self,
+        diagnostics: &mut SolveDiagnostics,
+        heading: Option<&HeadingReference>,
+    ) -> Result<(LocalizationEstimate, bool)> {
+        let (segment, tau) = self.segment_and_tau(self.latest_time)?;
+        let controls = self.ensure_segment(segment)?;
+        self.ensure_biases(self.latest_time)?;
+        // LM rejects bad trials. Whole-update rollback is still needed when
+        // application validation fails after otherwise accepted LM steps.
+        let controls_before = self
+            .controls
+            .values()
+            .map(|key| Ok((*key, self.graph.get(*key)?.clone())))
+            .collect::<Result<Vec<_>>>()?;
+        let alignment_before = self
+            .alignment
+            .map(|key| self.graph.get(key).cloned())
+            .transpose()?;
+        let intrinsics_before = self.graph.get(self.intrinsics)?.clone();
+        let biases_before = self
+            .biases
+            .values()
+            .map(|key| Ok((*key, self.graph.get(*key)?.clone())))
+            .collect::<Result<Vec<_>>>()?;
+        let blocks = self.estimate_covariance_blocks(controls)?;
+        // LM's final gradient check already built the undamped model. Extract the
+        // joint marginal from that model instead of visiting every factor again.
+        let result = self
+            .optimizer
+            .solve_batch_with_covariance(
+                &mut self.graph,
+                &self.options,
+                &blocks,
+                &Default::default(),
+            )
+            .map(|(report, covariance)| {
+                let joint = covariance::EstimateCovariance::from_fn(|r, c| {
+                    if r < covariance.nrows() && c < covariance.ncols() {
+                        covariance[(r, c)]
+                    } else {
+                        0.0
+                    }
+                });
+                (report, joint)
+            });
+        let statistics = self.optimizer.statistics();
+        diagnostics.lm_attempts = statistics.attempts;
+        diagnostics.lm_rejected_steps = statistics.rejected_steps;
+        diagnostics.gradient_norm = statistics.gradient_norm;
+        let converged = result.is_ok();
+        diagnostics.iterations = statistics.cost.map(|_| statistics.accepted_steps);
+        diagnostics.final_cost = statistics.cost;
+        // This fagra version returns the initial cost only in a successful report.
+        // On failure after accepted steps it is unknown, not a reason to rebuild H.
+        diagnostics.initial_cost = result
+            .as_ref()
+            .ok()
+            .map(|(report, _)| report.initial_cost)
+            .or_else(|| statistics.cost.filter(|_| statistics.accepted_steps == 0));
+        diagnostics.termination = match &result {
+            Ok((report, _)) => format!("{:?}", report.termination),
+            Err(SolverError::NoProgress) => "NoProgress".into(),
+            Err(SolverError::NoConvergence) => "MaxIterations".into(),
+            // A converged numerical solve can still fail covariance rank checks.
+            Err(_)
+                if statistics
+                    .gradient_norm
+                    .is_some_and(|g| g <= self.options.gradient_tolerance) =>
+            {
+                "GradientTolerance".into()
+            }
+            Err(_) => "failed".into(),
+        };
+        let checked = (|| -> Result<_> {
+            let covariance = match result {
+                Ok((_, covariance)) => Some(covariance),
+                // LM only commits cost-decreasing steps. Its recorded accepted
+                // cost replaces the old evaluation-only solve on these paths.
+                Err(SolverError::NoConvergence | SolverError::NoProgress)
+                    if statistics.cost.is_some() =>
+                {
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if let Some(heading) = heading
+                && self.alignment.is_some()
+            {
+                self.validate_heading(heading)?;
+            }
+            if !converged && !self.pending_visuals.is_empty() {
+                return Err(eyre!("visual update did not converge"));
+            }
+            self.validate_pending_visuals()?;
+            self.validate_tilt()?;
+            let covariance = match covariance {
+                Some(covariance) => covariance,
+                None => {
+                    // Accepted partial motion still needs a fresh, undamped
+                    // covariance. Failed optimization has no cached-query API.
+                    let covariance = self.graph.joint_covariance(&blocks)?;
+                    covariance::EstimateCovariance::from_fn(|r, c| {
+                        if r < covariance.nrows() && c < covariance.ncols() {
+                            covariance[(r, c)]
+                        } else {
+                            0.0
+                        }
+                    })
+                }
+            };
+            self.estimate_from_covariance(controls, tau, &covariance, diagnostics)
+        })();
+        let estimate = match checked {
+            Ok(result) => result,
+            Err(error) => {
+                for (key, value) in controls_before {
+                    self.graph.set(key, value)?;
+                }
+                if let Some((key, value)) = self.alignment.zip(alignment_before) {
+                    self.graph.set(key, value)?;
+                }
+                self.graph.set(self.intrinsics, intrinsics_before)?;
+                for (key, value) in biases_before {
+                    self.graph.set(key, value)?;
+                }
+                return Err(error);
+            }
+        };
+        Ok((estimate, converged))
     }
 }
 
@@ -249,20 +507,317 @@ fn control_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use linear_algebra::{IntoTransform, point};
+    use booster::ImuState;
     use std::time::Duration;
 
+    use linear_algebra::{IntoTransform, point};
+    use projection::intrinsic::Intrinsic;
+
+    use super::*;
+
     pub(super) fn estimator() -> Estimator {
+        let intrinsics = Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]);
         Estimator::new(
             Time::from_nanos(1_000_000_000),
             7,
-            Isometry3::identity(),
-            &Intrinsic::default(),
-            json5::from_str(include_str!("../parameters_fixture.json5")).unwrap(),
+            nalgebra::Isometry3::identity().framed_transform(),
+            &intrinsics,
+            Localization3dParameters {
+                timing: Default::default(),
+                model: Default::default(),
+                solver: Default::default(),
+                visual: Default::default(),
+                imu_preintegration: Default::default(),
+                imu_bias: Default::default(),
+                accelerometer: None,
+                initial_height_sigma: 1.0,
+                initial_velocity_sigma: 5.0,
+                max_tilt_error: 20.0_f64.to_radians(),
+                accelerometer_process_noise_variance: 10.0,
+                visual_feature_noise_variance: 100.0,
+                field_containment_sigma: 1.0,
+                max_heading_error: 20.0_f64.to_radians(),
+            },
             &FieldDimensions::SPL_2025,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn configured_foot_noise_changes_measurement_weight() {
+        let template = estimator();
+        let costs = [0.01, 0.04].map(|sigma| {
+            let mut parameters = template.parameters.clone();
+            parameters.model.foot_sigma = sigma;
+            let mut estimator = Estimator::new(
+                template.origin,
+                template.epoch,
+                Isometry3::identity(),
+                &Intrinsic::default(),
+                parameters,
+                &FieldDimensions::SPL_2025,
+            )
+            .unwrap();
+            estimator
+                .insert_feet(
+                    estimator.origin,
+                    point![0.0, 0.0, -0.02],
+                    point![0.0, 0.0, -0.02],
+                )
+                .unwrap();
+            let evaluate = OptimizeOptions {
+                gradient_tolerance: f64::MAX,
+                ..estimator.options
+            };
+            estimator
+                .optimizer
+                .solve_batch(&mut estimator.graph, &evaluate)
+                .unwrap()
+                .initial_cost
+        });
+        // Two 2-cm penetrations: quadrupling sigma divides their likelihood cost by 16.
+        assert!((costs[0] - 4.0).abs() < 1.0e-10);
+        assert!((costs[0] / costs[1] - 16.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn stationary_imu_produces_timestamped_local_estimate() {
+        let mut estimator = estimator();
+        // The initial graph is underconstrained: a completed numerical report
+        // must survive covariance failure and must not leak into the next attempt.
+        let failed = estimator.solve();
+        assert!(failed.estimate.is_none());
+        assert!(failed.diagnostics.failure.is_some());
+        assert_eq!(failed.diagnostics.initial_cost, Some(0.0));
+        assert_eq!(failed.diagnostics.final_cost, Some(0.0));
+        assert_eq!(failed.diagnostics.iterations, Some(0));
+        for index in 0..100 {
+            let time = Time::from_nanos(1_000_000_000 + index * 2_000_000);
+            assert!(estimator.ingest_imu(time, ImuState::default(),).unwrap());
+        }
+        let result = estimator.solve();
+        assert!(
+            result.diagnostics.failure.is_none(),
+            "{:?}",
+            result.diagnostics
+        );
+        let estimate = result.estimate.unwrap();
+        assert_eq!(estimate.time, Time::from_nanos(1_198_000_000));
+        assert_eq!(estimate.epoch, 7);
+        assert!(estimate.robot_to_field.is_none());
+        assert!(
+            estimate
+                .robot_to_local
+                .covariance
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        // A second solve must not retain the previous temporary yaw constraint.
+        let repeated = estimator.solve().estimate.unwrap();
+        assert!(
+            (estimate.robot_to_local.covariance - repeated.robot_to_local.covariance).amax()
+                < 1.0e-10
+        );
+        // Crossing the knot boundary must retain observability.
+        let boundary = Time::from_nanos(1_200_000_000);
+        estimator.ingest_imu(boundary, ImuState::default()).unwrap();
+        assert_eq!(estimator.solve().estimate.unwrap().time, boundary);
+    }
+
+    #[test]
+    fn cached_covariance_matches_fresh_model_and_partial_solves_remain_usable() {
+        let mut estimator = estimator();
+        for index in 0..100 {
+            estimator
+                .ingest_imu(
+                    estimator.origin + Duration::from_millis(index * 2),
+                    ImuState {
+                        roll_pitch_yaw: vector![0.02, -0.01, 0.0],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        estimator.prepare_preintegration().unwrap();
+        estimator.prepare_attitude().unwrap();
+        let (segment, _) = estimator.segment_and_tau(estimator.latest_time).unwrap();
+        let controls = control_keys(&estimator.controls, segment).unwrap();
+        let blocks = estimator.estimate_covariance_blocks(controls).unwrap();
+        let (_, cached) = estimator
+            .optimizer
+            .solve_batch_with_covariance(
+                &mut estimator.graph,
+                &estimator.options,
+                &blocks,
+                &Default::default(),
+            )
+            .unwrap();
+        let cached = covariance::EstimateCovariance::from_fn(|r, c| {
+            if r < cached.nrows() && c < cached.ncols() {
+                cached[(r, c)]
+            } else {
+                0.0
+            }
+        });
+        let fresh = estimator.graph.joint_covariance(&blocks).unwrap();
+        for r in 0..fresh.nrows() {
+            for c in 0..fresh.ncols() {
+                assert!(
+                    (fresh[(r, c)] - cached[(r, c)]).abs() < 1e-9 * (1.0 + fresh[(r, c)].abs())
+                );
+            }
+        }
+        // Force a cost-decreasing partial result after changing the observation.
+        // That path must compute a fresh covariance and preserve its termination,
+        // rather than treating a gradient-tolerance=MAX probe as convergence.
+        if let Some(key) = estimator.current_yaw.take() {
+            estimator.graph.remove_factor(key).unwrap();
+        }
+        estimator
+            .ingest_imu(
+                estimator.latest_time + Duration::from_millis(2),
+                ImuState {
+                    roll_pitch_yaw: vector![0.03, -0.02, 0.0],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        estimator.options.max_iterations = 1;
+        estimator.options.gradient_tolerance = 1e-30;
+        let partial = estimator.solve();
+        assert!(partial.estimate.is_some(), "{:?}", partial.diagnostics);
+        assert!(!partial.converged);
+        assert_eq!(partial.diagnostics.iterations, Some(1));
+        assert!(partial.diagnostics.final_cost.is_some());
+        assert!(partial.diagnostics.initial_cost.is_none());
+    }
+
+    #[test]
+    fn late_imu_rebuild_preserves_cost_and_information() {
+        let build = |late: bool| {
+            let mut estimator = estimator();
+            estimator.parameters.accelerometer = Some(Default::default());
+            let mut indices: Vec<_> = (0..100).collect();
+            if late {
+                indices.swap(24, 70);
+            }
+            for index in indices {
+                estimator
+                    .ingest_imu(
+                        estimator.origin + Duration::from_millis(index * 2),
+                        ImuState {
+                            angular_velocity: vector![0.1, -0.2, index as f32 * 0.001],
+                            linear_acceleration: vector![0.2, -0.1, 9.81],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                if late && index == 70 {
+                    estimator.prepare_preintegration().unwrap();
+                }
+            }
+            estimator.prepare_preintegration().unwrap();
+            estimator.prepare_attitude().unwrap();
+            estimator
+        };
+        let mut grouped = build(false);
+        let mut singletons = build(true);
+        let evaluate = OptimizeOptions {
+            gradient_tolerance: f64::MAX,
+            ..grouped.options
+        };
+        let grouped_cost = grouped
+            .optimizer
+            .solve_batch(&mut grouped.graph, &evaluate)
+            .unwrap()
+            .initial_cost;
+        let singleton_cost = singletons
+            .optimizer
+            .solve_batch(&mut singletons.graph, &evaluate)
+            .unwrap()
+            .initial_cost;
+        assert!((grouped_cost - singleton_cost).abs() < 1e-12);
+        let grouped_controls = control_keys(&grouped.controls, 0).unwrap();
+        let singleton_controls = control_keys(&singletons.controls, 0).unwrap();
+        let grouped_blocks = grouped
+            .estimate_covariance_blocks(grouped_controls)
+            .unwrap();
+        let singleton_blocks = singletons
+            .estimate_covariance_blocks(singleton_controls)
+            .unwrap();
+        let a = grouped.graph.joint_covariance(&grouped_blocks).unwrap();
+        let b = singletons
+            .graph
+            .joint_covariance(&singleton_blocks)
+            .unwrap();
+        for r in 0..a.nrows() {
+            for c in 0..a.ncols() {
+                assert!((a[(r, c)] - b[(r, c)]).abs() < 1e-9 * (1.0 + a[(r, c)].abs()));
+            }
+        }
+    }
+
+    #[test]
+    fn measurements_older_than_window_are_rejected() {
+        let mut estimator = estimator();
+        estimator
+            .ingest_imu(Time::from_nanos(4_000_000_000), ImuState::default())
+            .unwrap();
+        assert!(
+            !estimator
+                .ingest_imu(Time::from_nanos(1_500_000_000), ImuState::default())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn solve_retires_controls_outside_two_second_window() {
+        let mut estimator = estimator();
+        for index in 0..=110 {
+            estimator
+                .ingest_imu(
+                    Time::from_nanos(1_000_000_000 + index * 20_000_000),
+                    ImuState::default(),
+                )
+                .unwrap();
+        }
+        estimator.solve().estimate.unwrap();
+        assert_eq!(estimator.controls.first_key_value().unwrap().0, &0);
+        assert_eq!(estimator.segments(), 1..12);
+        // Late data inside the retained window changes the graph, not the output time.
+        assert!(
+            estimator
+                .ingest_imu(Time::from_nanos(2_810_000_000), ImuState::default())
+                .unwrap()
+        );
+        assert_eq!(
+            estimator.solve().estimate.unwrap().time,
+            Time::from_nanos(3_200_000_000)
+        );
+    }
+
+    #[test]
+    fn rejected_visual_frame_does_not_advance_output_time() {
+        let mut estimator = estimator();
+        assert!(
+            !estimator
+                .ingest_visual(TimeWrapper {
+                    time: Time::from_nanos(2_000_000_000),
+                    inner: VisualLocalizationFrame {
+                        epoch: 7,
+                        source: types::visual_localization_next::VisualAssociationSource::Tracking,
+                        robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
+                        generation: 0,
+                        camera_intrinsic: Intrinsic::new(
+                            nalgebra::vector![300.0, 300.0],
+                            point![160.0, 120.0],
+                        ),
+                        associations: Vec::new(),
+                    },
+                })
+                .unwrap()
+        );
+        assert_eq!(estimator.latest_time, Time::from_nanos(1_000_000_000));
     }
 
     #[test]
@@ -306,51 +861,5 @@ mod tests {
         assert!(estimator.pending_visuals.is_empty());
         assert!(estimator.reprojection_batches.is_empty());
         assert_eq!(estimator.measurements.values().sum::<usize>(), 0);
-    }
-
-    #[test]
-    fn configured_grids_preserve_stationary_seed_and_window_boundary() {
-        let mut parameters: Localization3dParameters =
-            json5::from_str(include_str!("../parameters_fixture.json5")).unwrap();
-        parameters.timing.trajectory_spacing = Duration::from_millis(400);
-        parameters.timing.bias_spacing = Duration::from_millis(1200);
-        parameters.timing.optimization_window = Duration::from_millis(2500);
-        let origin = Time::from_nanos(1_000_000_000);
-        let mut estimator = Estimator::new(
-            origin,
-            7,
-            Isometry3::from_translation(0.0, 0.0, 0.5),
-            &Intrinsic::default(),
-            parameters,
-            &FieldDimensions::SPL_2025,
-        )
-        .unwrap();
-        let latest = origin + Duration::from_millis(3600);
-        let (segment, tau) = estimator.segment_and_tau(latest).unwrap();
-        assert_eq!((segment, tau), (9, 0.0));
-        let controls = estimator.ensure_segment(segment).unwrap();
-        let state = estimator.spline(controls).unwrap().state(0.375).unwrap();
-        assert!((state.pose.inner.translation.z - 0.5).abs() < 1e-12);
-        assert!(state.velocity.norm() < 1e-12);
-        let (_, bias_tau) = estimator.ensure_biases(latest).unwrap();
-        assert_eq!(bias_tau, 0.0);
-        assert_eq!(estimator.biases.len(), 5);
-        estimator.commit_time(latest);
-        estimator.commit_time(origin);
-        assert_eq!(estimator.latest_time(), latest);
-        assert_eq!(estimator.oldest_window_segment(), 2);
-        let cutoff = latest - Duration::from_millis(2500);
-        assert!(estimator.check_time(cutoff, "test").unwrap().is_some());
-        assert!(
-            estimator
-                .check_time(cutoff - Duration::from_nanos(1), "test")
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            estimator
-                .segment_and_tau(origin - Duration::from_nanos(1))
-                .is_err()
-        );
     }
 }

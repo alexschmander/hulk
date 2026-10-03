@@ -84,4 +84,30 @@ impl Estimator {
             tau,
         ))
     }
+
+    pub fn bias_at(&self, time: Time) -> Result<ImuBias> {
+        let (index, tau) =
+            bias_segment_and_tau(self.origin, time, self.parameters.timing.bias_ns());
+        let Some((&_, &left)) = self.biases.range(..=index).next_back() else {
+            return Ok(self
+                .graph
+                .get(
+                    *self
+                        .biases
+                        .first_key_value()
+                        .ok_or_else(|| eyre!("missing bias"))?
+                        .1,
+                )?
+                .clone());
+        };
+        let a = self.graph.get(left)?;
+        let Some(&right) = self.biases.get(&(index + 1)) else {
+            return Ok(a.clone());
+        };
+        let b = self.graph.get(right)?;
+        Ok(ImuBias {
+            gyroscope: a.gyroscope * (1.0 - tau) + b.gyroscope * tau,
+            accelerometer: a.accelerometer * (1.0 - tau) + b.accelerometer * tau,
+        })
+    }
 }

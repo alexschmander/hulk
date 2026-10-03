@@ -1,11 +1,63 @@
-use ros_z::Message;
+use nalgebra::SMatrix;
 use ros_z::time::Time;
-use serde::{Deserialize, Serialize};
+use ros_z::{Message, MessageSchema, SchemaBuilder, SerdeCdrCodec};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use coordinate_systems::{Field, Ground, ImuReference, Robot};
+use coordinate_systems::{Field, Ground, ImuReference, Local, Robot};
 use linear_algebra::{Isometry2, Isometry3, Orientation2, Rotation2};
 
 use crate::multivariate_normal_distribution::MultivariateNormalDistribution;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PoseEstimate<From, To> {
+    pub pose: Isometry3<From, To, f64>,
+    /// Right-local tangent covariance, ordered [rotation xyz, translation xyz].
+    pub covariance: SMatrix<f64, 6, 6>,
+}
+
+impl<From, To> Message for PoseEstimate<From, To>
+where
+    From: Message + Serialize + DeserializeOwned,
+    To: Message + Serialize + DeserializeOwned,
+{
+    type Codec = SerdeCdrCodec<Self>;
+
+    fn type_name() -> String {
+        format!(
+            "types::localization::PoseEstimate<{},{}>",
+            From::type_name(),
+            To::type_name()
+        )
+    }
+}
+
+impl<From, To> MessageSchema for PoseEstimate<From, To>
+where
+    From: Message + Serialize + DeserializeOwned,
+    To: Message + Serialize + DeserializeOwned,
+{
+    fn build_schema(
+        builder: &mut SchemaBuilder,
+    ) -> Result<ros_z::__private::ros_z_schema::TypeDef, ros_z::__private::ros_z_schema::SchemaError>
+    {
+        builder.define_message_struct::<Self>(|fields| {
+            fields.field::<Isometry3<From, To, f64>>("pose")?;
+            let covariance = fields.shape::<[f64; 36]>()?;
+            fields.field_with_shape("covariance", covariance);
+            Ok(())
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq)]
+pub struct LocalizationEstimate {
+    pub time: Time,
+    pub epoch: u64,
+    /// Changes when bootstrap/recovery replaces Local within an epoch.
+    pub generation: u64,
+    pub robot_to_local: PoseEstimate<Robot, Local>,
+    pub robot_to_field: Option<PoseEstimate<Robot, Field>>,
+}
 
 /// An exposure-time robot heading constraint, independent of optimized Local.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq)]
@@ -75,6 +127,11 @@ mod tests {
     use linear_algebra::IntoTransform;
 
     use super::*;
+
+    #[test]
+    fn localization_output_schemas_are_valid() {
+        LocalizationEstimate::schema();
+    }
 
     #[test]
     fn ground_to_field_from_field_to_robot_flattens_robot_pose() {

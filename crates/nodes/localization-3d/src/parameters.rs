@@ -93,6 +93,28 @@ impl Default for ModelParameters {
     }
 }
 
+/// Live solver settings; tolerances use fagra's gradient/step/cost norms.
+#[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SolverParameters {
+    pub max_trials: usize,
+    pub max_iterations: usize,
+    pub gradient_tolerance: f64,
+    pub step_tolerance: f64,
+    pub cost_tolerance: f64,
+}
+impl Default for SolverParameters {
+    fn default() -> Self {
+        Self {
+            max_trials: 8,
+            max_iterations: 10,
+            gradient_tolerance: 1e-3,
+            step_tolerance: 1e-5,
+            cost_tolerance: 1e-8,
+        }
+    }
+}
+
 /// Live visual admission/validation gates, also used during alignment and recovery.
 #[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -207,6 +229,8 @@ pub struct Localization3dParameters {
     #[serde(default)]
     pub model: ModelParameters,
     #[serde(default)]
+    pub solver: SolverParameters,
+    #[serde(default)]
     pub visual: VisualParameters,
     pub accelerometer: Option<AccelerometerParameters>,
     #[serde(default)]
@@ -236,7 +260,7 @@ impl Localization3dParameters {
     pub fn validate_update(&self, candidate: &Self) -> Result<(), String> {
         candidate.validate()?;
         let mut live = self.clone();
-
+        live.solver = candidate.solver.clone();
         live.visual = candidate.visual.clone();
 
         live.max_tilt_error = candidate.max_tilt_error;
@@ -276,7 +300,7 @@ impl Localization3dParameters {
         }
         let m = &self.model;
         let v = &self.visual;
-
+        let s = &self.solver;
         for value in [
             m.huber_threshold,
             m.min_landmark_range,
@@ -299,12 +323,20 @@ impl Localization3dParameters {
                 return Err("model, visual and solver scales must be finite and positive with representable squares".into());
             }
         }
+        if [s.gradient_tolerance, s.step_tolerance, s.cost_tolerance]
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err("solver tolerances must be finite and nonnegative".into());
+        }
         if m.prediction_gap_segments <= 0
             || m.gap_uncertainty_multiplier < 1.0
             || !m.containment_tau.is_finite()
             || !(0.0..=1.0).contains(&m.containment_tau)
             || v.min_associations < 3
             || v.max_associations < v.min_associations
+            || s.max_trials == 0
+            || s.max_iterations == 0
         {
             return Err(
                 "invalid model sampling, visual association limits or solver iteration limits"
