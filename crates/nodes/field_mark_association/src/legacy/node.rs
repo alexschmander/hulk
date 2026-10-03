@@ -19,7 +19,7 @@ use types::{
     },
 };
 
-use crate::{
+use crate::legacy::{
     FieldMarkAssociationState,
     frame_processing::{DetectionProcessingContext, process_detected_objects},
     parameters::FieldMarkAssociationParameters,

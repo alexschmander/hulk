@@ -14,7 +14,7 @@ use types::{
     visual_localization::{AssociationPoseHint, GlobalLocalizationDebug, VisualLocalizationFrame},
 };
 
-use crate::{
+use crate::legacy::{
     FieldMarkAssociationState, GlobalVisualLocalization,
     parameters::FieldMarkAssociationParameters, robot_to_camera,
 };
@@ -145,7 +145,7 @@ fn associate_detection_frame(
     mut state: FieldMarkAssociationState,
     frame: PreparedDetectionFrame,
 ) -> Result<(FieldMarkAssociationState, GlobalVisualLocalization)> {
-    let visual_features = crate::find_detected_visual_features(&frame.objects);
+    let visual_features = crate::legacy::find_detected_visual_features(&frame.objects);
     if visual_features.supported_feature_count() == 0 {
         return Ok((
             state,

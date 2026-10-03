@@ -10,7 +10,7 @@ pub(super) use nalgebra::{Similarity2, Translation3, Vector2};
 pub(super) use ordered_float::NotNan;
 pub(super) use projection::intrinsic::Intrinsic;
 
-pub(super) use crate::{DetectedVisualFeature, DetectedVisualFeatures};
+pub(super) use crate::legacy::{DetectedVisualFeature, DetectedVisualFeatures};
 
 pub(super) use super::{
     assignment::*, bounds::*, certification::*, cheap::*, fitting::*, output::*, problem::*,

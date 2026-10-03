@@ -6,7 +6,7 @@ use std::{
 };
 
 use coordinate_systems::{Camera, Field, Pixel, Robot};
-use field_mark_association::{
+use field_mark_association::legacy::{
     DetectedVisualFeature, GlobalLocalizationDebugStatus, GlobalLocalizerParameters,
     find_detected_visual_features, localize_global_visual_features,
 };

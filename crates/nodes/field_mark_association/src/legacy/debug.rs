@@ -1,4 +1,4 @@
-use crate::global_association::GlobalLocalizationResult;
+use crate::legacy::global_association::GlobalLocalizationResult;
 use types::visual_localization::{GlobalLocalizationDebug, GlobalLocalizationDebugStatus};
 
 pub(crate) fn global_localization_debug_from_result(

@@ -3,7 +3,7 @@ use linear_algebra::Isometry3;
 use projection::camera_matrix::CameraMatrix;
 use types::{field_dimensions::FieldDimensions, visual_localization::FieldMarkAssociation};
 
-use crate::{
+use crate::legacy::{
     debug::global_localization_debug_from_result,
     features::DetectedVisualFeatures,
     global_association::{

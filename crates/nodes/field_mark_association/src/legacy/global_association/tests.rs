@@ -4,7 +4,7 @@ use linear_algebra::{IntoTransform, Isometry3, Point2, point};
 use projection::intrinsic::Intrinsic;
 
 use super::*;
-use crate::{DetectedVisualFeature, DetectedVisualFeatures};
+use crate::legacy::{DetectedVisualFeature, DetectedVisualFeatures};
 
 fn camera_intrinsic() -> Intrinsic {
     Intrinsic::new(nalgebra::vector![100.0, 100.0], point![320.0, 240.0])

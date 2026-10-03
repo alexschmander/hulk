@@ -6,7 +6,7 @@ use types::{
     visual_localization::{FieldMarkAssociation, FieldMarkAssociationSource},
 };
 
-use crate::{
+use crate::legacy::{
     api::{GlobalVisualLocalization, field_mark_associations},
     debug::global_localization_debug_from_result,
     features::DetectedVisualFeatures,
@@ -292,7 +292,7 @@ mod tests {
     use linear_algebra::point;
 
     use super::*;
-    use crate::{
+    use crate::legacy::{
         PoseHintAssociationParameters,
         global_association::{FeatureAssociation, FeatureAssociations, GlobalLocalizationScore},
     };

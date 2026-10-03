@@ -1,7 +1,7 @@
 use ros_z::Message;
 use serde::{Deserialize, Serialize};
 
-use crate::global_association::{
+use crate::legacy::global_association::{
     GlobalAssociationConfig as GlobalLocalizerParameters,
     PoseHintAssociationConfig as PoseHintAssociationParameters,
 };
