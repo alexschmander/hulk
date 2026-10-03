@@ -2,6 +2,8 @@
 
 pub mod variables;
 
+pub mod alignment;
+
 pub mod spline;
 
 use fagra::EvaluationError;
