@@ -4,7 +4,7 @@ use nalgebra::{RealField, SMatrix, SVector, UnitQuaternion, Vector3};
 use crate::{
     spline::PoseSpline,
     variables::{
-        PoseControl,
+        ImuBias, PoseControl,
         rotation::{self, scalar},
     },
 };
@@ -31,6 +31,7 @@ pub(super) fn unique<R: RealField + Copy, const N: usize>(
             return Err(EvaluationError::InvalidEvaluation);
         }
     }
+
     Ok(())
 }
 
@@ -82,7 +83,34 @@ pub(super) fn emit<
     emit_blocks(sink, r, blocks)
 }
 
-/// Omit exactly-zero blocks without allocating or dropping constant residual cost.
+pub(super) fn emit_pose_and_bias<
+    R: RealField + Copy,
+    L: LinearizationSink<Scalar = R>,
+    const M: usize,
+>(
+    sink: &mut L,
+    controls: &[StateKey<PoseControl<R>>; 4],
+    biases: &[StateKey<ImuBias<R>>; 2],
+    residual: &SVector<R, M>,
+    pose: &[SMatrix<R, M, 6>; 4],
+    bias: &[SMatrix<R, M, 6>; 2],
+) -> Result<(), EvaluationError> {
+    emit_blocks(
+        sink,
+        residual,
+        [
+            JacobianBlock::new(controls[0], &pose[0]),
+            JacobianBlock::new(controls[1], &pose[1]),
+            JacobianBlock::new(controls[2], &pose[2]),
+            JacobianBlock::new(controls[3], &pose[3]),
+            JacobianBlock::new(biases[0], &bias[0]),
+            JacobianBlock::new(biases[1], &bias[1]),
+        ],
+    )
+}
+
+/// Omit exactly-zero blocks without allocating or dropping constant residual
+/// cost. Nonfinite blocks remain present so the sink still rejects them.
 pub(super) fn emit_blocks<
     R: RealField + Copy,
     L: LinearizationSink<Scalar = R>,
@@ -111,4 +139,51 @@ pub(super) fn rotation_log<R: RealField + Copy>(
         return Err(EvaluationError::InvalidEvaluation);
     }
     Ok(rotation::log(r))
+}
+
+pub(super) fn validate_up<R: RealField + Copy>(up: &Vector3<R>) -> Result<(), EvaluationError> {
+    if (up.norm_squared() - R::one()).abs() <= scalar(1e-5) {
+        Ok(())
+    } else {
+        Err(EvaluationError::InvalidEvaluation)
+    }
+}
+
+pub(super) fn up<R: RealField + Copy>(r: &UnitQuaternion<R>) -> Vector3<R> {
+    r.inverse() * Vector3::z()
+}
+
+pub(super) fn heading<R: RealField + Copy>(r: &UnitQuaternion<R>) -> Result<R, EvaluationError> {
+    let forward = r * Vector3::x();
+    finite(forward.iter())?;
+    if forward.x * forward.x + forward.y * forward.y <= scalar(1e-12) {
+        return Err(EvaluationError::InvalidEvaluation);
+    }
+    Ok(forward.y.atan2(forward.x))
+}
+
+pub(super) fn heading_jacobian<R: RealField + Copy>(
+    r: &UnitQuaternion<R>,
+) -> Result<SMatrix<R, 1, 3>, EvaluationError> {
+    heading(r)?;
+    let rotation = r.to_rotation_matrix().into_inner();
+    let h = rotation.column(0);
+    let gradient = SMatrix::<R, 1, 3>::new(-h.y, h.x, R::zero()) / (h.x * h.x + h.y * h.y);
+    Ok(-gradient * rotation * Vector3::<R>::x().cross_matrix())
+}
+
+pub(super) fn yaw_error<R: RealField + Copy>(
+    start: &UnitQuaternion<R>,
+    end: &UnitQuaternion<R>,
+    measured: R,
+) -> Result<R, EvaluationError> {
+    if !measured.is_finite() {
+        return Err(EvaluationError::InvalidEvaluation);
+    }
+    let difference = heading(end)? - heading(start)? - measured;
+    let result = difference.sin().atan2(difference.cos());
+    if result.abs() >= R::pi() - scalar::<R>(1e-6) {
+        return Err(EvaluationError::InvalidEvaluation);
+    }
+    Ok(result)
 }
