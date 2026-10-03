@@ -6465,6 +6465,7 @@ dependencies = [
  "coordinate_systems",
  "fagra",
  "field_mark_association",
+ "itertools 0.14.0",
  "json5",
  "kinematics",
  "linear_algebra",

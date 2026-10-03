@@ -48,6 +48,9 @@ generate_coordinate_system!(
     /// recenters x/y and fits height while preserving the heading convention; it increments
     /// the generation. Leaving Damping starts a new epoch.
     Local,
+    /// Gravity-aligned attitude reference reported by the IMU. Its heading zero
+    /// is independent of Local and Field and may drift slowly over time.
+    ImuReference,
     /// coordinate system used to express feet positions in the walking engine.
     ///
     /// Origin: below the robot's hip

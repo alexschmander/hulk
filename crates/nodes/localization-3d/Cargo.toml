@@ -12,6 +12,7 @@ color-eyre = { workspace = true }
 coordinate_systems = { workspace = true }
 fagra = { workspace = true }
 field_mark_association = { workspace = true }
+itertools = { workspace = true }
 kinematics = { workspace = true }
 linear_algebra = { workspace = true }
 localization-factrs = { workspace = true }

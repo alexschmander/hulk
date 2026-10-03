@@ -2,10 +2,13 @@ use std::{collections::BTreeMap, ops::Range};
 
 use color_eyre::{Result, eyre::eyre};
 use coordinate_systems::{Local, Robot};
-use fagra::{Problem, StateKey};
+use fagra::{BatchKey, Problem, StateKey};
 use linear_algebra::{Framed, Isometry3, Vector3};
 use localization_fagra::{
-    factors::{CameraIntrinsicsPrior, ImuBiasPrior, ImuBiasWalk, MotionPrior, TrajectoryPrior},
+    factors::{
+        CameraIntrinsicsPrior, FootGround, FootObservation, ImuBiasPrior, ImuBiasWalk,
+        ImuKinematics, MotionPrior, PreintegratedImu, TrajectoryPrior,
+    },
     variables::{CameraIntrinsics, ImuBias, PoseControl, TrajectoryState},
 };
 use nalgebra::SMatrix;
@@ -14,7 +17,11 @@ use ros_z::time::Time;
 
 use crate::parameters::Localization3dParameters;
 
+mod attitude;
 mod bias;
+mod inertial;
+mod preintegration;
+mod recovery;
 
 mod window;
 
@@ -33,6 +40,10 @@ fagra::factors! {
         bias_walks: ImuBiasWalk,
         intrinsics_priors: CameraIntrinsicsPrior,
         motion: MotionPrior,
+        yaw: localization_fagra::factors::RelativeYaw,
+        imu: ImuKinematics,
+        preintegrated_imu: PreintegratedImu,
+        feet: Batch<FootGround, FootObservation>,
     }
 }
 
@@ -45,6 +56,12 @@ pub struct Estimator {
     generation: u64,
     controls: BTreeMap<i64, StateKey<PoseControl<f64>>>,
     biases: BTreeMap<i64, StateKey<ImuBias>>,
+    preintegration: preintegration::ImuIntervals,
+    foot_batches: BTreeMap<i64, BatchKey<FootGround<f64>>>,
+    measurements: BTreeMap<i64, usize>,
+    attitudes: BTreeMap<Time, linear_algebra::Orientation3<coordinate_systems::ImuReference, f64>>,
+    motion_history: Vec<recovery::MotionRecord>,
+    history_start: Time,
     latest_time: Time,
     parameters: Localization3dParameters,
 }
@@ -105,6 +122,12 @@ impl Estimator {
             generation: 0,
             controls: BTreeMap::new(),
             biases: BTreeMap::new(),
+            preintegration: preintegration::ImuIntervals::new(&parameters.timing),
+            foot_batches: BTreeMap::new(),
+            measurements: BTreeMap::new(),
+            attitudes: BTreeMap::new(),
+            motion_history: Vec::new(),
+            history_start: origin,
             latest_time: origin,
             parameters,
         })
@@ -148,6 +171,14 @@ impl Estimator {
         self.latest_time
     }
 
+    pub fn update_parameters(&mut self, parameters: Localization3dParameters) -> Result<()> {
+        self.parameters
+            .validate_update(&parameters)
+            .map_err(|message| eyre!(message))?;
+        self.parameters = parameters;
+        Ok(())
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -186,9 +217,20 @@ fn control_keys(
 }
 
 #[cfg(test)]
-mod construction_tests {
+mod tests {
     use super::*;
     use std::time::Duration;
+
+    pub(super) fn estimator() -> Estimator {
+        Estimator::new(
+            Time::from_nanos(1_000_000_000),
+            7,
+            Isometry3::identity(),
+            &Intrinsic::default(),
+            json5::from_str(include_str!("../parameters_fixture.json5")).unwrap(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn configured_grids_preserve_stationary_seed_and_window_boundary() {
