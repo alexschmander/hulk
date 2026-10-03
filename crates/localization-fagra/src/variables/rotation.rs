@@ -103,6 +103,12 @@ pub(super) fn left_jacobian_inverse_actions<R: RealField + Copy, const N: usize>
     })
 }
 
+pub(crate) fn right_jacobian<R: RealField + Copy>(omega: Vector3<R>) -> Matrix3<R> {
+    let (b, c) = coefficients(omega.norm_squared());
+    let w = omega.cross_matrix();
+    Matrix3::identity() - w * b + w * w * c
+}
+
 pub(crate) fn right_jacobian_inverse<R: RealField + Copy>(omega: Vector3<R>) -> Matrix3<R> {
     let w = omega.cross_matrix();
     Matrix3::<R>::identity()
