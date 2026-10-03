@@ -5,9 +5,12 @@ pub mod api;
 mod features;
 pub mod global_association;
 pub mod map;
+mod parameters;
+mod tracking;
 
 pub use api::{
-    AssociationResult, GlobalAssociationInput, HeadingConstraint, associate_global_visual_features,
+    AssociationResult, GlobalAssociationInput, HeadingConstraint, TrackingAssociationInput,
+    associate_global_visual_features, associate_tracking_visual_features,
 };
 pub use features::{
     DetectedVisualFeature, DetectedVisualFeatures, VisualFeatureClass,
@@ -15,3 +18,4 @@ pub use features::{
 };
 pub use global_association::GlobalAssociationConfig as GlobalLocalizerParameters;
 pub use map::candidate_points;
+pub use parameters::{FieldMarkAssociationParameters, TrackingAssociationParameters};

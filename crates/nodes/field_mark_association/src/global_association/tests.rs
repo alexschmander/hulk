@@ -11,18 +11,11 @@ use types::{
 
 use super::GlobalAssociationConfig;
 use crate::{
-    AssociationResult, DetectedVisualFeature, DetectedVisualFeatures, GlobalAssociationInput,
-    VisualFeatureClass, associate_global_visual_features, map::LandmarkMap,
+    AssociationResult, DetectedVisualFeature, DetectedVisualFeatures,
+    FieldMarkAssociationParameters, GlobalAssociationInput,
+    TrackingAssociationInput as AssociationInput, VisualFeatureClass,
+    associate_global_visual_features, map::LandmarkMap,
 };
-
-#[derive(Clone, Copy)]
-struct AssociationInput<'a> {
-    pub visual_features: &'a DetectedVisualFeatures,
-    pub robot_to_camera: Isometry3<Robot, Camera>,
-    pub geometry: &'a AssociationGeometry,
-    pub camera_intrinsic: Intrinsic,
-    pub field_dimensions: &'a FieldDimensions,
-}
 
 fn geometry() -> AssociationGeometry {
     AssociationGeometry {
@@ -57,6 +50,7 @@ fn input<'a>(
         geometry,
         camera_intrinsic: intrinsic(),
         field_dimensions: &FieldDimensions::SPL_2025,
+        time: Time::from_nanos(1_000_000_000),
     }
 }
 
@@ -80,10 +74,10 @@ fn global_input<'a>(
     }
 }
 
-fn calibrated_parameters() -> GlobalAssociationConfig {
-    let mut parameters = GlobalAssociationConfig::default();
-    parameters.imu_tilt_sigma = 0.001;
-    parameters.height_sigma = 0.001;
+fn calibrated_parameters() -> FieldMarkAssociationParameters {
+    let mut parameters = FieldMarkAssociationParameters::default();
+    parameters.global_localizer.imu_tilt_sigma = 0.001;
+    parameters.global_localizer.height_sigma = 0.001;
     parameters
 }
 
@@ -178,21 +172,23 @@ fn geometric_numerical_guards_are_applied() {
 fn three_stationary_features_certify_without_history_or_pose() {
     let geometry = geometry();
     let features = project(stationary_three(), &geometry);
-    let mut parameters = GlobalAssociationConfig::default();
-    assert_eq!(parameters.min_inliers, 3);
-    let first =
-        associate_global_visual_features(global_input(input(&features, &geometry), &parameters));
+    let mut parameters = FieldMarkAssociationParameters::default();
+    assert_eq!(parameters.global_localizer.min_inliers, 3);
+    let first = associate_global_visual_features(global_input(
+        input(&features, &geometry),
+        &parameters.global_localizer,
+    ));
     assert_eq!(first.associations.len(), 3);
     assert!(first.associations.iter().all(|a| a.field_point.x() < 0.0));
     assert_eq!(first.debug.as_ref().unwrap().association_count, 3);
     assert!(first.debug.as_ref().unwrap().pairwise_distance_rms < 1.0e-4);
     // Global fitting estimates height; tracking's height-noise floor is irrelevant.
-    parameters.height_sigma = 0.2;
+    parameters.global_localizer.height_sigma = 0.2;
     assert_eq!(
         key(&first),
         key(&associate_global_visual_features(global_input(
             input(&features, &geometry),
-            &parameters
+            &parameters.global_localizer
         )))
     );
 }
@@ -242,7 +238,7 @@ fn canonical_landmarks_do_not_select_the_robot_half() {
         let mut geometry = geometry();
         geometry.estimate.pose.inner.translation.vector.x = robot_x;
         let features = project(stationary_three(), &geometry);
-        let config = calibrated_parameters();
+        let config = calibrated_parameters().global_localizer;
         let result =
             associate_global_visual_features(global_input(input(&features, &geometry), &config));
         assert_eq!(result.associations.len(), 3, "robot x {robot_x}");
@@ -277,7 +273,7 @@ fn halfturn_equivalent_triangles_are_not_ambiguous() {
         ],
         &geometry,
     );
-    let config = calibrated_parameters();
+    let config = calibrated_parameters().global_localizer;
     let result =
         associate_global_visual_features(global_input(input(&features, &geometry), &config));
     assert_eq!(result.associations.len(), 3);
@@ -309,7 +305,7 @@ fn translated_triangle_orbits_are_rejected() {
         ],
         &geometry,
     );
-    let config = calibrated_parameters();
+    let config = calibrated_parameters().global_localizer;
     let mut input = input(&features, &geometry);
     input.field_dimensions = &field;
     assert!(
@@ -359,7 +355,7 @@ fn rich_frame_has_bounded_search_and_budget_exhaustion_rejects() {
         GlobalAssociationConfig::default().symmetry_epsilon,
     );
     let features = project(map.landmarks.iter().map(|l| (l.class, l.xy)), &geometry);
-    let mut config = calibrated_parameters();
+    let mut config = calibrated_parameters().global_localizer;
     let result =
         associate_global_visual_features(global_input(input(&features, &geometry), &config));
     assert_eq!(result.associations.len(), map.landmarks.len());
