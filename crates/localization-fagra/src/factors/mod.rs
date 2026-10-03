@@ -9,6 +9,7 @@ mod kinematic_odometry;
 mod motion;
 mod preintegrated_imu;
 mod prior;
+mod reprojection;
 
 pub use field_containment::FieldContainment;
 pub use ground::{FootGround, FootObservation};
@@ -18,6 +19,7 @@ pub use kinematic_odometry::{AdjacentKinematicOdometry, KinematicOdometry};
 pub use motion::MotionPrior;
 pub use preintegrated_imu::PreintegratedImu;
 pub use prior::{CameraIntrinsicsPrior, TrajectoryPrior};
+pub use reprojection::{FrameReprojections, ReprojectionObservation};
 
 #[cfg(test)]
 mod tests;
