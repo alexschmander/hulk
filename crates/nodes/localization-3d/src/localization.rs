@@ -24,6 +24,8 @@ pub struct SolveOutput {
 }
 
 #[cfg(test)]
+mod recording_tests;
+#[cfg(test)]
 mod recovery_tests;
 
 /// Owns the graph and accepted lifecycle. The ROSZ node and deterministic runner
