@@ -8,16 +8,30 @@ use crate::global_association::GlobalAssociationConfig as GlobalLocalizerParamet
 #[derive(Clone, Debug, Deserialize, Serialize, Message)]
 #[serde(default, deny_unknown_fields)]
 pub struct FieldMarkAssociationParameters {
+    /// Maximum separation of exposure-bracketing attitude samples.
+    pub max_imu_gap: Duration,
+    /// Maximum separation of exposure-bracketing camera geometry samples.
+    pub max_camera_gap: Duration,
+    /// Allocated at startup; changing these requires restarting the node.
+    pub capacities: AssociationCapacities,
     /// Shared projection uncertainty/search budgets and global geometric gates.
     pub global_localizer: GlobalLocalizerParameters,
     pub tracking: TrackingAssociationParameters,
+    /// Maximum node-side timestamp difference for association geometry.
+    ///
+    /// The direct API expects geometry already sampled at the detection time.
+    pub max_pose_hint_age: Duration,
 }
 
 impl Default for FieldMarkAssociationParameters {
     fn default() -> Self {
         Self {
+            max_imu_gap: Duration::from_millis(20),
+            max_camera_gap: Duration::from_millis(20),
+            capacities: AssociationCapacities::default(),
             global_localizer: GlobalLocalizerParameters::default(),
             tracking: TrackingAssociationParameters::default(),
+            max_pose_hint_age: Duration::from_millis(250),
         }
     }
 }
@@ -26,6 +40,66 @@ impl FieldMarkAssociationParameters {
     pub fn validate(&self) -> std::result::Result<(), String> {
         self.global_localizer.validate()?;
         self.tracking.validate()?;
+        self.capacities.validate()?;
+        if self.max_pose_hint_age.is_zero()
+            || self.max_imu_gap.is_zero()
+            || self.max_camera_gap.is_zero()
+        {
+            return Err("association timing limits must be > 0".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn validate_update(&self, capacities: AssociationCapacities) -> Result<(), String> {
+        self.validate()?;
+        if self.capacities != capacities {
+            return Err("association capacities changed: restart required".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Message)]
+#[serde(default, deny_unknown_fields)]
+pub struct AssociationCapacities {
+    pub camera_geometry: usize,
+    pub field_dimensions: usize,
+    pub estimates: usize,
+    pub status: usize,
+    pub attitudes: usize,
+    pub imu_queue: usize,
+    pub detections_queue: usize,
+}
+
+impl Default for AssociationCapacities {
+    fn default() -> Self {
+        Self {
+            camera_geometry: 1500,
+            field_dimensions: 1,
+            estimates: 128,
+            status: 1,
+            attitudes: 1500,
+            imu_queue: 500,
+            detections_queue: 1,
+        }
+    }
+}
+
+impl AssociationCapacities {
+    fn validate(self) -> Result<(), String> {
+        if [
+            self.camera_geometry,
+            self.field_dimensions,
+            self.estimates,
+            self.status,
+            self.attitudes,
+            self.imu_queue,
+            self.detections_queue,
+        ]
+        .contains(&0)
+        {
+            return Err("association capacities must be > 0".into());
+        }
         Ok(())
     }
 }
@@ -99,6 +173,8 @@ impl TrackingAssociationParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ros_z::{context::ContextBuilder, parameter::NodeParametersExt};
+    use std::sync::Arc;
 
     #[test]
     fn defaults_and_detection_limits_remain_compatible() {
@@ -114,5 +190,85 @@ mod tests {
         config.min_inliers = 3;
         config.max_input_detections = 63;
         assert!(config.validate().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn capacity_updates_preserve_published_snapshot_and_live_settings_reload() {
+        let root =
+            std::env::temp_dir().join(format!("association-parameters-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("field_mark_association.json5");
+        let mut config = FieldMarkAssociationParameters::default();
+        config.capacities.imu_queue = 17;
+        std::fs::write(&file, serde_json::to_string(&config).unwrap()).unwrap();
+        let context = ContextBuilder::default()
+            .with_mode("peer")
+            .disable_multicast_scouting()
+            .with_parameter_layers([root.clone()])
+            .build()
+            .await
+            .unwrap();
+        let node = context
+            .create_node("association_parameters_test")
+            .build()
+            .await
+            .unwrap();
+        let parameters = node
+            .bind_parameter_as::<FieldMarkAssociationParameters>("field_mark_association")
+            .unwrap();
+        let capacities = parameters.snapshot().typed.capacities;
+        assert_eq!(capacities.imu_queue, 17);
+        parameters
+            .add_validation_hook(move |candidate| candidate.validate_update(capacities))
+            .unwrap();
+        let original = parameters.snapshot();
+        let original_file = std::fs::read(&file).unwrap();
+        assert!(
+            parameters
+                .set_json(
+                    "capacities.imu_queue",
+                    serde_json::json!(18),
+                    root.to_string_lossy().into_owned(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("restart required")
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), original_file);
+        assert!(Arc::ptr_eq(&original, &parameters.snapshot()));
+        for change in 0..7 {
+            config.capacities = capacities;
+            let capacity = match change {
+                0 => &mut config.capacities.camera_geometry,
+                1 => &mut config.capacities.field_dimensions,
+                2 => &mut config.capacities.estimates,
+                3 => &mut config.capacities.status,
+                4 => &mut config.capacities.attitudes,
+                5 => &mut config.capacities.imu_queue,
+                _ => &mut config.capacities.detections_queue,
+            };
+            *capacity += 1;
+            std::fs::write(&file, serde_json::to_string(&config).unwrap()).unwrap();
+            assert!(
+                parameters
+                    .reload()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("restart required")
+            );
+            assert!(Arc::ptr_eq(&original, &parameters.snapshot()));
+        }
+        config.capacities = capacities;
+        config.max_imu_gap = Duration::from_millis(37);
+        config.global_localizer.symmetry_epsilon = 0.002;
+        std::fs::write(&file, serde_json::to_string(&config).unwrap()).unwrap();
+        parameters.reload().unwrap();
+        let updated = parameters.snapshot();
+        assert_eq!(updated.typed.max_imu_gap, config.max_imu_gap);
+        assert_eq!(updated.typed.global_localizer.symmetry_epsilon, 0.002);
+        assert!(!Arc::ptr_eq(&original.typed, &updated.typed));
+        config.capacities.imu_queue = 0;
+        assert!(config.validate().is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
