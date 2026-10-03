@@ -10,7 +10,7 @@ use fagra::EvaluationError;
 use nalgebra::RealField;
 
 pub mod alignment;
-
+mod covariance;
 pub mod factors;
 pub mod preintegration;
 pub mod spline;
