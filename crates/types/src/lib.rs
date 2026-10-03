@@ -44,7 +44,6 @@ pub mod support_foot;
 pub mod system_info;
 pub mod time_wrapper;
 pub mod visual_localization;
-pub mod visual_localization_next;
 pub mod visual_odometry;
 pub mod walking_velocity_limits;
 pub mod whistle;

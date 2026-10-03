@@ -5,14 +5,14 @@ use ros_z::time::Time;
 
 /// Orientation of the IMU's heading zero in Field, independent of optimized Local.
 #[derive(Clone, Copy, Debug)]
-pub struct HeadingReference {
+pub(crate) struct HeadingReference {
     time: Time,
     imu_to_field: Rotation2<ImuReference, Field, f64>,
     last_tracking_update: Option<Time>,
 }
 
 impl HeadingReference {
-    pub fn new(
+    pub(crate) fn new(
         time: Time,
         field: Orientation2<Field, f64>,
         imu: Orientation3<ImuReference, f64>,
@@ -24,7 +24,7 @@ impl HeadingReference {
         }
     }
 
-    pub fn snapshot(&self, max_error: f64) -> types::localization::FieldHeadingReference {
+    pub(crate) fn snapshot(&self, max_error: f64) -> types::localization::FieldHeadingReference {
         types::localization::FieldHeadingReference {
             time: self.time,
             imu_to_field: self.imu_to_field,
@@ -32,16 +32,19 @@ impl HeadingReference {
         }
     }
 
-    pub fn expected(&self, imu: Orientation3<ImuReference, f64>) -> Orientation2<Field, f64> {
+    pub(crate) fn expected(
+        &self,
+        imu: Orientation3<ImuReference, f64>,
+    ) -> Orientation2<Field, f64> {
         self.imu_to_field * imu_heading(imu)
     }
 
-    pub fn interrupt_tracking(&mut self) {
+    pub(crate) fn interrupt_tracking(&mut self) {
         self.last_tracking_update = None;
     }
 
     /// Called once per fresh accepted tracking image, never for recovery or repeated solves.
-    pub fn observe_tracking(
+    pub(crate) fn observe_tracking(
         &mut self,
         time: Time,
         field: Orientation2<Field, f64>,

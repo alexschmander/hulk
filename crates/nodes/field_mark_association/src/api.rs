@@ -6,7 +6,7 @@ pub use types::localization::HeadingConstraint;
 use types::{
     field_dimensions::FieldDimensions,
     localization::{LocalizationState, LocalizationStatus},
-    visual_localization_next::{
+    visual_localization::{
         AssociationGeometry, FieldMarkAssociation, GlobalLocalizationDebug, VisualAssociationSource,
     },
 };
@@ -130,8 +130,10 @@ pub fn associate_tracking_visual_features(
     tracking::associate(input, parameters).unwrap_or_default()
 }
 
-/// Reject ambiguous assignments and exhausted budgets. Heading constrains oriented
-/// assignments; without it, uniqueness is modulo field half-turn symmetry.
+/// Guided two-point hypotheses with soft crossing classes and pixel-space refinement.
+/// Reject near-tied sampled poses, ambiguous fixed-pose assignments and exhausted work.
+/// Without heading, return a representative modulo field half-turn symmetry;
+/// bounded sampling is not an exhaustive uniqueness proof.
 pub fn associate_global_visual_features(input: GlobalAssociationInput<'_>) -> AssociationResult {
     solver::associate(input).unwrap_or_default()
 }

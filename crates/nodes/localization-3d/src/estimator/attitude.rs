@@ -52,7 +52,7 @@ impl Estimator {
         Ok(())
     }
 
-    pub fn attitude_at(&self, time: Time) -> Option<Orientation3<ImuReference, f64>> {
+    pub(crate) fn attitude_at(&self, time: Time) -> Option<Orientation3<ImuReference, f64>> {
         let (&before, a) = self.attitudes.range(..=time).next_back()?;
         if before == time {
             return Some(*a);

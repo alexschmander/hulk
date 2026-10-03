@@ -1,4 +1,4 @@
-use crate::localization::Localization;
+use crate::Localization;
 use booster::ImuState;
 use color_eyre::{Result, eyre::OptionExt as _};
 use kinematics::robot_kinematics::RobotKinematics;
@@ -12,7 +12,7 @@ use std::num::NonZeroUsize;
 use types::camera_geometry::{CameraGeometry, camera_geometry_at};
 use types::{
     odometry::KinematicOdometryDelta, time_wrapper::TimeWrapper,
-    visual_localization_next::VisualLocalizationFrame, visual_odometry::VisualOdometer,
+    visual_localization::VisualLocalizationFrame, visual_odometry::VisualOdometer,
 };
 
 pub(crate) enum Measurement {

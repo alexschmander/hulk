@@ -1,8 +1,6 @@
 use crate::{
-    diagnostics::SolveDiagnostics,
+    Localization, Localization3dParameters, SolveDiagnostics,
     inputs::{Inputs, Measurement},
-    localization::Localization,
-    parameters::Localization3dParameters,
     pose::initial_robot_to_local_from_imu,
 };
 use color_eyre::{Result, eyre::Context as _};
@@ -231,7 +229,7 @@ mod tests {
         std::fs::create_dir_all(&root)?;
         std::fs::write(
             root.join("localization3d.json5"),
-            include_str!("parameters_fixture.json5"),
+            include_str!("../../../../etc/parameters/base/localization3d.json5"),
         )?;
         let context = ContextBuilder::default()
             .with_mode("peer")

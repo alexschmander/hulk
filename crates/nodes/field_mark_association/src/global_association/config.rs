@@ -1,7 +1,7 @@
 use ros_z::Message;
 use serde::{Deserialize, Serialize};
 
-/// Startup similarity-fit gates and measurement noise shared with tracking.
+/// Guided gravity-constrained matching and measurement noise shared with tracking.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize, Message)]
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalAssociationConfig {
@@ -15,7 +15,7 @@ pub struct GlobalAssociationConfig {
     pub max_input_detections: usize,
     /// Maximum detections retained after filtering and de-duplication.
     pub max_retained_detections: usize,
-    /// Highest-ranked detections considered for a non-collinear seed.
+    /// Highest-ranked inliers considered for a non-collinear consensus check.
     pub seed_pool_size: usize,
     pub min_inliers: usize,
     pub confidence_threshold: f32,
@@ -29,8 +29,6 @@ pub struct GlobalAssociationConfig {
     pub min_seed_quality: f32,
     /// Pixel measurement/calibration floor, shared with image-space tracking.
     pub detection_pixel_sigma: f32,
-    /// Additive diagonal floor for projected unit-height covariance.
-    pub projected_covariance_floor: f32,
     /// Shared local roll/pitch uncertainty in radians.
     pub imu_tilt_sigma: f32,
     /// Height uncertainty floor for image-space tracking, in metres. Startup fits
@@ -40,16 +38,26 @@ pub struct GlobalAssociationConfig {
     /// directly for 2D residuals and preserves its chi-square tail probability in
     /// joint residuals. This is not an assignment-certification probability.
     pub mahalanobis_gate: f32,
-    /// Additional metric tolerance for map/detector systematic error.
-    pub geometric_tolerance: f32,
+    /// Required fraction of confidence-filtered, deduplicated detections supporting
+    /// the winning pose; uncertain-ray pruning does not reduce this denominator.
+    pub min_inlier_fraction: f32,
+    /// L/T/X class disagreement adds this to the squared pixel Mahalanobis error.
+    /// Goalposts and penalty spots are never reclassified.
+    pub class_mismatch_penalty: f32,
+    /// Required sampled-pose score ratio and fixed-pose assignment separation.
+    pub score_ratio: f32,
+    /// Optical-center height above the field, not robot-body height.
+    pub min_camera_height: f32,
+    pub max_camera_height: f32,
+    /// Unweighted pixel RMS ceiling for the fitted consensus.
+    pub max_rms_px: f32,
     /// Minimum fitted optical depth for global reprojection validation.
     pub min_reprojection_depth: f32,
-    /// Per-call search operations. Global search charges visits, attempts, pair checks and fit work;
-    /// joint tracking (3..=5 features) charges every candidate extension, including duplicate IDs.
-    /// Each complete joint assignment requires at most a 10D Gaussian evaluation.
-    /// Exhaustion rejects the frame, even after finding a candidate; no truncated winner is emitted.
-    /// Preprocessing has configurable limits, defaulting to 128 inputs, 32 retained detections
-    /// and 56 seed triples (an 8-detection seed pool).
+    /// Per-call work ceiling. Global matching charges proposals, landmark projections,
+    /// assignment-row scans, bounded refinement observations and assignment certification.
+    /// A row scans the fixed field map. At most 128 hypotheses and 2048 proposals are sampled;
+    /// this is not exhaustive assignment certification. Exhaustion rejects the frame.
+    /// Joint tracking retains its candidate-extension accounting and exhaustion semantics.
     pub max_work: usize,
 }
 
@@ -69,11 +77,15 @@ impl Default for GlobalAssociationConfig {
             min_downward_ray_fraction: 1.0e-4,
             min_seed_quality: 1.0e-5,
             detection_pixel_sigma: 2.0,
-            projected_covariance_floor: 1.0e-8,
             imu_tilt_sigma: 0.02,
             height_sigma: 0.02,
             mahalanobis_gate: 9.21,
-            geometric_tolerance: 0.03,
+            min_inlier_fraction: 0.7,
+            class_mismatch_penalty: 4.0,
+            score_ratio: 1.05,
+            min_camera_height: 0.25,
+            max_camera_height: 2.0,
+            max_rms_px: 10.0,
             min_reprojection_depth: 0.01,
             max_work: 100_000,
         }
@@ -106,19 +118,27 @@ impl GlobalAssociationConfig {
             ("min_downward_ray_fraction", self.min_downward_ray_fraction),
             ("min_seed_quality", self.min_seed_quality),
             ("detection_pixel_sigma", self.detection_pixel_sigma),
-            (
-                "projected_covariance_floor",
-                self.projected_covariance_floor,
-            ),
             ("imu_tilt_sigma", self.imu_tilt_sigma),
             ("height_sigma", self.height_sigma),
             ("mahalanobis_gate", self.mahalanobis_gate),
-            ("geometric_tolerance", self.geometric_tolerance),
+            ("class_mismatch_penalty", self.class_mismatch_penalty),
+            ("min_camera_height", self.min_camera_height),
+            ("max_camera_height", self.max_camera_height),
+            ("max_rms_px", self.max_rms_px),
             ("min_reprojection_depth", self.min_reprojection_depth),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("global_localizer.{name} must be finite and > 0"));
             }
+        }
+        if !self.min_inlier_fraction.is_finite()
+            || !(0.0..=1.0).contains(&self.min_inlier_fraction)
+            || self.min_inlier_fraction == 0.0
+            || !self.score_ratio.is_finite()
+            || self.score_ratio <= 1.0
+            || self.min_camera_height >= self.max_camera_height
+        {
+            return Err("invalid global consensus, score ratio or camera height limits".into());
         }
         if self.max_work == 0 {
             return Err("global_localizer.max_work must be > 0".into());

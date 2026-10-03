@@ -1,16 +1,24 @@
-use coordinate_systems::{Field, Ground, Pixel};
+use std::collections::HashSet;
+
+use coordinate_systems::{Field, Pixel};
 use linear_algebra::{Orientation2, Point2};
-use localization_fagra::alignment::fit_ground_similarity;
-use nalgebra::{Matrix2, Matrix2x3, Vector2, Vector3};
-use types::visual_localization_next::{
+use localization_fagra::alignment::{GravityCamera, GroundPose};
+use nalgebra::{Matrix2, Vector2, Vector3};
+use ndarray::Array2;
+use types::visual_localization::{
     FieldMarkAssociation, GlobalLocalizationDebug, VisualAssociationSource,
 };
 
 use super::GlobalAssociationConfig;
 use crate::{
     AssociationResult, DetectedVisualFeature, GlobalAssociationInput, VisualFeatureClass,
-    features::raw_detections, map::LandmarkMap,
+    assignment::unique_assignment, features::filter_detections, map::LandmarkMap,
 };
+
+const HYPOTHESES: usize = 128;
+const PROPOSALS: usize = HYPOTHESES * 16;
+const CANDIDATES: usize = 8;
+const MIN_PAIR_PIXELS: f32 = 20.0;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Detection {
@@ -18,24 +26,13 @@ pub(crate) struct Detection {
     pub class: VisualFeatureClass,
     pub pixel: Point2<Pixel>,
     pub confidence: f32,
-    /// Ground intersection at unit camera height, relative to the camera XY.
     pub xy: Vector2<f32>,
-    pixel_covariance: Matrix2<f32>,
-    tilt_jacobian: Matrix2<f32>,
 }
 
-impl Detection {
-    pub(crate) fn covariance(&self, config: GlobalAssociationConfig) -> Matrix2<f32> {
-        self.pixel_covariance
-            + config.imu_tilt_sigma.powi(2) * self.tilt_jacobian * self.tilt_jacobian.transpose()
-    }
-}
-
-/// Only orientation is consumed. Neither local translation nor a ground-height guess
-/// participates in startup matching; the landmark fit determines camera height.
+/// Exposure-time tilt only: no optimizer translation or assumed standing height.
 pub(crate) fn preprocess(
     input: GlobalAssociationInput<'_>,
-) -> Option<(LandmarkMap, Vec<Detection>)> {
+) -> Option<(LandmarkMap, Vec<Detection>, usize)> {
     let config = *input.parameters;
     config.validate().ok()?;
     if input.visual_features.supported_feature_count() > config.max_input_detections
@@ -63,32 +60,13 @@ pub(crate) fn preprocess(
     {
         return None;
     }
-    let mut detections = raw_detections(input.visual_features)
-        .enumerate()
-        .filter(|(_, (_, feature))| {
-            (config.confidence_threshold..=1.0).contains(&feature.confidence)
-        })
-        .filter_map(|(id, (class, feature))| project_detection(input, id, class, feature))
-        .collect::<Vec<_>>();
-    detections.sort_by(|a, b| {
-        (b.confidence * map.rarity_weight(b.class))
-            .total_cmp(&(a.confidence * map.rarity_weight(a.class)))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    let mut retained = Vec::<Detection>::new();
-    for detection in detections {
-        if retained.iter().any(|other| {
-            other.class == detection.class
-                && (other.pixel - detection.pixel).inner.norm() <= config.duplicate_pixel_distance
-        }) {
-            continue;
-        }
-        if retained.len() == config.max_retained_detections {
-            return None;
-        }
-        retained.push(detection);
-    }
-    Some((map, retained))
+    let retained = filter_detections(input.visual_features, &map, config)?;
+    let observation_count = retained.len();
+    let detections = retained
+        .into_iter()
+        .filter_map(|(id, class, feature)| project_detection(input, id, class, feature))
+        .collect();
+    Some((map, detections, observation_count))
 }
 
 fn project_detection(
@@ -113,329 +91,511 @@ fn project_detection(
     {
         return None;
     }
-    let ray_jacobian = Matrix2x3::new(
-        -1.0 / ray.z,
-        0.0,
-        ray.x / ray.z.powi(2),
-        0.0,
-        -1.0 / ray.z,
-        ray.y / ray.z.powi(2),
-    );
-    let pixel_jacobian = Matrix2::from_columns(&pixel_rays.map(|r| ray_jacobian * r));
     let detection = Detection {
         id,
         class,
         pixel: feature.pixel,
         confidence: feature.confidence,
         xy: -ray.xy() / ray.z,
-        pixel_covariance: config.detection_pixel_sigma.powi(2)
-            * pixel_jacobian
-            * pixel_jacobian.transpose()
-            + Matrix2::identity() * config.projected_covariance_floor,
-        tilt_jacobian: Matrix2::from_columns(
-            &[Vector3::x(), Vector3::y()].map(|axis| ray_jacobian * axis.cross(&ray)),
-        ),
     };
     detection
         .xy
         .iter()
-        .chain(detection.covariance(config).iter())
         .all(|x| x.is_finite())
         .then_some(detection)
 }
 
-fn invariant_sigma(terms: &[(&Detection, Vector2<f32>)], config: GlobalAssociationConfig) -> f32 {
-    let mut pixel_variance = 0.0;
-    let mut tilt = Vector2::zeros();
-    for (detection, gradient) in terms {
-        pixel_variance += gradient.dot(&(detection.pixel_covariance * gradient));
-        tilt += detection.tilt_jacobian.transpose() * gradient;
-    }
-    pixel_variance.max(0.0).sqrt() + config.imu_tilt_sigma * tilt.norm()
+#[derive(Clone)]
+struct Candidate {
+    pose: GroundPose,
+    pairs: Vec<(usize, usize)>,
+    score: f64,
+    rms: f64,
 }
 
-fn cross(a: Vector2<f32>, b: Vector2<f32>) -> f32 {
-    a.x * b.y - a.y * b.x
+struct Prediction {
+    pixel: Vector2<f64>,
+    information: Matrix2<f64>,
 }
 
-fn select_seed(detections: &[Detection], config: GlobalAssociationConfig) -> Option<[usize; 3]> {
-    let mut seed = None;
-    let mut best: f32 = 0.0;
-    // A bounded seed pool changes only search order. Every retained detection must match.
-    for a in 0..detections.len().min(config.seed_pool_size) {
-        for b in a + 1..detections.len().min(config.seed_pool_size) {
-            for c in b + 1..detections.len().min(config.seed_pool_size) {
-                let u = detections[b].xy - detections[a].xy;
-                let v = detections[c].xy - detections[a].xy;
-                let quality = cross(u, v).abs()
-                    / (u.norm_squared() + v.norm_squared()).max(config.min_triangle_denominator);
-                if quality > best.max(config.min_seed_quality) {
-                    best = quality;
-                    seed = Some([a, b, c]);
-                }
-            }
-        }
-    }
-    seed
+#[derive(Clone, Copy)]
+struct Edge {
+    detection: usize,
+    landmark: usize,
+    benefit: f64,
+    squared_error: f64,
 }
 
 struct Search<'a> {
     input: GlobalAssociationInput<'a>,
     map: &'a LandmarkMap,
     detections: &'a [Detection],
-    order: Vec<usize>,
+    observation_count: usize,
+    camera: GravityCamera,
+    body_offset_z: f64,
     remaining_work: usize,
-    solution: Option<(Vec<(usize, usize)>, f32)>,
+    predictions: Vec<Option<Prediction>>,
+    edges: Vec<Edge>,
+    used_detections: Vec<bool>,
+    used_landmarks: Vec<bool>,
 }
 
 impl Search<'_> {
-    fn spend(&mut self) -> Option<()> {
-        self.remaining_work = self.remaining_work.checked_sub(1)?;
+    fn spend(&mut self, work: usize) -> Option<()> {
+        self.remaining_work = self.remaining_work.checked_sub(work)?;
         Some(())
     }
 
-    /// Propagate a common positive scale interval through every pair. This is a
-    /// scale-independent necessary condition, not a certificate; full fits use pixels.
-    fn compatible(
-        &mut self,
-        pairs: &[(usize, usize)],
-        mut scale: (f32, f32),
-    ) -> Option<Option<(f32, f32)>> {
-        let (&(d, m), previous) = pairs.split_last()?;
-        let config = *self.input.parameters;
-        for &(e, n) in previous {
-            self.spend()?;
-            if m == n {
-                return Some(None);
-            }
-            let a = &self.detections[d];
-            let b = &self.detections[e];
-            let edge = a.xy - b.xy;
-            let distance = edge.norm();
-            if distance < config.min_pair_distance {
-                return Some(None);
-            }
-            let direction = edge / distance;
-            let noise = config.mahalanobis_gate.sqrt()
-                * invariant_sigma(&[(a, direction), (b, -direction)], config);
-            let metric = (self.map.landmarks[m].xy - self.map.landmarks[n].xy)
-                .inner
-                .norm();
-            scale.0 = scale
-                .0
-                .max((metric - config.geometric_tolerance) / (distance + noise));
-            if distance > noise {
-                scale.1 = scale
-                    .1
-                    .min((metric + config.geometric_tolerance) / (distance - noise));
-            }
-            if scale.0 > scale.1 || scale.1 <= 0.0 {
-                return Some(None);
-            }
-        }
-        Some(Some(scale))
+    fn valid_pose(&self, pose: GroundPose) -> bool {
+        let config = self.input.parameters;
+        pose.is_valid()
+            && pose.height > self.body_offset_z
+            && (f64::from(config.min_camera_height)..=f64::from(config.max_camera_height))
+                .contains(&pose.height)
+            && self
+                .input
+                .heading
+                .is_none_or(|heading| heading.accepts(Orientation2::<Field, f64>::new(pose.yaw)))
     }
 
-    fn visit(&mut self, pairs: &mut Vec<(usize, usize)>, scale: (f32, f32)) -> Option<()> {
-        self.spend()?;
-        if pairs.len() == self.order.len() {
-            if let Some(rms) = self.validate_fit(pairs) {
-                let key = if self.input.heading.is_some() {
-                    let mut key = pairs.clone();
-                    key.sort_by_key(|&(d, _)| self.detections[d].id);
-                    key
-                } else {
-                    canonical_pairs(pairs, self.detections, self.map)
-                };
-                if self
-                    .solution
-                    .as_ref()
-                    .is_some_and(|(prior, _)| *prior != key)
-                {
-                    return None;
-                }
-                self.solution = Some((key, rms));
-            }
-            return Some(());
-        }
-        let d = self.order[pairs.len()];
-        for &m in self.map.landmarks_for_class(self.detections[d].class) {
-            self.spend()?;
-            pairs.push((d, m));
-            if let Some(next) = self.compatible(pairs, scale)? {
-                self.visit(pairs, next)?;
-            }
-            pairs.pop();
+    fn predict(&mut self, pose: GroundPose) -> Option<()> {
+        self.spend(self.map.landmarks.len())?;
+        let config = self.input.parameters;
+        for (slot, landmark) in self.predictions.iter_mut().zip(&self.map.landmarks) {
+            *slot = self
+                .camera
+                .project(pose, landmark.xy.inner.coords.cast())
+                .and_then(|projection| {
+                    let covariance = Matrix2::identity()
+                        * f64::from(config.detection_pixel_sigma).powi(2)
+                        + projection.tilt_jacobian
+                            * projection.tilt_jacobian.transpose()
+                            * f64::from(config.imu_tilt_sigma).powi(2);
+                    Some(Prediction {
+                        pixel: projection.pixel,
+                        information: covariance.try_inverse()?,
+                    })
+                });
         }
         Some(())
     }
 
-    fn validate_fit(&mut self, pairs: &[(usize, usize)]) -> Option<f32> {
-        // Account for fitting and verification as well as search branching.
-        for _ in pairs {
-            self.spend()?;
-        }
-        let fit = fit_ground_similarity(pairs.iter().map(|&(d, m)| {
-            (
-                linear_algebra::Vector2::<Ground, f64>::wrap(self.detections[d].xy.cast::<f64>()),
-                Point2::wrap(self.map.landmarks[m].xy.inner.cast::<f64>()),
-            )
-        }))
-        .ok()?;
-        let height = fit.camera_height;
-        if let Some(heading) = self.input.heading {
-            let yaw = fit.rotation.angle();
-            if !heading.accepts(Orientation2::<Field, f64>::new(yaw)) {
-                return None;
-            }
-        }
-        let input = self.input;
-        let config = *input.parameters;
-        let camera_to_level = (input.robot_to_ground.inner
-            * input.robot_to_camera.inner.rotation.inverse())
-        .cast::<f64>();
-        // Height of the body origin, not an assumption about foot contact.
-        let lever = input.robot_to_ground.inner.cast::<f64>()
-            * input
-                .robot_to_camera
-                .inner
-                .inverse()
-                .translation
-                .vector
-                .cast::<f64>();
-        if height - lever.z <= 0.0 {
+    fn edge(&self, detection: usize, landmark: usize) -> Option<Edge> {
+        let observation = &self.detections[detection];
+        let prediction = self.predictions[landmark].as_ref()?;
+        let config = self.input.parameters;
+        let penalty = class_penalty(
+            observation.class,
+            self.map.landmarks[landmark].class,
+            config,
+        )?;
+        let error = prediction.pixel - observation.pixel.inner.coords.cast::<f64>();
+        let distance = error.dot(&(prediction.information * error)) + penalty;
+        let gate = f64::from(config.mahalanobis_gate);
+        if !distance.is_finite() || !(0.0..gate).contains(&distance) {
             return None;
         }
-        for i in 0..3 {
-            for j in 0..i {
-                if (self.detections[pairs[i].0].xy - self.detections[pairs[j].0].xy).norm() as f64
-                    * height
-                    < config.min_detection_baseline as f64
-                {
-                    return None;
+        Some(Edge {
+            detection,
+            landmark,
+            benefit: (gate - distance) * f64::from(observation.confidence),
+            squared_error: error.norm_squared(),
+        })
+    }
+
+    fn score(&mut self, pose: GroundPose) -> Option<Candidate> {
+        self.predict(pose)?;
+        // Each assignment row scans the fixed field map; iteration counts are bounded separately.
+        self.spend(self.detections.len())?;
+        self.edges.clear();
+        for detection in 0..self.detections.len() {
+            for landmark in 0..self.map.landmarks.len() {
+                if let Some(edge) = self.edge(detection, landmark) {
+                    self.edges.push(edge);
                 }
             }
         }
+        self.edges.sort_unstable_by(|a, b| {
+            b.benefit
+                .total_cmp(&a.benefit)
+                .then_with(|| (a.detection, a.landmark).cmp(&(b.detection, b.landmark)))
+        });
+        self.used_detections.fill(false);
+        self.used_landmarks.fill(false);
+        let mut pairs = Vec::new();
+        // ponytail: greedy assignment screens hypotheses; exact assignment certifies the final pose.
+        for edge in &self.edges {
+            if self.used_detections[edge.detection] || self.used_landmarks[edge.landmark] {
+                continue;
+            }
+            self.used_detections[edge.detection] = true;
+            self.used_landmarks[edge.landmark] = true;
+            pairs.push((edge.detection, edge.landmark));
+        }
+        pairs.sort_unstable();
+        self.candidate(pose, pairs)
+    }
+
+    fn candidate(&self, pose: GroundPose, pairs: Vec<(usize, usize)>) -> Option<Candidate> {
+        let mut score = 0.0;
         let mut squared = 0.0;
-        for &(d, m) in pairs {
-            let field = self.map.landmarks[m].xy.inner.coords.cast::<f64>();
-            let xy = fit.rotation.inner.inverse() * (field - fit.camera_position.inner.coords);
-            let leveled = Vector3::new(xy.x, xy.y, -height);
-            let camera = camera_to_level.inverse() * leveled;
-            if camera.z <= f64::from(config.min_reprojection_depth) {
-                return None;
-            }
-            let pixel = Vector2::new(
-                input.camera_intrinsic.focals.x as f64 * camera.x / camera.z
-                    + input.camera_intrinsic.optical_center.x() as f64,
-                input.camera_intrinsic.focals.y as f64 * camera.y / camera.z
-                    + input.camera_intrinsic.optical_center.y() as f64,
-            );
-            let residual = pixel - self.detections[d].pixel.inner.coords.cast::<f64>();
-            // Pixel gate includes attitude uncertainty propagated at this bearing.
-            let projection = Matrix2x3::new(
-                1.0 / camera.z,
-                0.0,
-                -camera.x / camera.z.powi(2),
-                0.0,
-                1.0 / camera.z,
-                -camera.y / camera.z.powi(2),
-            );
-            let projection =
-                nalgebra::Matrix2::from_diagonal(&input.camera_intrinsic.focals.cast::<f64>())
-                    * projection;
-            let tilt = nalgebra::Matrix2::from_columns(
-                &[Vector3::x(), Vector3::y()]
-                    .map(|axis| projection * (camera_to_level.inverse() * axis.cross(&leveled))),
-            );
-            let covariance = nalgebra::Matrix2::identity()
-                * (config.detection_pixel_sigma as f64).powi(2)
-                + tilt * tilt.transpose() * (config.imu_tilt_sigma as f64).powi(2);
-            if residual.dot(&(covariance.try_inverse()? * residual))
-                > config.mahalanobis_gate as f64
-            {
-                return None;
-            }
-            squared += residual.norm_squared();
+        for &(d, m) in &pairs {
+            let edge = self.edge(d, m)?;
+            score += edge.benefit;
+            squared += edge.squared_error;
         }
-        // Preserve the metric debug field: distance RMS after fitting the scale.
-        let mut metric_squared = 0.0;
-        let mut count = 0;
-        for (i, &(d, m)) in pairs.iter().enumerate() {
-            for &(e, n) in &pairs[..i] {
-                self.spend()?;
-                let distance =
-                    (self.detections[d].xy - self.detections[e].xy).norm() as f64 * height;
-                let map_distance = (self.map.landmarks[m].xy - self.map.landmarks[n].xy)
-                    .inner
-                    .norm() as f64;
-                metric_squared += (distance - map_distance).powi(2);
-                count += 1;
+        let rms = if pairs.is_empty() {
+            f64::INFINITY
+        } else {
+            (squared / pairs.len() as f64).sqrt()
+        };
+        let mut candidate = Candidate {
+            pose,
+            pairs,
+            score,
+            rms,
+        };
+        self.canonicalize(&mut candidate);
+        Some(candidate)
+    }
+
+    fn canonicalize(&self, candidate: &mut Candidate) {
+        if self.input.heading.is_some() {
+            return;
+        }
+        let flip = candidate
+            .pairs
+            .iter()
+            .filter_map(|&(d, m)| {
+                let point = self.map.landmarks[m].xy;
+                (point.x() != 0.0 || point.y() != 0.0).then_some((self.detections[d].id, point))
+            })
+            .min_by_key(|&(id, _)| id)
+            .is_some_and(|(_, p)| {
+                if p.x() != 0.0 {
+                    p.x() > 0.0
+                } else {
+                    p.y() > 0.0
+                }
+            });
+        if flip {
+            candidate.pose.position = -candidate.pose.position;
+            candidate.pose.yaw += std::f64::consts::PI;
+            for (_, m) in &mut candidate.pairs {
+                *m = self.map.symmetric_id(*m);
             }
         }
-        squared
-            .is_finite()
-            .then_some((metric_squared / count as f64).sqrt() as f32)
+    }
+
+    fn refine(&mut self, mut candidate: Candidate) -> Option<Candidate> {
+        for _ in 0..2 {
+            // Reserve the ceiling for eight normal-equation builds and four trial evaluations/step.
+            self.spend(48 * candidate.pairs.len())?;
+            let observations = candidate
+                .pairs
+                .iter()
+                .map(|&(d, m)| {
+                    (
+                        self.map.landmarks[m].xy.inner.coords.cast::<f64>(),
+                        self.detections[d].pixel.inner.coords.cast::<f64>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let Some(pose) = self
+                .camera
+                .refine(candidate.pose, &observations, |pose| self.valid_pose(pose))
+            else {
+                break;
+            };
+            let next = self.score(pose)?;
+            let unchanged = next.pairs == candidate.pairs;
+            candidate = next;
+            if unchanged {
+                break;
+            }
+        }
+        Some(candidate)
+    }
+
+    fn consensus(&self, candidate: &Candidate) -> bool {
+        let config = self.input.parameters;
+        let minimum = minimum_inliers(self.observation_count, config);
+        candidate.pairs.len() >= minimum
+            && candidate.rms <= f64::from(config.max_rms_px)
+            && spread(
+                &candidate.pairs,
+                self.detections,
+                self.map,
+                candidate.pose.height,
+                config,
+            )
+    }
+
+    fn certify(&mut self, winner: Candidate) -> Option<Candidate> {
+        self.predict(winner.pose)?;
+        let n = self.detections.len();
+        let m = self.map.landmarks.len();
+        self.spend(n.checked_mul(n)?.checked_mul(n + 1)?)?;
+        let mut benefits = Array2::zeros((n, m + n));
+        for d in 0..n {
+            for l in 0..m {
+                if let Some(edge) = self.edge(d, l) {
+                    benefits[(d, l)] = edge.benefit as f32;
+                }
+            }
+        }
+        let pairs = unique_assignment(&mut benefits, m, self.input.parameters.score_ratio)?;
+        let winner = self.candidate(winner.pose, pairs)?;
+        self.consensus(&winner).then_some(winner)
     }
 }
 
-fn canonical_pairs(
+fn class_penalty(
+    observed: VisualFeatureClass,
+    landmark: VisualFeatureClass,
+    config: &GlobalAssociationConfig,
+) -> Option<f64> {
+    use VisualFeatureClass::{LSpot, TSpot, XSpot};
+    if observed == landmark {
+        Some(0.0)
+    } else if matches!(observed, LSpot | TSpot | XSpot) && matches!(landmark, LSpot | TSpot | XSpot)
+    {
+        Some(f64::from(config.class_mismatch_penalty))
+    } else {
+        None
+    }
+}
+
+fn minimum_inliers(observations: usize, config: &GlobalAssociationConfig) -> usize {
+    if observations == 3 {
+        config.min_inliers
+    } else {
+        config
+            .min_inliers
+            .max(4)
+            .max((observations as f32 * config.min_inlier_fraction).ceil() as usize)
+    }
+}
+
+fn spread(
     pairs: &[(usize, usize)],
     detections: &[Detection],
     map: &LandmarkMap,
-) -> Vec<(usize, usize)> {
-    let mut key = pairs.to_vec();
-    key.sort_by_key(|&(d, _)| detections[d].id);
-    let flip = key
-        .iter()
-        .find_map(|&(_, m)| {
-            let p = map.landmarks[m].xy;
-            if p.x() != 0.0 {
-                Some(p.x() > 0.0)
-            } else if p.y() != 0.0 {
-                Some(p.y() > 0.0)
-            } else {
-                None
+    height: f64,
+    config: &GlobalAssociationConfig,
+) -> bool {
+    let n = pairs.len().min(config.seed_pool_size);
+    for a in 0..n {
+        for b in a + 1..n {
+            for c in b + 1..n {
+                let [(da, ma), (db, mb), (dc, mc)] = [pairs[a], pairs[b], pairs[c]];
+                let q = [detections[da].xy, detections[db].xy, detections[dc].xy];
+                let p = [
+                    map.landmarks[ma].xy.inner.coords,
+                    map.landmarks[mb].xy.inner.coords,
+                    map.landmarks[mc].xy.inner.coords,
+                ];
+                let quality = |points: [Vector2<f32>; 3]| {
+                    let u = points[1] - points[0];
+                    let v = points[2] - points[0];
+                    (u.x * v.y - u.y * v.x).abs()
+                        / (u.norm_squared() + v.norm_squared()).max(config.min_triangle_denominator)
+                };
+                if quality(q) > config.min_seed_quality
+                    && quality(p) > config.min_seed_quality
+                    && (0..3).all(|i| {
+                        (0..i).all(|j| {
+                            f64::from((q[i] - q[j]).norm()) * height
+                                >= f64::from(config.min_detection_baseline)
+                        })
+                    })
+                {
+                    return true;
+                }
             }
-        })
-        .unwrap_or(false);
-    if flip {
-        for (_, m) in &mut key {
-            *m = map.symmetric_id(*m);
         }
     }
-    key
+    false
+}
+
+fn keep(candidates: &mut Vec<Candidate>, candidate: Candidate) {
+    if candidate.pairs.len() < 3 {
+        return;
+    }
+    if let Some(index) = candidates.iter().position(|other| {
+        let compatible = candidate
+            .pairs
+            .iter()
+            .all(|&(d, m)| other.pairs.iter().all(|&(e, n)| d != e || m == n));
+        let yaw = candidate.pose.yaw - other.pose.yaw;
+        candidate.pairs == other.pairs
+            || (compatible
+                && (candidate.pose.position - other.pose.position).norm() <= 0.4
+                && yaw.sin().atan2(yaw.cos()).abs() <= 0.12
+                && (candidate.pose.height - other.pose.height).abs() <= 0.12)
+    }) {
+        if candidates[index].score >= candidate.score {
+            return;
+        }
+        candidates.remove(index);
+    }
+    candidates.push(candidate);
+    candidates.sort_unstable_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.pairs.cmp(&b.pairs))
+    });
+    candidates.truncate(CANDIDATES);
+}
+
+/// Per-frame reproducible sampling; no global RNG state, workers or parallel loops.
+fn draw(state: &mut u64, limit: usize) -> usize {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state as usize % limit
 }
 
 pub(crate) fn associate(input: GlobalAssociationInput<'_>) -> Option<AssociationResult> {
     if input.heading.is_some_and(|heading| !heading.is_valid()) {
         return None;
     }
-    let (map, detections) = preprocess(input)?;
-    if detections.len() < input.parameters.min_inliers || detections.len() > map.landmarks.len() {
+    let (map, detections, observation_count) = preprocess(input)?;
+    let minimum = minimum_inliers(observation_count, input.parameters);
+    if detections.len() < minimum || map.landmarks.len() < minimum {
         return None;
     }
-    let seed = select_seed(&detections, *input.parameters)?;
-    let order = seed
-        .into_iter()
-        .chain((0..detections.len()).filter(|i| !seed.contains(i)))
-        .collect();
+    let camera_to_level = (input.robot_to_ground.inner
+        * input.robot_to_camera.inner.rotation.inverse())
+    .cast::<f64>();
+    let body_offset_z = (input.robot_to_ground.inner.cast::<f64>()
+        * input
+            .robot_to_camera
+            .inner
+            .inverse()
+            .translation
+            .vector
+            .cast::<f64>())
+    .z;
     let mut search = Search {
         input,
         map: &map,
         detections: &detections,
-        order,
+        observation_count,
+        camera: GravityCamera::new(
+            camera_to_level.to_rotation_matrix().into_inner(),
+            input.camera_intrinsic.focals.cast(),
+            input.camera_intrinsic.optical_center.inner.coords.cast(),
+            f64::from(input.parameters.min_reprojection_depth),
+        )?,
+        body_offset_z,
         remaining_work: input.parameters.max_work,
-        solution: None,
+        predictions: (0..map.landmarks.len()).map(|_| None).collect(),
+        edges: Vec::with_capacity(detections.len() * map.landmarks.len()),
+        used_detections: vec![false; detections.len()],
+        used_landmarks: vec![false; map.landmarks.len()],
     };
-    search.visit(&mut Vec::new(), (0.0, f32::INFINITY))?;
-    // A validation exhausting the budget must not leave an earlier candidate certified.
-    if search.remaining_work == 0 {
+    let mut pool = Vec::new();
+    let mut weight = 0.0;
+    for a in 0..detections.len() {
+        for b in a + 1..detections.len() {
+            search.spend(1)?;
+            let distance = (detections[a].pixel - detections[b].pixel).inner.norm();
+            if distance < MIN_PAIR_PIXELS {
+                continue;
+            }
+            weight += f64::from(
+                distance.min(200.0)
+                    * detections[a].confidence
+                    * detections[b].confidence
+                    * map.rarity_weight(detections[a].class)
+                    * map.rarity_weight(detections[b].class),
+            );
+            pool.push((weight, a, b));
+        }
+    }
+    if pool.is_empty() || !weight.is_finite() || weight <= 0.0 {
         return None;
     }
-    let (pairs, rms) = search.solution?;
+    let mut random = detections.iter().fold(0x9e3779b97f4a7c15_u64, |state, d| {
+        state.rotate_left(7)
+            ^ u64::from(d.pixel.x().to_bits())
+            ^ (u64::from(d.pixel.y().to_bits()) << 32)
+    }) | 1;
+    let mut visited = HashSet::with_capacity(PROPOSALS);
+    let mut candidates = Vec::with_capacity(CANDIDATES + 1);
+    let mut hypotheses = 0;
+    for _ in 0..PROPOSALS {
+        if hypotheses == HYPOTHESES {
+            break;
+        }
+        search.spend(1)?;
+        let target = draw(&mut random, 1_000_000) as f64 / 1_000_000.0 * weight;
+        let &(_, a, b) = &pool[pool
+            .partition_point(|&(w, _, _)| w < target)
+            .min(pool.len() - 1)];
+        let left = map.landmarks_for_class(detections[a].class);
+        let right = map.landmarks_for_class(detections[b].class);
+        if left.is_empty() || right.is_empty() {
+            continue;
+        }
+        let m = left[draw(&mut random, left.len())];
+        let n = right[draw(&mut random, right.len())];
+        if m == n || !visited.insert((a, b, m, n)) {
+            continue;
+        }
+        let field = [
+            map.landmarks[m].xy.inner.coords.cast::<f64>(),
+            map.landmarks[n].xy.inner.coords.cast::<f64>(),
+        ];
+        if (field[0] - field[1]).norm() < f64::from(input.parameters.min_detection_baseline) {
+            continue;
+        }
+        let Some(pose) = GroundPose::from_pair(
+            [detections[a].xy.cast(), detections[b].xy.cast()],
+            field,
+            f64::from(input.parameters.min_pair_distance),
+        ) else {
+            continue;
+        };
+        if !search.valid_pose(pose) {
+            continue;
+        }
+        hypotheses += 1;
+        keep(&mut candidates, search.score(pose)?);
+    }
+    let mut refined = Vec::with_capacity(CANDIDATES + 1);
+    for candidate in candidates {
+        let candidate = search.refine(candidate)?;
+        if search.consensus(&candidate) {
+            keep(&mut refined, candidate);
+        }
+    }
+    let winner = refined.first()?;
+    if refined
+        .get(1)
+        .is_some_and(|rival| winner.score <= rival.score * f64::from(input.parameters.score_ratio))
+    {
+        return None;
+    }
+    // Exact assignment checks the winning pose only. RANSAC does not prove absence of unsampled poses.
+    let mut winner = search.certify(winner.clone())?;
+    winner.pairs.sort_by_key(|&(d, _)| detections[d].id);
+    let mut squared = 0.0;
+    let mut count = 0;
+    for (i, &(d, m)) in winner.pairs.iter().enumerate() {
+        for &(e, n) in &winner.pairs[..i] {
+            search.spend(1)?;
+            let distance =
+                f64::from((detections[d].xy - detections[e].xy).norm()) * winner.pose.height;
+            let metric = f64::from((map.landmarks[m].xy - map.landmarks[n].xy).inner.norm());
+            squared += (distance - metric).powi(2);
+            count += 1;
+        }
+    }
     Some(AssociationResult {
-        associations: pairs
+        associations: winner
+            .pairs
             .iter()
             .map(|&(d, m)| FieldMarkAssociation {
                 detection: detections[d].pixel,
@@ -444,8 +604,8 @@ pub(crate) fn associate(input: GlobalAssociationInput<'_>) -> Option<Association
             .collect(),
         source: VisualAssociationSource::Global,
         debug: Some(GlobalLocalizationDebug {
-            association_count: pairs.len(),
-            pairwise_distance_rms: rms,
+            association_count: winner.pairs.len(),
+            pairwise_distance_rms: (squared / count as f64).sqrt() as f32,
         }),
     })
 }

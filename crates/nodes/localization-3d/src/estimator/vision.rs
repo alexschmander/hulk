@@ -12,7 +12,7 @@ use nalgebra::SMatrix;
 use ros_z::time::Time;
 use types::camera_geometry::CameraGeometry;
 use types::{
-    time_wrapper::TimeWrapper, visual_localization_next::VisualLocalizationFrame,
+    time_wrapper::TimeWrapper, visual_localization::VisualLocalizationFrame,
     visual_odometry::VisualOdometer,
 };
 
@@ -24,7 +24,7 @@ pub(super) struct PendingVisual {
 }
 
 impl Estimator {
-    pub fn field_heading_at(&self, time: Time) -> Option<Orientation2<Field, f64>> {
+    pub(crate) fn field_heading_at(&self, time: Time) -> Option<Orientation2<Field, f64>> {
         let (segment, tau) = self.segment_and_tau(time).ok()?;
         let pose = self
             .spline(control_keys(&self.controls, segment).ok()?)
@@ -39,7 +39,7 @@ impl Estimator {
         ))
     }
 
-    pub fn accepted_visual_rms(&self) -> Option<f64> {
+    pub(crate) fn accepted_visual_rms(&self) -> Option<f64> {
         self.frame_rms(self.latest_visual_frame.as_ref()?)
     }
 
@@ -144,7 +144,10 @@ impl Estimator {
         Ok(())
     }
 
-    pub fn ingest_visual(&mut self, frame: TimeWrapper<VisualLocalizationFrame>) -> Result<bool> {
+    pub(crate) fn ingest_visual(
+        &mut self,
+        frame: TimeWrapper<VisualLocalizationFrame>,
+    ) -> Result<bool> {
         let time = frame.time;
         let Some((segment, tau)) = self.check_time(time, "visual localization")? else {
             return Ok(false);
@@ -210,7 +213,7 @@ impl Estimator {
         Ok(true)
     }
 
-    pub fn ingest_visual_odometry(
+    pub(crate) fn ingest_visual_odometry(
         &mut self,
         sample: VisualOdometer,
         previous_camera: Option<&CameraGeometry>,

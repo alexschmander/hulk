@@ -42,7 +42,7 @@ impl TimingParameters {
     pub(crate) fn interval_ns(&self) -> i64 {
         self.preintegration_interval.as_nanos() as i64
     }
-    pub fn window_ns(&self) -> i64 {
+    pub(crate) fn window_ns(&self) -> i64 {
         self.optimization_window.as_nanos() as i64
     }
 }
@@ -328,7 +328,7 @@ fn default_tracking_timeout() -> Duration {
 impl Localization3dParameters {
     /// Only solver settings and pure acceptance/lifecycle gates are live. Everything
     /// else is baked into graph factors, marginal priors, interval caches or resources.
-    pub fn validate_update(&self, candidate: &Self) -> Result<(), String> {
+    pub(crate) fn validate_update(&self, candidate: &Self) -> Result<(), String> {
         candidate.validate()?;
         let mut live = self.clone();
         live.solver = candidate.solver.clone();
@@ -349,7 +349,7 @@ impl Localization3dParameters {
         Ok(())
     }
 
-    pub fn validate(&self) -> std::result::Result<(), String> {
+    pub(crate) fn validate(&self) -> std::result::Result<(), String> {
         let t = &self.timing;
         for duration in [
             t.trajectory_spacing,
@@ -546,8 +546,10 @@ mod tests {
 
     #[test]
     fn legacy_json_defaults_and_grid_validation() {
-        let configured: Localization3dParameters =
-            json5::from_str(include_str!("parameters_fixture.json5")).unwrap();
+        let configured: Localization3dParameters = json5::from_str(include_str!(
+            "../../../../etc/parameters/base/localization3d.json5"
+        ))
+        .unwrap();
         configured.validate().unwrap();
         let mut legacy = serde_json::to_value(&configured).unwrap();
         for key in ["timing", "model", "solver", "visual", "inputs"] {

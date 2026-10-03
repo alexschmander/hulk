@@ -11,7 +11,7 @@ use serde::Deserialize;
 use types::{
     field_dimensions::FieldDimensions,
     object_detection::{Object, RobocupObjectLabel},
-    visual_localization_next::AssociationGeometry,
+    visual_localization::AssociationGeometry,
 };
 
 #[path = "support/geometry_oracle.rs"]

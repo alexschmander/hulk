@@ -14,7 +14,7 @@ use types::{
     field_dimensions::FieldDimensions,
     localization::{LocalizationEstimate, LocalizationState, LocalizationStatus},
     time_wrapper::TimeWrapper,
-    visual_localization_next::{VisualAssociationSource, VisualLocalizationFrame},
+    visual_localization::{VisualAssociationSource, VisualLocalizationFrame},
     visual_odometry::VisualOdometer,
 };
 
@@ -42,7 +42,7 @@ pub struct Localization {
 }
 
 impl Localization {
-    pub fn has_measurement_gap(&self, time: Time) -> bool {
+    pub(crate) fn has_measurement_gap(&self, time: Time) -> bool {
         time > self
             .estimator
             .latest_time()
@@ -108,7 +108,7 @@ impl Localization {
         Ok(())
     }
 
-    pub fn max_camera_gap(&self) -> std::time::Duration {
+    pub(crate) fn max_camera_gap(&self) -> std::time::Duration {
         self.parameters.timing.max_camera_gap
     }
 

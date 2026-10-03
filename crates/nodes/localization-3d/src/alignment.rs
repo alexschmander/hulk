@@ -1,20 +1,18 @@
 use coordinate_systems::{Camera, Field, Local, Robot};
-use linear_algebra::{
-    IntoTransform, Isometry2, Isometry3, Orientation2, Point2, Rotation3, Vector2, Vector3,
-};
-use localization_fagra::alignment::fit_ground_similarity;
+use linear_algebra::{IntoTransform, Isometry2, Isometry3, Orientation2, Rotation3, Vector3};
+use localization_fagra::alignment::{GravityCamera, fit_ground_similarity};
 use projection::intrinsic::Intrinsic;
 use types::localization::HeadingConstraint;
-use types::visual_localization_next::FieldMarkAssociation;
-use types::visual_localization_next::VisualLocalizationFrame;
+use types::visual_localization::FieldMarkAssociation;
+use types::visual_localization::VisualLocalizationFrame;
 
 use crate::parameters::VisualParameters;
 
-pub fn valid_visual_rms(rms: Option<f64>, parameters: &VisualParameters) -> bool {
+pub(crate) fn valid_visual_rms(rms: Option<f64>, parameters: &VisualParameters) -> bool {
     rms.is_some_and(|rms| rms.is_finite() && rms <= parameters.max_rms_px)
 }
 
-pub fn reprojection_rms(
+pub(crate) fn reprojection_rms(
     associations: &[FieldMarkAssociation],
     field_to_camera: &nalgebra::Isometry3<f64>,
     focals: nalgebra::Vector2<f64>,
@@ -37,7 +35,7 @@ pub fn reprojection_rms(
     rms.is_finite().then_some(rms)
 }
 
-pub fn seed_recovery_alignment(
+pub(crate) fn seed_recovery_alignment(
     frame: &mut VisualLocalizationFrame,
     robot_to_local: Rotation3<Robot, Local>,
     heading: HeadingConstraint,
@@ -83,8 +81,8 @@ pub fn seed_recovery_alignment(
     Some((pose, alignment))
 }
 
-pub fn valid_visual_frame(
-    frame: &types::visual_localization_next::VisualLocalizationFrame,
+pub(crate) fn valid_visual_frame(
+    frame: &types::visual_localization::VisualLocalizationFrame,
     parameters: &VisualParameters,
 ) -> bool {
     let associations = &frame.associations;
@@ -116,7 +114,7 @@ pub fn valid_visual_frame(
 
 /// Fit camera height and field alignment from IMU tilt and bearings.
 /// Startup canonicalizes the field half; recovery selects it from trusted heading.
-pub fn seed_alignment(
+pub(crate) fn seed_alignment(
     robot_to_local: Rotation3<Robot, Local>,
     robot_to_camera: Isometry3<Robot, Camera>,
     intrinsic: Intrinsic,
@@ -136,13 +134,30 @@ pub fn seed_alignment(
             return None;
         }
         points.push((
-            Vector2::<Local, f64>::wrap(-ray.inner.xy() / ray.z()),
-            Point2::wrap(a.field_point.inner.coords.xy().cast::<f64>().into()),
+            -ray.inner.xy() / ray.z(),
+            a.field_point.inner.coords.xy().cast::<f64>(),
         ));
     }
     let fit = fit_ground_similarity(points.into_iter()).ok()?;
     let offset = rotation * camera_to_robot.translation().coords();
-    let body_height = fit.camera_height - offset.z();
+    let camera = GravityCamera::new(
+        camera_rotation.inner.to_rotation_matrix().into_inner(),
+        intrinsic.focals.cast(),
+        intrinsic.optical_center.inner.coords.cast(),
+        parameters.min_reprojection_depth,
+    )?;
+    let observations = associations
+        .iter()
+        .map(|a| {
+            (
+                a.field_point.inner.coords.xy().cast::<f64>(),
+                a.detection.inner.coords.cast::<f64>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let fit = camera.refine(fit, &observations, |pose| pose.height > offset.z())?;
+    let fitted_rotation = nalgebra::UnitComplex::new(fit.yaw);
+    let body_height = fit.height - offset.z();
     if body_height <= 0.0 {
         return None;
     }
@@ -153,8 +168,8 @@ pub fn seed_alignment(
     .cast()
     .framed_transform();
     let mut alignment = nalgebra::Isometry2::from_parts(
-        (fit.camera_position.inner.coords - fit.rotation.inner * offset.inner.xy()).into(),
-        fit.rotation.inner,
+        (fit.position - fitted_rotation * offset.inner.xy()).into(),
+        fitted_rotation,
     );
     let framed_alignment: Isometry2<Local, Field, f64> = alignment.framed_transform();
     let field_to_camera = robot_to_camera.inner.cast::<f64>()
@@ -194,12 +209,63 @@ mod tests {
     use linear_algebra::point;
 
     #[test]
+    fn recorded_ground_fit_is_refined_before_recovery_pixel_validation() {
+        let frame: serde_json::Value = serde_json::from_str(include_str!(
+            "../../field_mark_association/src/global_association/recorded_frame.json"
+        ))
+        .unwrap();
+        let mut associations = frame["detections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| FieldMarkAssociation {
+                detection: serde_json::from_value(d["pixel"].clone()).unwrap(),
+                field_point: point![
+                    d["field"][0].as_f64().unwrap() as f32,
+                    d["field"][1].as_f64().unwrap() as f32,
+                    0.0
+                ],
+            })
+            .collect::<Vec<_>>();
+        let camera: Isometry3<Robot, Camera> =
+            serde_json::from_value(frame["robot_to_camera"].clone()).unwrap();
+        let intrinsic: Intrinsic = serde_json::from_value(frame["intrinsics"].clone()).unwrap();
+        let parameters = VisualParameters::default();
+        let (pose, alignment) = seed_alignment(
+            Rotation3::from_euler_angles(
+                frame["roll"].as_f64().unwrap() as f32,
+                frame["pitch"].as_f64().unwrap() as f32,
+                0.0,
+            ),
+            camera,
+            intrinsic,
+            &mut associations,
+            false,
+            &parameters,
+        )
+        .unwrap();
+        let transform = (camera * pose.inverse() * alignment.to_3d().inverse())
+            .inner
+            .cast::<f64>();
+        let rms = reprojection_rms(
+            &associations,
+            &transform,
+            intrinsic.focals.cast(),
+            intrinsic.optical_center.inner.cast(),
+            &parameters,
+        )
+        .unwrap();
+        assert!((rms - 4.146).abs() < 0.01, "pixel RMS {rms}");
+        assert!((pose.translation().z() - 0.448).abs() < 0.01);
+    }
+
+    #[test]
     fn visual_gates_change_admission_and_pixel_validation() {
         let mut parameters = VisualParameters::default();
         let frame = VisualLocalizationFrame {
             epoch: 0,
             generation: 0,
-            source: types::visual_localization_next::VisualAssociationSource::Tracking,
+            source: types::visual_localization::VisualAssociationSource::Tracking,
             robot_to_camera: Isometry3::identity(),
             camera_intrinsic: Intrinsic::default(),
             associations: vec![

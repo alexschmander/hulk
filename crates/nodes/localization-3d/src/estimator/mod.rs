@@ -25,7 +25,7 @@ use projection::intrinsic::Intrinsic;
 use ros_z::time::Time;
 use types::{
     field_dimensions::FieldDimensions, localization::LocalizationEstimate,
-    time_wrapper::TimeWrapper, visual_localization_next::VisualLocalizationFrame,
+    time_wrapper::TimeWrapper, visual_localization::VisualLocalizationFrame,
 };
 
 use crate::heading::HeadingReference;
@@ -72,7 +72,7 @@ fagra::factors! {
 
 type Graph = Problem<States, Factors>;
 
-pub struct SolveResult {
+pub(crate) struct SolveResult {
     pub estimate: Option<LocalizationEstimate>,
     pub diagnostics: SolveDiagnostics,
     pub converged: bool,
@@ -80,7 +80,7 @@ pub struct SolveResult {
     pub visual_rejected: bool,
 }
 
-pub struct Estimator {
+pub(crate) struct Estimator {
     graph: Graph,
     optimizer: LevenbergMarquardt<DenseNormalCholesky>,
     options: OptimizeOptions<f64>,
@@ -114,7 +114,7 @@ pub struct Estimator {
 }
 
 impl Estimator {
-    pub fn new(
+    pub(crate) fn new(
         origin: Time,
         epoch: u64,
         initial_pose: Isometry3<Robot, Local>,
@@ -249,11 +249,11 @@ impl Estimator {
         Ok(())
     }
 
-    pub fn latest_time(&self) -> Time {
+    pub(crate) fn latest_time(&self) -> Time {
         self.latest_time
     }
 
-    pub fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 
@@ -271,7 +271,7 @@ impl Estimator {
         start..end
     }
 
-    pub fn update_parameters(&mut self, parameters: Localization3dParameters) -> Result<()> {
+    pub(crate) fn update_parameters(&mut self, parameters: Localization3dParameters) -> Result<()> {
         self.parameters
             .validate_update(&parameters)
             .map_err(|message| eyre!(message))?;
@@ -287,11 +287,11 @@ impl Estimator {
     }
 
     #[cfg(test)]
-    pub fn solve(&mut self) -> SolveResult {
+    pub(crate) fn solve(&mut self) -> SolveResult {
         self.solve_with_heading(None)
     }
 
-    pub fn solve_with_heading(&mut self, heading: Option<&HeadingReference>) -> SolveResult {
+    pub(crate) fn solve_with_heading(&mut self, heading: Option<&HeadingReference>) -> SolveResult {
         let had_visual_update = !self.pending_visuals.is_empty();
         let mut visual_rejected = false;
         let start = Instant::now();
@@ -1076,7 +1076,7 @@ mod tests {
                     time: Time::from_nanos(2_000_000_000),
                     inner: VisualLocalizationFrame {
                         epoch: 7,
-                        source: types::visual_localization_next::VisualAssociationSource::Tracking,
+                        source: types::visual_localization::VisualAssociationSource::Tracking,
                         robot_to_camera: nalgebra::Isometry3::identity().framed_transform(),
                         generation: 0,
                         camera_intrinsic: Intrinsic::new(
@@ -1106,7 +1106,7 @@ mod tests {
 
     #[test]
     fn startup_replaces_drifted_height_prior_with_landmark_fit() {
-        use types::visual_localization_next::FieldMarkAssociation;
+        use types::visual_localization::FieldMarkAssociation;
         let camera = recovery_camera();
         let truth = nalgebra::Isometry3::from_parts(
             nalgebra::Translation3::new(-2.0, 1.0, 0.55),
@@ -1160,8 +1160,7 @@ mod tests {
                         time,
                         inner: VisualLocalizationFrame {
                             epoch: 7,
-                            source:
-                                types::visual_localization_next::VisualAssociationSource::Tracking,
+                            source: types::visual_localization::VisualAssociationSource::Tracking,
                             generation: 0,
                             robot_to_camera: camera.robot_to_camera,
                             camera_intrinsic: camera.intrinsics,
@@ -1214,13 +1213,13 @@ mod tests {
     }
 
     fn recovery_fixture_with_timing(
-        timing: crate::parameters::TimingParameters,
+        timing: crate::TimingParameters,
     ) -> (
         Estimator,
         TimeWrapper<VisualLocalizationFrame>,
         HeadingReference,
     ) {
-        use types::visual_localization_next::{FieldMarkAssociation, VisualAssociationSource};
+        use types::visual_localization::{FieldMarkAssociation, VisualAssociationSource};
         let camera = recovery_camera();
         let truth = nalgebra::Isometry3::from_parts(
             nalgebra::Translation3::new(-2.0, 1.0, 0.55),
@@ -1349,7 +1348,7 @@ mod tests {
 
     #[test]
     fn nondefault_grids_survive_bias_retirement_and_recovery() {
-        let timing = crate::parameters::TimingParameters {
+        let timing = crate::TimingParameters {
             trajectory_spacing: Duration::from_millis(400),
             bias_spacing: Duration::from_millis(1200),
             preintegration_interval: Duration::from_millis(50),
@@ -1398,7 +1397,7 @@ mod tests {
 
     #[test]
     fn fractional_window_retains_support_for_late_samples_and_recovery() {
-        let timing = crate::parameters::TimingParameters {
+        let timing = crate::TimingParameters {
             trajectory_spacing: Duration::from_millis(400),
             bias_spacing: Duration::from_millis(1200),
             preintegration_interval: Duration::from_millis(50),
@@ -1643,7 +1642,7 @@ mod tests {
 
     #[test]
     fn visual_ingestion_accepts_behind_camera_predictions_but_not_zero_range() {
-        use types::visual_localization_next::FieldMarkAssociation;
+        use types::visual_localization::FieldMarkAssociation;
         let mut estimator = estimator();
         estimator.alignment = Some(estimator.graph.add(FieldAlignment {
             local_to_field: nalgebra::Isometry2::identity().framed_transform(),
@@ -1653,7 +1652,7 @@ mod tests {
             time,
             inner: VisualLocalizationFrame {
                 epoch: 7,
-                source: types::visual_localization_next::VisualAssociationSource::Tracking,
+                source: types::visual_localization::VisualAssociationSource::Tracking,
                 generation: 0,
                 robot_to_camera: Isometry3::from_translation(0.0, 0.0, -1.0),
                 camera_intrinsic: Intrinsic::new(

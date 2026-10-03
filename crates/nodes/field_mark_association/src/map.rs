@@ -6,14 +6,14 @@ use coordinate_systems::Field;
 use crate::features::{FEATURE_CLASSES, VisualFeatureClass};
 
 #[derive(Clone, Debug)]
-pub struct LandmarkMap {
+pub(crate) struct LandmarkMap {
     pub landmarks: Vec<Landmark>,
     landmarks_by_class: [Vec<usize>; FEATURE_CLASSES.len()],
     class_rarity_weight: [f32; FEATURE_CLASSES.len()],
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Landmark {
+pub(crate) struct Landmark {
     pub symmetric_id: usize,
     pub class: VisualFeatureClass,
     pub xy: Point2<Field>,

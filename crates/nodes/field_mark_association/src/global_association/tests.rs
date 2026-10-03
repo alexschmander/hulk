@@ -6,7 +6,7 @@ use ros_z::time::Time;
 use types::{
     field_dimensions::{FieldDimensions, Half, Side},
     localization::PoseEstimate,
-    visual_localization_next::AssociationGeometry,
+    visual_localization::AssociationGeometry,
 };
 
 use super::{GlobalAssociationConfig, solver};
@@ -238,7 +238,7 @@ fn lifecycle_dispatch_uses_exposure_attitude_and_matches_generations() {
     let recovery = call(&status, None);
     assert_eq!(
         recovery.source,
-        types::visual_localization_next::VisualAssociationSource::Global
+        types::visual_localization::VisualAssociationSource::Global
     );
     assert_eq!(recovery.associations.len(), 3);
     assert!(
@@ -336,6 +336,38 @@ fn halfturn_equivalent_triangles_are_not_ambiguous() {
     let result =
         associate_global_visual_features(global_input(input(&features, &geometry), &config));
     assert_eq!(result.associations.len(), 3);
+}
+
+#[test]
+fn field_center_does_not_hide_halfturn_equivalence() {
+    let geometry = geometry();
+    let field = FieldDimensions::SPL_2025;
+    let mut features = project(
+        [
+            (VisualFeatureClass::XSpot, field.center()),
+            (VisualFeatureClass::XSpot, field.x_crossing(Side::Left)),
+            (
+                VisualFeatureClass::PenaltySpot,
+                field.penalty_spot(Half::Own),
+            ),
+            (
+                VisualFeatureClass::PenaltySpot,
+                field.penalty_spot(Half::Opponent),
+            ),
+        ],
+        &geometry,
+    );
+    let config = calibrated_parameters().global_localizer;
+    let first =
+        associate_global_visual_features(global_input(input(&features, &geometry), &config));
+    assert_eq!(first.associations.len(), 4);
+    features.x_spots.reverse();
+    let second =
+        associate_global_visual_features(global_input(input(&features, &geometry), &config));
+    let expected = key(&first);
+    let actual = key(&second);
+    assert_eq!(actual.len(), expected.len());
+    assert!(actual.iter().all(|pair| expected.contains(pair)));
 }
 
 #[test]
@@ -484,6 +516,141 @@ fn tracking_covariance_and_age_widen_the_gate_but_not_the_distance_limit() {
 }
 
 #[test]
+fn guided_matching_handles_crossing_class_errors_and_outliers() {
+    let geometry = geometry();
+    let config = calibrated_parameters().global_localizer;
+    let map = LandmarkMap::new(&FieldDimensions::SPL_2025, config.symmetry_epsilon);
+    let mut features = project(map.landmarks.iter().map(|l| (l.class, l.xy)), &geometry);
+    let mislabeled = features.l_spots.remove(0);
+    features.t_spots.push(mislabeled);
+    let outlier = project([(VisualFeatureClass::LSpot, point![15.0, 7.0])], &geometry).l_spots[0];
+    features.l_spots.push(outlier);
+    let input = global_input(input(&features, &geometry), &config);
+    let result = associate_global_visual_features(input);
+    assert_eq!(result.associations.len(), map.landmarks.len());
+    assert!(
+        !result
+            .associations
+            .iter()
+            .any(|a| a.detection == outlier.pixel)
+    );
+    let actual = result
+        .associations
+        .iter()
+        .find(|a| a.detection == mislabeled.pixel)
+        .unwrap();
+    assert_eq!(actual.field_point.xy(), -map.landmarks[4].xy);
+    assert_eq!(key(&result), key(&associate_global_visual_features(input)));
+}
+
+#[test]
+fn recorded_near_and_distant_marks_are_matched_in_pixel_space() {
+    let frame: serde_json::Value =
+        serde_json::from_str(include_str!("recorded_frame.json")).unwrap();
+    let mut features = DetectedVisualFeatures::default();
+    for detection in frame["detections"].as_array().unwrap() {
+        let feature = DetectedVisualFeature {
+            pixel: serde_json::from_value(detection["pixel"].clone()).unwrap(),
+            confidence: detection["confidence"].as_f64().unwrap() as f32,
+        };
+        match detection["class"].as_str().unwrap() {
+            "LSpot" => features.l_spots.push(feature),
+            "TSpot" => features.t_spots.push(feature),
+            "XSpot" => features.x_spots.push(feature),
+            _ => unreachable!(),
+        }
+    }
+    let field = serde_json::from_value(frame["field"].clone()).unwrap();
+    let config = GlobalAssociationConfig::default();
+    let input = GlobalAssociationInput {
+        visual_features: &features,
+        robot_to_ground: linear_algebra::Rotation3::from_euler_angles(
+            frame["roll"].as_f64().unwrap() as f32,
+            frame["pitch"].as_f64().unwrap() as f32,
+            0.0,
+        ),
+        robot_to_camera: serde_json::from_value(frame["robot_to_camera"].clone()).unwrap(),
+        camera_intrinsic: serde_json::from_value(frame["intrinsics"].clone()).unwrap(),
+        field_dimensions: &field,
+        parameters: &config,
+        heading: Some(crate::HeadingConstraint {
+            expected: linear_algebra::Orientation2::new(frame["heading"].as_f64().unwrap()),
+            max_error: 20.0_f64.to_radians(),
+        }),
+    };
+    let result = associate_global_visual_features(input);
+    assert_eq!(result.associations.len(), 7);
+    for detection in frame["detections"].as_array().unwrap() {
+        let pixel: Point2<_> = serde_json::from_value(detection["pixel"].clone()).unwrap();
+        let field: Point2<_> = serde_json::from_value(detection["field"].clone()).unwrap();
+        let actual = result
+            .associations
+            .iter()
+            .find(|a| a.detection == pixel)
+            .unwrap();
+        assert!((actual.field_point.xy() - field).inner.norm() < 1.0e-5);
+    }
+}
+
+#[test]
+fn uncertain_ray_pruning_does_not_turn_four_random_matches_into_consensus() {
+    let frame: serde_json::Value =
+        serde_json::from_str(include_str!("recorded_frame.json")).unwrap();
+    let field = serde_json::from_value(frame["field"].clone()).unwrap();
+    let mut features = DetectedVisualFeatures::default();
+    for (class, pixel) in [
+        (VisualFeatureClass::TSpot, point![63.39251, 253.52103]),
+        (VisualFeatureClass::TSpot, point![68.95977, 306.8301]),
+        (VisualFeatureClass::LSpot, point![254.74667, 217.54425]),
+        (VisualFeatureClass::XSpot, point![142.33624, 229.30377]),
+        (VisualFeatureClass::LSpot, point![358.85547, 166.777]),
+        (VisualFeatureClass::LSpot, point![253.22707, 358.46127]),
+    ] {
+        let feature = DetectedVisualFeature {
+            pixel,
+            confidence: 0.7,
+        };
+        match class {
+            VisualFeatureClass::LSpot => features.l_spots.push(feature),
+            VisualFeatureClass::TSpot => features.t_spots.push(feature),
+            VisualFeatureClass::XSpot => features.x_spots.push(feature),
+            _ => unreachable!(),
+        }
+    }
+    let config = GlobalAssociationConfig::default();
+    let input = GlobalAssociationInput {
+        visual_features: &features,
+        robot_to_ground: linear_algebra::Rotation3::from_euler_angles(
+            0.018662889,
+            -0.007815877,
+            0.0,
+        ),
+        robot_to_camera: Isometry3::wrap(nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(-0.0015389584, 0.33240578, 0.024560608),
+            UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
+                0.4541692, 0.6579697, -0.494341, 0.34122306,
+            )),
+        )),
+        camera_intrinsic: serde_json::from_value(frame["intrinsics"].clone()).unwrap(),
+        field_dimensions: &field,
+        parameters: &config,
+        heading: Some(crate::HeadingConstraint {
+            expected: linear_algebra::Orientation2::new(-2.442100588),
+            max_error: 20.0_f64.to_radians(),
+        }),
+    };
+    let (_, rays, observation_count) = solver::preprocess(input).unwrap();
+    assert_eq!(rays.len(), 5);
+    assert_eq!(observation_count, 6);
+    // A fitted four-feature subset is insufficient: at least ceil(0.7 * 6) = 5 must agree.
+    assert!(
+        associate_global_visual_features(input)
+            .associations
+            .is_empty()
+    );
+}
+
+#[test]
 fn invalid_geometry_and_input_caps_fail_closed() {
     let mut geometry = geometry();
     let mut features = project(stationary_three(), &geometry);
@@ -551,7 +718,7 @@ fn global_is_invariant_under_local_translation_yaw_and_detection_order() {
             ));
             assert_eq!(result.associations.len(), 3);
             // Detection reordering may choose the other half-turn representative, but never a reflection.
-            let (_, detections) =
+            let (_, detections, _) =
                 solver::preprocess(global_input(input(&features, &geometry), &config)).unwrap();
             let expected = result
                 .associations
@@ -579,67 +746,6 @@ fn global_is_invariant_under_local_translation_yaw_and_detection_order() {
             features.goalposts.reverse();
         }
     }
-}
-
-#[test]
-fn projection_covariance_matches_finite_differences_with_camera_lever_arm() {
-    let mut geometry = geometry();
-    geometry.estimate.pose.inner.rotation = UnitQuaternion::from_euler_angles(0.1, -0.15, 0.7);
-    let camera_to_robot = Isometry3::<Camera, Robot>::wrap(nalgebra::Isometry3::from_parts(
-        nalgebra::Translation3::new(0.25, -0.13, 0.15),
-        UnitQuaternion::from_euler_angles(2.9, 0.1, -0.2),
-    ));
-    let pixel = intrinsic().project(
-        (camera_to_robot.inverse()
-            * Isometry3::<Robot, Field>::wrap(geometry.estimate.pose.inner.cast()).inverse()
-            * point![<Field>, 3.0, -0.4, 0.0])
-        .coords(),
-    );
-    let features = DetectedVisualFeatures {
-        penalty_spots: vec![DetectedVisualFeature {
-            pixel,
-            confidence: 1.0,
-        }],
-        ..Default::default()
-    };
-    let config = GlobalAssociationConfig::default();
-    let ground_rotation = global_input(input(&features, &geometry), &config).robot_to_ground;
-    let projected = |rotation, features: &DetectedVisualFeatures| {
-        let mut input = input(features, &geometry);
-        input.robot_to_camera = camera_to_robot.inverse();
-        let mut input = global_input(input, &config);
-        input.robot_to_ground = rotation;
-        solver::preprocess(input).unwrap().1.remove(0)
-    };
-    let actual = projected(ground_rotation, &features).covariance(config);
-    let mut numerical = nalgebra::Matrix2::identity() * 1.0e-8;
-    for axis in [nalgebra::Vector3::x(), nalgebra::Vector3::y()] {
-        let plus = linear_algebra::Rotation3::wrap(
-            UnitQuaternion::from_scaled_axis(axis * 0.001) * ground_rotation.inner,
-        );
-        let minus = linear_algebra::Rotation3::wrap(
-            UnitQuaternion::from_scaled_axis(axis * -0.001) * ground_rotation.inner,
-        );
-        let derivative = (projected(plus, &features).xy - projected(minus, &features).xy) / 0.002;
-        numerical += config.imu_tilt_sigma.powi(2) * derivative * derivative.transpose();
-    }
-    for delta in [point![0.1, 0.0], point![0.0, 0.1]] {
-        let shifted = |sign| DetectedVisualFeatures {
-            penalty_spots: vec![DetectedVisualFeature {
-                pixel: pixel + delta.coords() * sign,
-                confidence: 1.0,
-            }],
-            ..Default::default()
-        };
-        let derivative = (projected(ground_rotation, &shifted(1.0)).xy
-            - projected(ground_rotation, &shifted(-1.0)).xy)
-            / 0.2;
-        numerical += config.detection_pixel_sigma.powi(2) * derivative * derivative.transpose();
-    }
-    assert!(
-        (actual - numerical).norm() < numerical.norm() * 0.005,
-        "actual {actual}, numerical {numerical}"
-    );
 }
 
 #[test]

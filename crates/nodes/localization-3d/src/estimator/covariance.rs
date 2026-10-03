@@ -11,13 +11,13 @@ use super::{Estimator, control_keys};
 // The last three rows/columns are unused when no alignment exists.
 pub(super) type EstimateCovariance = SMatrix<f64, 39, 39>;
 
-pub struct HeightPrediction {
+pub(crate) struct HeightPrediction {
     pub height: f64,
     pub variance: f64,
 }
 
 impl HeightPrediction {
-    pub fn agrees_with(&self, other: &Self, gate: f64) -> bool {
+    pub(crate) fn agrees_with(&self, other: &Self, gate: f64) -> bool {
         let variance = self.variance + other.variance;
         variance.is_finite()
             && variance > 0.0
@@ -28,7 +28,10 @@ impl HeightPrediction {
 impl Estimator {
     /// Source-time marginal, available only within a successfully solved trajectory.
     /// Used as an innovation check, never reinserted alongside replayed measurements.
-    pub fn height_prediction(&mut self, time: ros_z::time::Time) -> Option<HeightPrediction> {
+    pub(crate) fn height_prediction(
+        &mut self,
+        time: ros_z::time::Time,
+    ) -> Option<HeightPrediction> {
         self.alignment?;
         if time > self.last_converged_time? {
             return None;
@@ -56,7 +59,7 @@ impl Estimator {
         (variance.is_finite() && variance > 0.0).then_some(HeightPrediction { height, variance })
     }
 
-    pub fn estimate_covariance_blocks(
+    pub(super) fn estimate_covariance_blocks(
         &mut self,
         controls: [StateKey<PoseControl>; 4],
     ) -> Result<Vec<BlockId>> {
@@ -69,7 +72,7 @@ impl Estimator {
         Ok(blocks)
     }
 
-    pub fn estimate_from_covariance(
+    pub(super) fn estimate_from_covariance(
         &self,
         controls: [StateKey<PoseControl>; 4],
         tau: f64,

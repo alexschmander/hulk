@@ -5,7 +5,7 @@ use localization_fagra::variables::{FieldAlignment, PoseControl, TrajectoryState
 use nalgebra::{Matrix2, UnitQuaternion};
 use projection::intrinsic::Intrinsic;
 use ros_z::time::Time;
-use types::{time_wrapper::TimeWrapper, visual_localization_next::VisualLocalizationFrame};
+use types::{time_wrapper::TimeWrapper, visual_localization::VisualLocalizationFrame};
 
 use super::{Estimator, control_keys};
 use crate::{
@@ -117,7 +117,7 @@ impl Estimator {
 
     /// Rebootstrap recent motion without carrying field-conditioned marginal priors.
     /// The active estimator is untouched until Localization validates this candidate.
-    pub fn bootstrap_candidate(
+    pub(crate) fn bootstrap_candidate(
         &self,
         mut frame: TimeWrapper<VisualLocalizationFrame>,
         heading: Option<&HeadingReference>,
@@ -193,7 +193,7 @@ impl Estimator {
 
     /// Recover local motion without conditioning it on a rejected field solution.
     /// Keep the Local XY/yaw convention; only global bootstrap changes generation.
-    pub fn motion_candidate(&self) -> Result<Option<Self>> {
+    pub(crate) fn motion_candidate(&self) -> Result<Option<Self>> {
         let Some(checkpoint) = &self.motion_checkpoint else {
             return Ok(None);
         };

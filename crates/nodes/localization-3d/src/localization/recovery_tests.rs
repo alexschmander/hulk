@@ -4,7 +4,7 @@ use nalgebra::{Translation3, UnitQuaternion};
 use projection::intrinsic::Intrinsic;
 use std::time::Duration;
 use types::{
-    odometry::KinematicOdometryDelta, visual_localization_next::FieldMarkAssociation,
+    odometry::KinematicOdometryDelta, visual_localization::FieldMarkAssociation,
     visual_odometry::VisualOdometryDelta,
 };
 
@@ -419,7 +419,7 @@ fn wrong_half_tracking_update_is_removed_before_publication_or_marginalization()
 fn double_flight_fuses_zero_specific_force_without_ground_contact() {
     let mut localization = new_localization();
     let mut parameters = localization.parameters.clone();
-    parameters.accelerometer = Some(crate::parameters::AccelerometerParameters {
+    parameters.accelerometer = Some(crate::AccelerometerParameters {
         noise_density: 0.03,
         ..Default::default()
     });

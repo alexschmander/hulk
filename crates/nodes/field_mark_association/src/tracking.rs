@@ -1,16 +1,15 @@
 use coordinate_systems::{Field, Pixel, Robot};
 use linear_algebra::{Isometry3, Point2, Point3};
-use linear_sum_assignment::{AssignmentSolver, Objective};
 use nalgebra::{
     Matrix2, Matrix2x3, Matrix2x6, Matrix3, Matrix3x6, Matrix6, SMatrix, SVector, Vector3,
 };
 use ndarray::Array2;
-use types::{localization::PoseEstimate, visual_localization_next::FieldMarkAssociation};
+use types::{localization::PoseEstimate, visual_localization::FieldMarkAssociation};
 
 use crate::{
-    AssociationResult, DetectedVisualFeature, DetectedVisualFeatures,
-    FieldMarkAssociationParameters, TrackingAssociationInput as AssociationInput,
-    VisualFeatureClass, features::raw_detections, map::LandmarkMap,
+    AssociationResult, DetectedVisualFeature, FieldMarkAssociationParameters,
+    TrackingAssociationInput as AssociationInput, VisualFeatureClass,
+    assignment::unique_assignment, features::filter_detections, map::LandmarkMap,
 };
 
 #[derive(Clone, Copy)]
@@ -42,7 +41,10 @@ pub(crate) fn associate(
         return None;
     }
     let config = parameters.global_localizer;
-    let detections = filter_detections(input.visual_features, &map, config)?;
+    let detections = filter_detections(input.visual_features, &map, config)?
+        .into_iter()
+        .map(|(_, class, feature)| (class, feature))
+        .collect::<Vec<_>>();
     if detections.len() < config.min_inliers {
         return None;
     }
@@ -145,36 +147,6 @@ fn process_covariance(
         &(field_to_robot.matrix() * translation_noise * field_to_robot.matrix().transpose()),
     );
     current_covariance
-}
-
-fn filter_detections(
-    features: &DetectedVisualFeatures,
-    map: &LandmarkMap,
-    config: crate::GlobalLocalizerParameters,
-) -> Option<Vec<(VisualFeatureClass, DetectedVisualFeature)>> {
-    let mut detections = raw_detections(features)
-        .filter(|(_, feature)| {
-            (config.confidence_threshold..=1.0).contains(&feature.confidence)
-                && feature.pixel.coords().inner.iter().all(|x| x.is_finite())
-        })
-        .collect::<Vec<_>>();
-    detections.sort_by(|(a, x), (b, y)| {
-        (y.confidence * map.rarity_weight(*b)).total_cmp(&(x.confidence * map.rarity_weight(*a)))
-    });
-    let mut retained: Vec<(VisualFeatureClass, DetectedVisualFeature)> = Vec::new();
-    for (class, detection) in detections {
-        if retained.iter().any(|(other_class, other)| {
-            *other_class == class
-                && (other.pixel - detection.pixel).inner.norm() <= config.duplicate_pixel_distance
-        }) {
-            continue;
-        }
-        if retained.len() == config.max_retained_detections {
-            return None;
-        }
-        retained.push((class, detection));
-    }
-    Some(retained)
 }
 
 fn match_predictions(
@@ -449,7 +421,7 @@ fn certify(
                 field_point: map.landmarks[column].xy.extend(0.0),
             })
             .collect(),
-        source: types::visual_localization_next::VisualAssociationSource::Tracking,
+        source: types::visual_localization::VisualAssociationSource::Tracking,
         // GlobalLocalizationDebug has a metric residual, not an image-space residual.
         debug: None,
     })
@@ -507,50 +479,10 @@ fn project_landmark(
         })
 }
 
-fn unique_assignment(
-    benefits: &mut Array2<f32>,
-    landmarks: usize,
-    score_ratio: f32,
-) -> Option<Vec<(usize, usize)>> {
-    let mut assignment = AssignmentSolver::new(benefits.dim());
-    let columns = assignment
-        .solve(benefits.view(), Objective::Maximize)
-        .ok()?;
-    let pairs = columns
-        .iter()
-        .enumerate()
-        .filter_map(|(row, column)| {
-            let column = (*column)?;
-            (column < landmarks && benefits[(row, column)] > 0.0).then_some((row, column))
-        })
-        .collect::<Vec<_>>();
-    let score = pairs.iter().map(|&(r, c)| benefits[(r, c)]).sum::<f32>();
-    // Every distinct assignment omits at least one winning edge. This checks all alternatives
-    // with one additional bounded assignment solve per winning edge, without fitting candidate poses.
-    for &(row, column) in &pairs {
-        let saved = benefits[(row, column)];
-        // With one zero-benefit dummy per row, zeroing this edge has the same
-        // optimal score as forbidding it: its row can always use a free dummy.
-        benefits[(row, column)] = 0.0;
-        let alternative = assignment
-            .solve(benefits.view(), Objective::Maximize)
-            .ok()?;
-        let alternative_score = alternative
-            .iter()
-            .enumerate()
-            .filter_map(|(r, c)| c.map(|c| benefits[(r, c)]))
-            .sum::<f32>();
-        benefits[(row, column)] = saved;
-        if score - alternative_score <= saved * (1.0 - 1.0 / score_ratio) {
-            return None;
-        }
-    }
-    Some(pairs)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DetectedVisualFeatures;
 
     #[test]
     fn covariance_numerical_tolerances_are_applied() {
@@ -1149,9 +1081,7 @@ mod tests {
     #[test]
     fn single_prior_covariance_matches_finite_differences_and_coherent_two_pose_model() {
         use nalgebra::{Matrix2x6, Translation3, UnitQuaternion};
-        use types::{
-            field_dimensions::FieldDimensions, visual_localization_next::AssociationGeometry,
-        };
+        use types::{field_dimensions::FieldDimensions, visual_localization::AssociationGeometry};
 
         let pose = |translation: [f32; 3], angles: [f32; 3]| {
             nalgebra::Isometry3::from_parts(

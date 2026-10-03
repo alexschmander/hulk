@@ -20,7 +20,7 @@ use types::{
     localization::{LocalizationEstimate, LocalizationState, LocalizationStatus},
     object_detection::{Object, RobocupObjectLabel},
     time_wrapper::TimeWrapper,
-    visual_localization_next::{
+    visual_localization::{
         AssociationGeometry, GlobalLocalizationDebug, VisualAssociationSource,
         VisualLocalizationFrame,
     },

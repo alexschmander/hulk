@@ -11,7 +11,7 @@ use types::{
     field_dimensions::FieldDimensions,
     object_detection::{Object, RobocupObjectLabel},
     time_wrapper::TimeWrapper,
-    visual_localization_next::{GlobalLocalizationDebug, VisualLocalizationFrame},
+    visual_localization::{GlobalLocalizationDebug, VisualLocalizationFrame},
 };
 
 use crate::{

@@ -37,7 +37,7 @@ impl Default for FieldMarkAssociationParameters {
 }
 
 impl FieldMarkAssociationParameters {
-    pub fn validate(&self) -> std::result::Result<(), String> {
+    pub(crate) fn validate(&self) -> std::result::Result<(), String> {
         self.global_localizer.validate()?;
         self.tracking.validate()?;
         self.capacities.validate()?;
@@ -50,7 +50,7 @@ impl FieldMarkAssociationParameters {
         Ok(())
     }
 
-    pub fn validate_update(&self, capacities: AssociationCapacities) -> Result<(), String> {
+    pub(crate) fn validate_update(&self, capacities: AssociationCapacities) -> Result<(), String> {
         self.validate()?;
         if self.capacities != capacities {
             return Err("association capacities changed: restart required".into());
@@ -175,6 +175,30 @@ mod tests {
     use super::*;
     use ros_z::{context::ContextBuilder, parameter::NodeParametersExt};
     use std::sync::Arc;
+
+    #[test]
+    fn guided_consensus_and_height_limits_are_validated() {
+        for fraction in [0.0, -0.1, 1.1, f32::NAN] {
+            let config = GlobalLocalizerParameters {
+                min_inlier_fraction: fraction,
+                ..Default::default()
+            };
+            assert!(config.validate().is_err());
+        }
+        for ratio in [1.0, f32::NAN, f32::INFINITY] {
+            let config = GlobalLocalizerParameters {
+                score_ratio: ratio,
+                ..Default::default()
+            };
+            assert!(config.validate().is_err());
+        }
+        let mut config = GlobalLocalizerParameters::default();
+        config.max_camera_height = config.min_camera_height;
+        assert!(config.validate().is_err());
+        config.max_camera_height = 2.0;
+        config.class_mismatch_penalty = f32::NAN;
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn defaults_and_detection_limits_remain_compatible() {

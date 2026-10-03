@@ -2,6 +2,8 @@ use coordinate_systems::Pixel;
 use linear_algebra::{Point2, point};
 use types::object_detection::{Object, RobocupObjectLabel};
 
+use crate::{GlobalLocalizerParameters, map::LandmarkMap};
+
 pub(crate) const FEATURE_CLASSES: [VisualFeatureClass; 5] = [
     VisualFeatureClass::GoalPost,
     VisualFeatureClass::LSpot,
@@ -88,6 +90,39 @@ pub fn raw_detections(
     ]
     .into_iter()
     .flat_map(|(class, features)| features.iter().map(move |f| (class, *f)))
+}
+
+/// Filter and deduplicate before ray pruning, so pruning cannot weaken consensus.
+pub(crate) fn filter_detections(
+    features: &DetectedVisualFeatures,
+    map: &LandmarkMap,
+    config: GlobalLocalizerParameters,
+) -> Option<Vec<(usize, VisualFeatureClass, DetectedVisualFeature)>> {
+    let mut detections = raw_detections(features)
+        .enumerate()
+        .filter(|(_, (_, feature))| {
+            (config.confidence_threshold..=1.0).contains(&feature.confidence)
+                && feature.pixel.coords().inner.iter().all(|x| x.is_finite())
+        })
+        .map(|(id, (class, feature))| (id, class, feature))
+        .collect::<Vec<_>>();
+    detections.sort_by(|(_, a, x), (_, b, y)| {
+        (y.confidence * map.rarity_weight(*b)).total_cmp(&(x.confidence * map.rarity_weight(*a)))
+    });
+    let mut retained: Vec<(usize, VisualFeatureClass, DetectedVisualFeature)> = Vec::new();
+    for (id, class, detection) in detections {
+        if retained.iter().any(|(_, other_class, other)| {
+            *other_class == class
+                && (other.pixel - detection.pixel).inner.norm() <= config.duplicate_pixel_distance
+        }) {
+            continue;
+        }
+        if retained.len() == config.max_retained_detections {
+            return None;
+        }
+        retained.push((id, class, detection));
+    }
+    Some(retained)
 }
 
 /// Extracts all field-feature detections supported by global localization.

@@ -9,7 +9,7 @@ use linear_algebra::{IntoTransform, Orientation2, Orientation3, Rotation3, point
 use nalgebra::{Quaternion, Translation3, UnitQuaternion};
 use projection::intrinsic::Intrinsic;
 use serde::Deserialize;
-use types::visual_localization_next::FieldMarkAssociation;
+use types::visual_localization::FieldMarkAssociation;
 
 #[derive(Deserialize)]
 struct Recording {
@@ -133,8 +133,10 @@ fn verify_recording(recording: Recording) {
         Orientation2::new(recording.reference.field_yaw),
         attitude(recording.reference.imu_rpy),
     );
-    let parameters: Localization3dParameters =
-        json5::from_str(include_str!("../parameters_fixture.json5")).unwrap();
+    let parameters: Localization3dParameters = json5::from_str(include_str!(
+        "../../../../../etc/parameters/base/localization3d.json5"
+    ))
+    .unwrap();
     for recorded in &recording.frames {
         assert!(recorded.time > recording.reference.time);
         let features = recorded.features();

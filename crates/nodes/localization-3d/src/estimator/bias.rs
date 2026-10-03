@@ -8,7 +8,7 @@ use localization_fagra::{
 use nalgebra::SMatrix;
 use ros_z::time::Time;
 
-pub fn bias_segment_and_tau(origin: Time, time: Time, spacing_ns: i64) -> (i64, f64) {
+pub(super) fn bias_segment_and_tau(origin: Time, time: Time, spacing_ns: i64) -> (i64, f64) {
     let elapsed = time.as_nanos() - origin.as_nanos();
     (
         elapsed.div_euclid(spacing_ns),
@@ -27,7 +27,7 @@ fn root(gyro_sigma: f64, accel_sigma: f64) -> SMatrix<f64, 6, 6> {
 }
 
 impl Estimator {
-    pub fn initialize_biases(&mut self, time: Time, guess: ImuBias) -> Result<()> {
+    pub(super) fn initialize_biases(&mut self, time: Time, guess: ImuBias) -> Result<()> {
         let (index, _) = bias_segment_and_tau(self.origin, time, self.parameters.timing.bias_ns());
         let key = self.graph.add(guess);
         self.biases.insert(index, key);
@@ -51,7 +51,7 @@ impl Estimator {
         Ok(())
     }
 
-    pub fn ensure_biases(&mut self, time: Time) -> Result<([StateKey<ImuBias>; 2], f64)> {
+    pub(super) fn ensure_biases(&mut self, time: Time) -> Result<([StateKey<ImuBias>; 2], f64)> {
         let (index, tau) =
             bias_segment_and_tau(self.origin, time, self.parameters.timing.bias_ns());
         let (&last, &last_key) = self
@@ -85,7 +85,7 @@ impl Estimator {
         ))
     }
 
-    pub fn bias_at(&self, time: Time) -> Result<ImuBias> {
+    pub(super) fn bias_at(&self, time: Time) -> Result<ImuBias> {
         let (index, tau) =
             bias_segment_and_tau(self.origin, time, self.parameters.timing.bias_ns());
         let Some((&_, &left)) = self.biases.range(..=index).next_back() else {

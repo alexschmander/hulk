@@ -1,13 +1,19 @@
-//! Runtime entry points remain on the legacy backend during the migration.
-mod legacy;
-pub use legacy::*;
-
-pub mod alignment;
-pub mod diagnostics;
-pub mod estimator;
-pub mod heading;
+mod alignment;
+mod diagnostics;
+mod estimator;
+mod heading;
 mod inputs;
-pub mod localization;
-pub mod node;
-pub mod parameters;
-pub mod pose;
+mod localization;
+mod node;
+mod parameters;
+mod pose;
+
+pub use diagnostics::{ImuBiasEstimate, SolveDiagnostics};
+pub use localization::{Localization, SolveOutput};
+pub use node::{run, run_boxed};
+pub use parameters::{
+    AccelerometerParameters, ImuBiasParameters, ImuPreintegrationParameters, InputParameters,
+    KinematicOdometryNoise, Localization3dParameters, ModelParameters, SolverParameters,
+    TimingParameters, VisualParameters,
+};
+pub use pose::initial_robot_to_local_from_imu;

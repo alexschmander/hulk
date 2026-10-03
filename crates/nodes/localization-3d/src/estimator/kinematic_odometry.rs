@@ -7,7 +7,10 @@ use types::odometry::KinematicOdometryDelta;
 use super::{Estimator, recovery::MotionRecord};
 
 impl Estimator {
-    pub fn ingest_kinematic_odometry(&mut self, sample: KinematicOdometryDelta) -> Result<bool> {
+    pub(crate) fn ingest_kinematic_odometry(
+        &mut self,
+        sample: KinematicOdometryDelta,
+    ) -> Result<bool> {
         let Some(noise) = self.parameters.kinematic_odometry_noise.as_ref() else {
             return Ok(false);
         };

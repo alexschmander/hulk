@@ -1,12 +1,10 @@
-pub mod legacy;
-pub use legacy::{run, run_boxed};
-
-pub mod api;
+mod api;
+mod assignment;
 mod features;
 mod frame_processing;
-pub mod global_association;
-pub mod map;
-pub mod node;
+mod global_association;
+mod map;
+mod node;
 mod parameters;
 mod tracking;
 
@@ -21,6 +19,10 @@ pub use features::{
 };
 pub use global_association::GlobalAssociationConfig as GlobalLocalizerParameters;
 pub use map::candidate_points;
+pub use node::{run, run_boxed};
 pub use parameters::{
     AssociationCapacities, FieldMarkAssociationParameters, TrackingAssociationParameters,
+};
+pub use types::visual_localization::{
+    AssociationGeometry, FieldMarkAssociation, GlobalLocalizationDebug, VisualLocalizationFrame,
 };
