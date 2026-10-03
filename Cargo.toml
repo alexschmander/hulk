@@ -19,7 +19,6 @@ members = [
   "crates/kinematics",
   "crates/linear_algebra",
   "crates/linear_sum_assignment",
-  "crates/localization-factrs",
   "crates/localization-fagra",
   "crates/microphones",
   "crates/nodes/active_vision",
@@ -195,7 +194,6 @@ linear_algebra = { path = "crates/linear_algebra" }
 linear_sum_assignment = { path = "crates/linear_sum_assignment" }
 localization-2d = { path = "crates/nodes/localization-2d" }
 localization-3d = { path = "crates/nodes/localization-3d" }
-localization-factrs = { path = "crates/localization-factrs" }
 localization-fagra = { path = "crates/localization-fagra" }
 log = "0.4.25"
 low_state_bridge = { path = "crates/nodes/low_state_bridge" }
