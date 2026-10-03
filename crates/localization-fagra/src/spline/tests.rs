@@ -5,11 +5,17 @@ use fagra::{
         proptest::{prelude::*, test_runner::TestRunner},
     },
 };
-use linear_algebra::Pose3;
+use linear_algebra::{Framed, Pose3};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 
 use super::PoseSpline;
 use crate::variables::PoseControl;
+
+fn control(position: Vector3<f64>, rotation: UnitQuaternion<f64>) -> PoseControl {
+    PoseControl {
+        pose: Framed::wrap(Isometry3::from_parts(position.into(), rotation)),
+    }
+}
 
 fn assert_close<R: TestScalar>(actual: R, expected: R, tolerance: Tolerance, context: &str) {
     assert!(
@@ -18,6 +24,61 @@ fn assert_close<R: TestScalar>(actual: R, expected: R, tolerance: Tolerance, con
         actual.test_value(),
         expected.test_value()
     );
+}
+
+#[test]
+fn stationary_and_known_polynomial_motion() {
+    let p = Vector3::new(1.0, -2.0, 3.0);
+    let orientation = UnitQuaternion::from_euler_angles(0.2, -0.4, 0.7);
+    let stationary = control(p, orientation);
+    let spline = PoseSpline::new([&stationary; 4], 0.2).unwrap();
+    for tau in [0.0, 0.3, 1.0] {
+        assert!(
+            (spline.pose(tau).unwrap().inner.to_homogeneous()
+                - stationary.pose.inner.to_homogeneous())
+            .norm()
+                < 1e-12
+        );
+        assert!(spline.velocity(tau).unwrap().inner.norm() < 1e-12);
+        let k = spline.kinematics(tau).unwrap();
+        assert!(k.inner.norm() < 1e-12);
+    }
+
+    let duration = 0.7;
+    let velocity = Vector3::new(0.4, -0.8, 1.2);
+    let omega = Vector3::new(0.1, -0.2, 0.3);
+    for acceleration in [Vector3::zeros(), Vector3::new(-0.5, 0.3, 0.9)] {
+        let controls: [_; 4] = std::array::from_fn(|i| {
+            let t = (i as f64 - 1.0) * duration;
+            // Cardinal cubic controls for a quadratic:
+            // subtract the basis's dt²/3 second-moment offset.
+            control(
+                p + velocity * t + acceleration * (0.5 * (t * t - duration * duration / 3.0)),
+                orientation * UnitQuaternion::from_scaled_axis(omega * t),
+            )
+        });
+        let spline = PoseSpline::new(controls.each_ref(), duration).unwrap();
+        for tau in [0.0, 0.2, 0.7, 1.0] {
+            let t = tau * duration;
+            let sample = spline.state(tau).unwrap();
+            assert!(
+                (sample.pose.inner.translation.vector
+                    - (p + velocity * t + acceleration * (0.5 * t * t)))
+                    .norm()
+                    < 1e-12
+            );
+            let expected_rotation = orientation * UnitQuaternion::from_scaled_axis(omega * t);
+            assert!(
+                (sample.pose.inner.rotation.to_rotation_matrix().matrix()
+                    - expected_rotation.to_rotation_matrix().matrix())
+                .norm()
+                    < 1e-12
+            );
+            assert!((sample.velocity.inner - velocity - acceleration * t).norm() < 1e-12);
+            let k = spline.kinematics(tau).unwrap();
+            assert!((k.inner - omega).norm() < 1e-12);
+        }
+    }
 }
 
 fn sample_controls<R: TestScalar>() -> [PoseControl<R>; 5] {
