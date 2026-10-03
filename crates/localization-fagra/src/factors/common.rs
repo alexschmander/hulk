@@ -1,5 +1,5 @@
 use fagra::{EvaluationError, JacobianBlock, LinearizationSink, StateKey, StateStore};
-use nalgebra::{RealField, SMatrix, SVector, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, RealField, SMatrix, SVector, UnitQuaternion, Vector3};
 
 use crate::{
     spline::PoseSpline,
@@ -65,6 +65,24 @@ pub(super) fn checked_cost<R: RealField + Copy>(cost: R) -> Result<R, Evaluation
         Ok(cost)
     } else {
         Err(EvaluationError::InvalidEvaluation)
+    }
+}
+
+/// True blockwise Huber cost and square-root frozen IRLS weight. Avoid sqrt(0)
+/// so dual-number derivatives remain defined at exact fits.
+pub(super) fn huber<R: RealField + Copy, const N: usize>(
+    r: &SVector<R, N>,
+    threshold: R,
+) -> Result<(R, R), EvaluationError> {
+    positive(threshold)?;
+    let squared = r.norm_squared();
+    checked_cost(squared)?;
+    if squared <= threshold * threshold {
+        Ok((squared * scalar::<R>(0.5), R::one()))
+    } else {
+        let norm = squared.sqrt();
+        let cost = checked_cost(threshold * (norm - threshold * scalar::<R>(0.5)))?;
+        Ok((cost, (threshold / norm).sqrt()))
     }
 }
 
@@ -186,4 +204,16 @@ pub(super) fn yaw_error<R: RealField + Copy>(
         return Err(EvaluationError::InvalidEvaluation);
     }
     Ok(result)
+}
+
+/// Right-local point action: d(R q + p)/d[theta,rho].
+pub(super) fn point_jacobian<R: RealField + Copy>(
+    rotation: Matrix3<R>,
+    point: Vector3<R>,
+) -> SMatrix<R, 3, 6> {
+    let mut j = SMatrix::<R, 3, 6>::zeros();
+    j.fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&(-rotation * point.cross_matrix()));
+    j.fixed_view_mut::<3, 3>(0, 3).copy_from(&rotation);
+    j
 }
