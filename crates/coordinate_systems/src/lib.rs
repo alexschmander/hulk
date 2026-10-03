@@ -43,6 +43,11 @@ generate_coordinate_system!(
     /// X axis pointing along the startup ground-frame X axis.
     /// Y axis pointing along the startup ground-frame Y axis.
     Odometry,
+    /// 3D gravity-aligned trajectory frame, identified by localization epoch and generation.
+    /// Initialization sets x/y/yaw to zero and takes tilt from the IMU. Visual bootstrap
+    /// recenters x/y and fits height while preserving the heading convention; it increments
+    /// the generation. Leaving Damping starts a new epoch.
+    Local,
     /// coordinate system used to express feet positions in the walking engine.
     ///
     /// Origin: below the robot's hip
