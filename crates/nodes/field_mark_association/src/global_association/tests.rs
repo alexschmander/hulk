@@ -14,7 +14,7 @@ use crate::{
     AssociationResult, DetectedVisualFeature, DetectedVisualFeatures,
     FieldMarkAssociationParameters, GlobalAssociationInput,
     TrackingAssociationInput as AssociationInput, VisualFeatureClass,
-    associate_global_visual_features, map::LandmarkMap,
+    associate_global_visual_features, associate_tracking_visual_features, map::LandmarkMap,
 };
 
 fn geometry() -> AssociationGeometry {
@@ -365,4 +365,176 @@ fn rich_frame_has_bounded_search_and_budget_exhaustion_rejects() {
             .associations
             .is_empty()
     );
+}
+
+#[test]
+fn tracking_keeps_opponent_half_prediction() {
+    let mut geometry = geometry();
+    geometry.estimate = tracking_estimate(0.0001);
+    let features = project(stationary_three(), &geometry);
+    let result = associate_tracking_visual_features(
+        input(&features, &geometry),
+        &FieldMarkAssociationParameters::default(),
+    );
+    assert_eq!(result.associations.len(), 3);
+    assert!(result.associations.iter().all(|a| a.field_point.x() > 0.0));
+    geometry.estimate.pose.inner.translation.x = f64::NAN;
+    assert!(
+        associate_tracking_visual_features(
+            input(&features, &geometry),
+            &FieldMarkAssociationParameters::default()
+        )
+        .associations
+        .is_empty()
+    );
+}
+
+#[test]
+fn tracking_covariance_and_age_widen_the_gate_but_not_the_distance_limit() {
+    let mut geometry = geometry();
+    let features = project(stationary_three(), &geometry);
+    let mut parameters = calibrated_parameters();
+    // Generate observations from truth before shifting the single prior by 20 pixels.
+    geometry.estimate.pose.inner.translation.x += 20.0 * 0.55 / 500.0;
+    assert!(
+        associate_tracking_visual_features(input(&features, &geometry), &parameters)
+            .associations
+            .is_empty()
+    );
+    let mut older = input(&features, &geometry);
+    older.time = Time::from_nanos(2_000_000_000);
+    assert_eq!(
+        associate_tracking_visual_features(older, &parameters)
+            .associations
+            .len(),
+        3
+    );
+    geometry.estimate.covariance = SMatrix::identity() * 0.001;
+    assert_eq!(
+        associate_tracking_visual_features(input(&features, &geometry), &parameters)
+            .associations
+            .len(),
+        3
+    );
+    parameters.tracking.max_pixel_distance = 19.0;
+    assert!(
+        associate_tracking_visual_features(input(&features, &geometry), &parameters)
+            .associations
+            .is_empty()
+    );
+}
+
+#[test]
+fn tracking_rejects_invalid_covariance_future_solve_and_ambiguous_assignment() {
+    let mut geometry = geometry();
+    let features = project(stationary_three(), &geometry);
+    let parameters = FieldMarkAssociationParameters::default();
+    let mut invalid_covariances = vec![SMatrix::identity() * f64::NAN, -SMatrix::identity()];
+    let mut nonsymmetric = SMatrix::identity();
+    nonsymmetric[(0, 1)] = 0.1;
+    invalid_covariances.push(nonsymmetric);
+    let mut indefinite = SMatrix::identity();
+    indefinite[(0, 1)] = 2.0;
+    indefinite[(1, 0)] = 2.0;
+    invalid_covariances.push(indefinite);
+    for covariance in invalid_covariances {
+        geometry.estimate.covariance = covariance;
+        assert!(
+            associate_tracking_visual_features(input(&features, &geometry), &parameters)
+                .associations
+                .is_empty()
+        );
+    }
+    geometry.estimate = tracking_estimate(0.0001);
+    let mut future = input(&features, &geometry);
+    future.time = Time::from_nanos(999_999_999);
+    assert!(
+        associate_tracking_visual_features(future, &parameters)
+            .associations
+            .is_empty()
+    );
+    geometry.estimate = tracking_estimate(1.0);
+    let field = FieldDimensions::SPL_2025;
+    let features = project(
+        [
+            stationary_three()[0],
+            stationary_three()[1],
+            (
+                VisualFeatureClass::XSpot,
+                point![0.0, field.center_circle_diameter / 4.0],
+            ),
+        ],
+        &geometry,
+    );
+    assert!(
+        associate_tracking_visual_features(input(&features, &geometry), &parameters)
+            .associations
+            .is_empty()
+    );
+}
+
+#[test]
+fn tracking_age_is_a_validity_horizon_including_its_exact_boundary() {
+    let mut geometry = geometry();
+    let features = project(stationary_three(), &geometry);
+    let mut parameters = calibrated_parameters();
+    parameters.tracking.position_sigma_per_second = 1.0e-6;
+    parameters.tracking.yaw_sigma_per_second = 1.0e-6;
+    geometry.estimate = tracking_estimate(0.0);
+    let mut input = input(&features, &geometry);
+    input.time = input.time + parameters.tracking.max_age;
+    assert_eq!(
+        associate_tracking_visual_features(input, &parameters)
+            .associations
+            .len(),
+        3
+    );
+    input.time = input.time + std::time::Duration::from_nanos(1);
+    assert!(
+        associate_tracking_visual_features(input, &parameters)
+            .associations
+            .is_empty()
+    );
+}
+
+#[test]
+fn tracking_high_covariance_keeps_distinct_opponent_landmarks_and_exact_age_horizon() {
+    let mut geometry = geometry();
+    let features = project(stationary_three(), &geometry);
+    let expected = [
+        features.goalposts[0],
+        features.goalposts[1],
+        features.penalty_spots[0],
+    ]
+    .into_iter()
+    .zip(stationary_three())
+    .map(|(feature, (_, point))| (feature.pixel, point))
+    .collect::<Vec<_>>();
+    let parameters = FieldMarkAssociationParameters::default();
+    geometry.estimate.covariance = sparse_retained_covariance();
+    for age in [
+        std::time::Duration::from_millis(3100),
+        parameters.tracking.max_age,
+    ] {
+        let mut input = input(&features, &geometry);
+        input.time = input.time + age;
+        let result = associate_tracking_visual_features(input, &parameters);
+        assert_eq!(result.associations.len(), 3, "age={age:?}");
+        for association in &result.associations {
+            assert!(expected.contains(&(association.detection, association.field_point.xy())));
+            assert!(association.field_point.x() > 0.0);
+        }
+    }
+}
+
+fn sparse_retained_covariance() -> nalgebra::Matrix6<f64> {
+    // Retained diagonal from the real sparse simulator immediately before loss at 7.9 s.
+    SMatrix::from_diagonal(&nalgebra::Vector6::new(
+        0.00066995865,
+        0.000579513,
+        0.002903463,
+        1.0588479,
+        0.9564871,
+        0.9908409,
+    ))
 }
