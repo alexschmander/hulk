@@ -191,8 +191,9 @@ fn match_predictions(
         parameters.global_localizer.mahalanobis_gate,
     )?;
     let pairs = match detections.len() {
-        4..=5 => None,
         3 => joint_assignment::<6>(detections, predictions, &log_likelihoods, noise, parameters),
+        4 => joint_assignment::<8>(detections, predictions, &log_likelihoods, noise, parameters),
+        5 => joint_assignment::<10>(detections, predictions, &log_likelihoods, noise, parameters),
         _ => {
             // ponytail: more than five features retain marginal assignment, not a joint likelihood.
             // Extend joint search only with a measured real-time bound. Row normalization bounds weights.
@@ -673,7 +674,7 @@ mod tests {
         };
         let parameters = FieldMarkAssociationParameters::default();
         let class = VisualFeatureClass::LSpot;
-        for n in [3] {
+        for n in 3..=5 {
             let detections = (0..n)
                 .map(|row| detection(class, point![30.0 * row as f32, 0.0]))
                 .collect::<Vec<_>>();
@@ -873,7 +874,7 @@ mod tests {
             pixel_variance: 4.0,
         };
         let class = VisualFeatureClass::LSpot;
-        for n in [3] {
+        for n in 3..=5 {
             let mut detections = (0..n - 1)
                 .map(|row| detection(class, point![20.0 * row as f32, 0.0]))
                 .collect::<Vec<_>>();
@@ -897,6 +898,251 @@ mod tests {
                 .is_none(),
                 "n={n}"
             );
+        }
+    }
+
+    #[test]
+    fn four_and_five_shared_features_resolve_repeated_class_neighbors_not_coherent_rivals() {
+        let map = LandmarkMap::new(
+            &types::field_dimensions::FieldDimensions::SPL_2025,
+            crate::GlobalLocalizerParameters::default().symmetry_epsilon,
+        );
+        let noise = PredictionNoise {
+            pose: Matrix6::identity() * 10000.0,
+            pixel_variance: 4.0,
+        };
+        let class = VisualFeatureClass::LSpot;
+        let ids = map.landmarks_for_class(class);
+        let parameters = FieldMarkAssociationParameters::default();
+        for n in [4, 5] {
+            let detections = (0..n)
+                .map(|row| detection(class, point![40.0 * row as f32, 100.0]))
+                .collect::<Vec<_>>();
+            let mut predictions = vec![None; map.landmarks.len()];
+            for (row, &(_, feature)) in detections.iter().enumerate() {
+                predictions[ids[row]] =
+                    Some(prediction(feature.pixel, Matrix2x6::identity(), &noise));
+                predictions[ids[n + row]] = Some(prediction(
+                    point![
+                        feature.pixel.x() + [8.0, -8.0, 16.0, -16.0, 24.0][row],
+                        feature.pixel.y()
+                    ],
+                    Matrix2x6::identity(),
+                    &noise,
+                ));
+            }
+            let gates = prediction_log_likelihoods(
+                &detections,
+                &map,
+                &predictions,
+                parameters.global_localizer.mahalanobis_gate,
+            )
+            .unwrap();
+            assert!(
+                gates.rows().into_iter().all(|row| row
+                    .iter()
+                    .filter(|score| score.is_finite())
+                    .count()
+                    == 2 * n)
+            );
+            let result =
+                match_predictions(&detections, &map, &predictions, &noise, &parameters).unwrap();
+            assert_eq!(result.associations.len(), n);
+            for (row, association) in result.associations.iter().enumerate() {
+                assert_eq!(association.detection, detections[row].1.pixel);
+                assert_eq!(association.field_point.xy(), map.landmarks[ids[row]].xy);
+            }
+            for (row, &(_, feature)) in detections.iter().enumerate() {
+                predictions[ids[n + row]] = Some(prediction(
+                    point![feature.pixel.x() + 8.0, feature.pixel.y()],
+                    Matrix2x6::identity(),
+                    &noise,
+                ));
+            }
+            assert!(
+                match_predictions(&detections, &map, &predictions, &noise, &parameters).is_none(),
+                "n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn joint_work_exhaustion_after_a_winner_rejects_until_every_rival_is_scored() {
+        let map = LandmarkMap::new(
+            &types::field_dimensions::FieldDimensions::SPL_2025,
+            crate::GlobalLocalizerParameters::default().symmetry_epsilon,
+        );
+        let noise = PredictionNoise {
+            pose: Matrix6::zeros(),
+            pixel_variance: 4.0,
+        };
+        let class = VisualFeatureClass::LSpot;
+        let ids = map.landmarks_for_class(class);
+        for n in 3..=5 {
+            let detections = (0..n)
+                .map(|row| detection(class, point![20.0 * row as f32, 0.0]))
+                .collect::<Vec<_>>();
+            let mut predictions = vec![None; map.landmarks.len()];
+            for (row, &(_, feature)) in detections.iter().enumerate() {
+                predictions[ids[row]] = Some(prediction(feature.pixel, Matrix2x6::zeros(), &noise));
+            }
+            let mut parameters = FieldMarkAssociationParameters::default();
+            parameters.global_localizer.max_work = n;
+            assert_eq!(
+                match_predictions(&detections, &map, &predictions, &noise, &parameters)
+                    .unwrap()
+                    .associations
+                    .len(),
+                n
+            );
+            predictions[ids[n]] = Some(prediction(
+                point![detections[n - 1].1.pixel.x() + 4.0, 0.0],
+                Matrix2x6::zeros(),
+                &noise,
+            ));
+            // n attempts find the exact winner, but the last row has one more gated candidate.
+            assert!(
+                match_predictions(&detections, &map, &predictions, &noise, &parameters).is_none()
+            );
+            parameters.global_localizer.max_work = n + 1;
+            assert_eq!(
+                match_predictions(&detections, &map, &predictions, &noise, &parameters)
+                    .unwrap()
+                    .associations
+                    .len(),
+                n
+            );
+            // Scoring an unusable rival also fails closed rather than retaining the earlier winner.
+            predictions[ids[n]].as_mut().unwrap().jacobian[(0, 0)] = f64::NAN;
+            assert!(
+                match_predictions(&detections, &map, &predictions, &noise, &parameters).is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn five_feature_dense_budget_cannot_return_an_early_unique_winner() {
+        let map = LandmarkMap::new(
+            &types::field_dimensions::FieldDimensions::SPL_2025,
+            crate::GlobalLocalizerParameters::default().symmetry_epsilon,
+        );
+        let noise = PredictionNoise {
+            pose: Matrix6::identity() * 10000.0,
+            pixel_variance: 4.0,
+        };
+        let class = VisualFeatureClass::LSpot;
+        let ids = map.landmarks_for_class(class);
+        let detections = [0.0, 40.0, 80.0, 120.0, 160.0].map(|x| detection(class, point![x, 0.0]));
+        let mut predictions = vec![None; map.landmarks.len()];
+        for (&column, x) in ids.iter().zip([
+            0.0, 40.0, 80.0, 120.0, 160.0, 17.0, 68.0, 111.0, 145.0, 206.0, 251.0, 299.0,
+        ]) {
+            predictions[column] = Some(prediction(point![x, 0.0], Matrix2x6::identity(), &noise));
+        }
+        let mut parameters = FieldMarkAssociationParameters::default();
+        let gates = prediction_log_likelihoods(
+            &detections,
+            &map,
+            &predictions,
+            parameters.global_localizer.mahalanobis_gate,
+        )
+        .unwrap();
+        assert!(
+            gates.rows().into_iter().all(|row| row
+                .iter()
+                .filter(|score| score.is_finite())
+                .count()
+                == 12)
+        );
+        // 12 + 12*12 + 12P2*12 + 12P3*12 + 12P4*12 attempts, including duplicate IDs.
+        // The first complete assignment is the unique winner; all 95,040 must still be scored.
+        for budget in [100_000, 160_139, 160_140] {
+            parameters.global_localizer.max_work = budget;
+            let result = match_predictions(&detections, &map, &predictions, &noise, &parameters);
+            assert_eq!(result.is_some(), budget == 160_140, "budget={budget}");
+            if let Some(result) = result {
+                for (row, association) in result.associations.iter().enumerate() {
+                    assert_eq!(association.field_point.xy(), map.landmarks[ids[row]].xy);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "host runtime characterization; run explicitly with --ignored --nocapture"]
+    fn joint_dense_runtime_characterization() {
+        use std::{hint::black_box, time::Instant};
+
+        let map = LandmarkMap::new(
+            &types::field_dimensions::FieldDimensions::SPL_2025,
+            crate::GlobalLocalizerParameters::default().symmetry_epsilon,
+        );
+        let noise = PredictionNoise {
+            pose: Matrix6::identity() * 10000.0,
+            pixel_variance: 4.0,
+        };
+        let class = VisualFeatureClass::LSpot;
+        let detections = [0.0, 2.0, 4.0, 6.0, 8.0].map(|x| detection(class, point![x, 0.0]));
+        let mut predictions = vec![None; map.landmarks.len()];
+        for &column in map.landmarks_for_class(class) {
+            predictions[column] = Some(prediction(point![0.0, 0.0], Matrix2x6::identity(), &noise));
+        }
+        let mut parameters = FieldMarkAssociationParameters::default();
+        for (n, mixed) in [(3, false), (4, false), (5, false), (5, true)] {
+            let mut selected = detections;
+            if mixed {
+                selected[0].0 = VisualFeatureClass::TSpot;
+                for &column in map.landmarks_for_class(VisualFeatureClass::TSpot) {
+                    predictions[column] =
+                        Some(prediction(point![0.0, 0.0], Matrix2x6::identity(), &noise));
+                }
+            }
+            let detections = &selected[..n];
+            let gates = prediction_log_likelihoods(
+                detections,
+                &map,
+                &predictions,
+                parameters.global_localizer.mahalanobis_gate,
+            )
+            .unwrap();
+            for (row, (class, _)) in gates.rows().into_iter().zip(detections) {
+                assert_eq!(
+                    row.iter().filter(|score| score.is_finite()).count(),
+                    map.landmarks_for_class(*class).len()
+                );
+            }
+            // Include dense same/mixed-class cases at both a small budget and the configured default.
+            for budget in [1000, 100_000] {
+                parameters.global_localizer.max_work = budget;
+                let mut samples = Vec::with_capacity(100);
+                for iteration in 0..110 {
+                    let start = Instant::now();
+                    let result = black_box(match_predictions(
+                        black_box(detections),
+                        black_box(&map),
+                        black_box(&predictions),
+                        black_box(&noise),
+                        black_box(&parameters),
+                    ));
+                    let elapsed = start.elapsed();
+                    assert!(
+                        result.is_none(),
+                        "all complete assignments tie, or budget is exhausted"
+                    );
+                    if iteration >= 10 {
+                        samples.push(elapsed);
+                    }
+                }
+                samples.sort_unstable();
+                eprintln!(
+                    "joint/dense-{n} mixed={mixed} budget={budget}: samples={} p50={:?} p95={:?} p99={:?} max={:?}",
+                    samples.len(),
+                    samples[50],
+                    samples[95],
+                    samples[99],
+                    samples[99]
+                );
+            }
         }
     }
 

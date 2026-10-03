@@ -474,6 +474,33 @@ fn tracking_rejects_invalid_covariance_future_solve_and_ambiguous_assignment() {
 }
 
 #[test]
+fn tracking_joint_assignment_keeps_plausible_rivals_outside_the_distance_limit() {
+    let mut geometry = geometry();
+    geometry.estimate.pose.inner.translation.vector.y = 0.375;
+    let features = project(
+        [
+            stationary_three()[0],
+            stationary_three()[1],
+            stationary_three()[2],
+            (VisualFeatureClass::XSpot, point![0.0, 0.365]),
+        ],
+        &geometry,
+    );
+    let mut parameters = FieldMarkAssociationParameters::default();
+    parameters.tracking.max_pixel_distance = 340.0;
+    // The center and +y crossing have mirror-symmetric image covariances about robot y=0.375.
+    // This observation is 332 pixels from the center and 350 from its plausible rival.
+    // Pruning that rival at the output ceiling would falsely certify the center match.
+    geometry.estimate = tracking_estimate(1.0);
+    geometry.estimate.pose.inner.translation.vector.y = 0.375;
+    assert!(
+        associate_tracking_visual_features(input(&features, &geometry), &parameters)
+            .associations
+            .is_empty()
+    );
+}
+
+#[test]
 fn tracking_age_is_a_validity_horizon_including_its_exact_boundary() {
     let mut geometry = geometry();
     let features = project(stationary_three(), &geometry);
