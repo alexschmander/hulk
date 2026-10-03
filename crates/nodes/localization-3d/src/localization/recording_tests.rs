@@ -1,6 +1,6 @@
 //! Source-time fixtures from the real flip; see recovered_frames.json for provenance.
 use super::*;
-use coordinate_systems::{Field, Ground, ImuReference, Local, Robot};
+use coordinate_systems::{Camera, Field, Ground, ImuReference, Local, Robot};
 use field_mark_association::{
     DetectedVisualFeature, DetectedVisualFeatures, GlobalAssociationInput,
     GlobalLocalizerParameters, associate_global_visual_features,
@@ -54,6 +54,25 @@ struct Detection {
 struct Association {
     pixel: [f32; 2],
     field: [f32; 2],
+}
+
+// Historical wire layouts, before generation IDs and removal of the visual pose hint.
+#[derive(Deserialize)]
+struct RecordedVisualFrame {
+    epoch: u64,
+    source: VisualAssociationSource,
+    robot_to_camera: Isometry3<Robot, Camera>,
+    _robot_to_local: Isometry3<Robot, Local>,
+    camera_intrinsic: Intrinsic,
+    associations: Vec<FieldMarkAssociation>,
+}
+
+#[derive(Deserialize)]
+struct RecordedEstimate {
+    time: Time,
+    epoch: u64,
+    _robot_to_local: types::localization::PoseEstimate<Robot, Local>,
+    robot_to_field: Option<types::localization::PoseEstimate<Robot, Field>>,
 }
 
 fn attitude(rpy: [f64; 3]) -> Orientation3<ImuReference, f64> {
@@ -294,4 +313,159 @@ fn verify_recording(recording: Recording) {
             );
         }
     }
+}
+
+/// Run explicitly with HULK_RECOVERY_MCAP=/path/to/recovered.mcap. Stream the file;
+/// retain only the three incident frames and their source-time IMU brackets.
+#[test]
+#[ignore = "requires the original recovered.mcap recording"]
+fn recorded_flip_from_mcap() {
+    use mcap::{
+        records::Record,
+        sans_io::{LinearReadEvent, LinearReader},
+    };
+    use ros_z::message::{SerdeCdrCodec, WireDecoder};
+    use std::{collections::BTreeMap, fs::File, io::Read};
+    use types::object_detection::{Object, RobocupObjectLabel};
+
+    let mut recording: Recording =
+        serde_json::from_str(include_str!("recovered_frames.json")).unwrap();
+    let path = std::env::var_os("HULK_RECOVERY_MCAP")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../recovered.mcap")
+        });
+    let mut file = File::open(&path).expect("open MCAP");
+    let mut reader = LinearReader::new();
+    let mut topics = BTreeMap::new();
+    let mut imu = BTreeMap::new();
+    let mut visuals = BTreeMap::new();
+    let mut detections = BTreeMap::new();
+    let mut reference = None;
+    let end = recording.frames.last().unwrap().imu[1].time;
+    while let Some(event) = reader.next_event() {
+        match event.unwrap() {
+            LinearReadEvent::ReadRequest(count) => {
+                let read = file.read(reader.insert(count)).unwrap();
+                reader.notify_read(read);
+            }
+            LinearReadEvent::Record { opcode, data } => {
+                match mcap::parse_record(opcode, data).unwrap() {
+                    Record::Channel(channel) => {
+                        topics.insert(channel.id, channel.topic);
+                    }
+                    Record::Message { header, data } => {
+                        let time = header.publish_time as i64;
+                        match topics.get(&header.channel_id).map(String::as_str) {
+                            Some("inputs/low_state")
+                                if time >= recording.reference.time && time <= end =>
+                            {
+                                let low =
+                                    SerdeCdrCodec::<booster::LowState>::deserialize(&data).unwrap();
+                                if time == recording.reference.time
+                                    || recording.frames.iter().any(|frame| {
+                                        frame.imu.iter().any(|sample| sample.time == time)
+                                    })
+                                {
+                                    imu.insert(time, low.imu_state);
+                                }
+                            }
+                            Some("localization/estimate") if header.sequence == 6097 => {
+                                reference = Some(
+                                    SerdeCdrCodec::<RecordedEstimate>::deserialize(&data).unwrap(),
+                                );
+                            }
+                            Some("field_mark_association/visual_localization_local")
+                                if recording
+                                    .frames
+                                    .iter()
+                                    .any(|frame| frame.sequence == u64::from(header.sequence)) =>
+                            {
+                                let frame =
+                                    SerdeCdrCodec::<TimeWrapper<RecordedVisualFrame>>::deserialize(
+                                        &data,
+                                    )
+                                    .unwrap();
+                                visuals.insert(frame.time.as_nanos(), frame.inner);
+                            }
+                            Some("detected_objects")
+                                if [15368, 15369, 15447].contains(&header.sequence) =>
+                            {
+                                let frame = SerdeCdrCodec::<
+                                    TimeWrapper<Vec<Object<RobocupObjectLabel>>>,
+                                >::deserialize(&data)
+                                .unwrap();
+                                detections.insert(
+                                    frame.time.as_nanos(),
+                                    field_mark_association::find_detected_visual_features(
+                                        &frame.inner,
+                                    ),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let reference = reference.expect("recorded pre-loss estimate");
+    assert_eq!(reference.epoch, 4);
+    assert_eq!(reference.time.as_nanos(), recording.reference.time);
+    recording.reference.field_yaw = reference
+        .robot_to_field
+        .unwrap()
+        .pose
+        .inner
+        .rotation
+        .euler_angles()
+        .2;
+    recording.reference.imu_rpy = imu
+        .get(&recording.reference.time)
+        .unwrap()
+        .roll_pitch_yaw
+        .inner
+        .cast::<f64>()
+        .into();
+    for recorded in &mut recording.frames {
+        let frame = visuals
+            .remove(&recorded.time)
+            .expect("recorded global frame");
+        assert_eq!(frame.epoch, 4);
+        assert_eq!(frame.source, VisualAssociationSource::Global);
+        recorded.camera_translation = frame.robot_to_camera.inner.translation.vector.into();
+        recorded.camera_quaternion = frame.robot_to_camera.inner.rotation.coords.into();
+        recorded.intrinsics = [
+            frame.camera_intrinsic.focals.x,
+            frame.camera_intrinsic.focals.y,
+            frame.camera_intrinsic.optical_center.x(),
+            frame.camera_intrinsic.optical_center.y(),
+        ];
+        recorded.associations = frame
+            .associations
+            .iter()
+            .map(|a| Association {
+                pixel: [a.detection.x(), a.detection.y()],
+                field: [a.field_point.x(), a.field_point.y()],
+            })
+            .collect();
+        let features = detections
+            .remove(&recorded.time)
+            .expect("raw detections at exposure");
+        recorded.detections = field_mark_association::raw_detections(&features)
+            .map(|(class, feature)| Detection {
+                class: format!("{class:?}"),
+                confidence: feature.confidence,
+                pixel: [feature.pixel.x(), feature.pixel.y()],
+            })
+            .collect();
+        for sample in &mut recorded.imu {
+            let raw = imu.get(&sample.time).expect("source-time IMU bracket");
+            sample.rpy = raw.roll_pitch_yaw.inner.cast::<f64>().into();
+            sample.gyro = raw.angular_velocity.inner.cast::<f64>().into();
+        }
+    }
+    verify_recording(recording);
+    eprintln!("Verified actual MCAP messages from {}", path.display());
 }
