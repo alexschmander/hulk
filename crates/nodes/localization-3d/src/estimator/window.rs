@@ -1,7 +1,11 @@
 use super::{Estimator, control_keys};
 use color_eyre::{Result, eyre::eyre};
 use fagra::StateKey;
-use localization_fagra::{factors::MotionPrior, spline::PoseSpline, variables::PoseControl};
+use localization_fagra::{
+    factors::{FieldContainment, MotionPrior},
+    spline::PoseSpline,
+    variables::PoseControl,
+};
 use ros_z::time::Time;
 
 impl Estimator {
@@ -63,6 +67,7 @@ impl Estimator {
         }
         for current in next_segment..=segment {
             self.add_motion_prior(current, gap && current < segment)?;
+            self.add_containment(current)?;
         }
         control_keys(&self.controls, segment)
     }
@@ -83,6 +88,20 @@ impl Estimator {
             information_root: root,
             use_start_velocity: !gap,
         })?;
+        Ok(())
+    }
+
+    pub fn add_containment(&mut self, segment: i64) -> Result<()> {
+        if let Some(alignment) = self.alignment {
+            self.graph.add_factor(FieldContainment {
+                controls: control_keys(&self.controls, segment)?,
+                duration: self.parameters.timing.trajectory_spacing.as_secs_f64(),
+                tau: self.parameters.model.containment_tau,
+                alignment,
+                half_extents: self.field_half_extents,
+                sigma: self.parameters.field_containment_sigma,
+            })?;
+        }
         Ok(())
     }
 

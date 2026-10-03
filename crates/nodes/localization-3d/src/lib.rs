@@ -2,5 +2,7 @@
 mod legacy;
 pub use legacy::*;
 
+pub mod alignment;
 pub mod estimator;
+pub mod heading;
 pub mod parameters;

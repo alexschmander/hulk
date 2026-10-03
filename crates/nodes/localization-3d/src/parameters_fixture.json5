@@ -22,6 +22,8 @@
     }
   },
   "model": {
+    "huber_threshold": 2.0,
+    "min_landmark_range": 0.01,
     "intrinsic_prior_sigma": 0.001,
     "anchor_xy_sigma": 0.001,
     "anchor_yaw_sigma": 0.001,
@@ -31,7 +33,17 @@
     "gap_uncertainty_multiplier": 10.0,
     "prediction_gap_segments": 5,
     "gravity": 9.81,
-    "gap_tilt_sigma": 0.1
+    "gap_tilt_sigma": 0.1,
+    "containment_tau": 0.5
+  },
+  "visual": {
+    "min_associations": 3,
+    "max_associations": 32,
+    "min_reprojection_depth": 0.01,
+    "min_detection_separation_px": 1.0,
+    "min_landmark_separation_m": 0.0001,
+    "max_rms_px": 10.0,
+    "min_downward_ray": 1e-06
   },
   "imu_preintegration": {
     "gyroscope_noise_density": 0.00447213595499958,
@@ -71,5 +83,9 @@
   },
   "initial_height_sigma": 1.0,
   "initial_velocity_sigma": 5.0,
-  "accelerometer_process_noise_variance": 10.0
+  "max_tilt_error": 0.3490658503988659,
+  "accelerometer_process_noise_variance": 10.0,
+  "visual_feature_noise_variance": 10000.0,
+  "field_containment_sigma": 1.0,
+  "max_heading_error": 0.3490658503988659
 }

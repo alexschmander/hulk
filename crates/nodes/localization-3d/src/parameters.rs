@@ -47,6 +47,10 @@ impl TimingParameters {
 #[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelParameters {
+    /// Robust loss threshold in whitened residual units.
+    pub huber_threshold: f64,
+    /// Bearing-factor minimum landmark distance, metres.
+    pub min_landmark_range: f64,
     /// Intrinsic prior standard deviation, pixels.
     pub intrinsic_prior_sigma: f64,
     /// Gauge standard deviations, metres and radians respectively.
@@ -65,11 +69,15 @@ pub struct ModelParameters {
     pub gravity: f64,
     /// Up-direction standard deviation at a gap boundary, radians.
     pub gap_tilt_sigma: f64,
+    /// Fraction of each trajectory segment sampled for field containment, [0, 1].
+    pub containment_tau: f64,
 }
 
 impl Default for ModelParameters {
     fn default() -> Self {
         Self {
+            huber_threshold: 2.0,
+            min_landmark_range: 0.01,
             intrinsic_prior_sigma: 0.001,
             anchor_xy_sigma: 0.001,
             anchor_yaw_sigma: 0.001,
@@ -80,6 +88,35 @@ impl Default for ModelParameters {
             prediction_gap_segments: 5,
             gravity: 9.81,
             gap_tilt_sigma: 0.1,
+            containment_tau: 0.5,
+        }
+    }
+}
+
+/// Live visual admission/validation gates, also used during alignment and recovery.
+#[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct VisualParameters {
+    pub min_associations: usize,
+    pub max_associations: usize,
+    /// Metres in front of the camera.
+    pub min_reprojection_depth: f64,
+    pub min_detection_separation_px: f32,
+    pub min_landmark_separation_m: f32,
+    pub max_rms_px: f64,
+    /// Minimum downward component of the rotated pinhole bearing for ground-plane seeding.
+    pub min_downward_ray: f64,
+}
+impl Default for VisualParameters {
+    fn default() -> Self {
+        Self {
+            min_associations: 3,
+            max_associations: 32,
+            min_reprojection_depth: 0.01,
+            min_detection_separation_px: 1.0,
+            min_landmark_separation_m: 1e-4,
+            max_rms_px: 10.0,
+            min_downward_ray: 1e-6,
         }
     }
 }
@@ -169,6 +206,8 @@ pub struct Localization3dParameters {
     pub timing: TimingParameters,
     #[serde(default)]
     pub model: ModelParameters,
+    #[serde(default)]
+    pub visual: VisualParameters,
     pub accelerometer: Option<AccelerometerParameters>,
     #[serde(default)]
     pub imu_bias: ImuBiasParameters,
@@ -177,8 +216,18 @@ pub struct Localization3dParameters {
     /// Broad initialization distributions, not measured standing height or zero velocity.
     pub initial_height_sigma: f64,
     pub initial_velocity_sigma: f64,
+    /// Maximum discrepancy between estimated and measured up directions, in radians.
+    pub max_tilt_error: f64,
     /// Translational white-noise-on-acceleration spectral density.
     pub accelerometer_process_noise_variance: f64,
+    /// Pixel-noise variance used to set isotropic angular noise for accepted visual
+    /// associations: sigma_theta = sqrt(variance) / sqrt(fx * fy), using the frame's
+    /// fixed calibration. This is a near-axis approximation, not a pixel likelihood.
+    pub visual_feature_noise_variance: f64,
+    /// Soft field containment sigma in meters outside field plus border strip.
+    pub field_containment_sigma: f64,
+    /// Maximum field-heading innovation against propagated IMU heading, in radians (< pi/2).
+    pub max_heading_error: f64,
 }
 
 impl Localization3dParameters {
@@ -186,7 +235,12 @@ impl Localization3dParameters {
     /// else is baked into graph factors, marginal priors, interval caches or resources.
     pub fn validate_update(&self, candidate: &Self) -> Result<(), String> {
         candidate.validate()?;
-        let live = self.clone();
+        let mut live = self.clone();
+
+        live.visual = candidate.visual.clone();
+
+        live.max_tilt_error = candidate.max_tilt_error;
+        live.max_heading_error = candidate.max_heading_error;
 
         if &live != candidate {
             return Err(
@@ -221,8 +275,11 @@ impl Localization3dParameters {
             return Err("bias spacing must be a multiple of trajectory spacing, trajectory spacing a multiple of the IMU interval; window must cover at least two trajectory segments".into());
         }
         let m = &self.model;
+        let v = &self.visual;
 
         for value in [
+            m.huber_threshold,
+            m.min_landmark_range,
             m.intrinsic_prior_sigma,
             m.anchor_xy_sigma,
             m.anchor_yaw_sigma,
@@ -232,12 +289,23 @@ impl Localization3dParameters {
             m.gap_uncertainty_multiplier,
             m.gravity,
             m.gap_tilt_sigma,
+            v.min_reprojection_depth,
+            f64::from(v.min_detection_separation_px),
+            f64::from(v.min_landmark_separation_m),
+            v.max_rms_px,
+            v.min_downward_ray,
         ] {
             if !valid_scale(value) || !(value * value).is_finite() {
                 return Err("model, visual and solver scales must be finite and positive with representable squares".into());
             }
         }
-        if m.prediction_gap_segments <= 0 || m.gap_uncertainty_multiplier < 1.0 {
+        if m.prediction_gap_segments <= 0
+            || m.gap_uncertainty_multiplier < 1.0
+            || !m.containment_tau.is_finite()
+            || !(0.0..=1.0).contains(&m.containment_tau)
+            || v.min_associations < 3
+            || v.max_associations < v.min_associations
+        {
             return Err(
                 "invalid model sampling, visual association limits or solver iteration limits"
                     .into(),
@@ -269,6 +337,14 @@ impl Localization3dParameters {
                 return Err("IMU bias uncertainties must be finite and positive".into());
             }
         }
+        if !self.max_heading_error.is_finite()
+            || self.max_heading_error <= 0.0
+            || self.max_heading_error >= std::f64::consts::FRAC_PI_2
+        {
+            return Err(
+                "heading error must be in (0, pi/2), and heading drift finite and >= 0".into(),
+            );
+        }
 
         for value in [self.initial_height_sigma, self.initial_velocity_sigma] {
             if !valid_scale(value) || !(value * value).is_finite() {
@@ -278,9 +354,36 @@ impl Localization3dParameters {
                 );
             }
         }
-
+        if !self.max_tilt_error.is_finite()
+            || self.max_tilt_error <= 0.0
+            || self.max_tilt_error >= std::f64::consts::FRAC_PI_2
+        {
+            return Err("tilt error must be in (0, pi/2)".into());
+        }
+        if let Some(accel) = &self.accelerometer
+            && (!accel
+                .bias
+                .inner
+                .iter()
+                .chain(accel.position.inner.iter())
+                .all(|v| v.is_finite())
+                || !accel
+                    .scale
+                    .iter()
+                    .all(|v| valid_scale(*v) && (v * v).is_finite())
+                || !valid_scale(accel.noise_density)
+                || !(accel.noise_density * accel.noise_density).is_finite())
+        {
+            return Err("invalid accelerometer calibration or noise density".into());
+        }
         if !valid_scale(self.accelerometer_process_noise_variance) {
             return Err("accelerometer_process_noise_variance must be finite and > 0".to_string());
+        }
+        if !valid_scale(self.visual_feature_noise_variance) {
+            return Err("visual_feature_noise_variance must be finite and > 0".to_string());
+        }
+        if !valid_scale(self.field_containment_sigma) {
+            return Err("field_containment_sigma must be finite and > 0".to_string());
         }
 
         Ok(())
