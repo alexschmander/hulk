@@ -23,6 +23,9 @@ pub struct SolveOutput {
     pub diagnostics: SolveDiagnostics,
 }
 
+#[cfg(test)]
+mod recovery_tests;
+
 /// Owns the graph and accepted lifecycle. The ROSZ node and deterministic runner
 /// use the same operations; neither maintains another pending-measurement queue.
 pub struct Localization {
