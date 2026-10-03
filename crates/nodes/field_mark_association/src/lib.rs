@@ -9,8 +9,9 @@ mod parameters;
 mod tracking;
 
 pub use api::{
-    AssociationResult, GlobalAssociationInput, HeadingConstraint, TrackingAssociationInput,
-    associate_global_visual_features, associate_tracking_visual_features,
+    AssociationInput, AssociationResult, GlobalAssociationInput, HeadingConstraint,
+    TrackingAssociationInput, associate_global_visual_features, associate_tracking_visual_features,
+    associate_visual_features,
 };
 pub use features::{
     DetectedVisualFeature, DetectedVisualFeatures, VisualFeatureClass,
