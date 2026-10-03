@@ -6,4 +6,5 @@ pub mod alignment;
 pub mod diagnostics;
 pub mod estimator;
 pub mod heading;
+pub mod localization;
 pub mod parameters;

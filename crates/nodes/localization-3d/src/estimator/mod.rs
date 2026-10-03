@@ -562,11 +562,15 @@ mod tests {
                 accelerometer: None,
                 initial_height_sigma: 1.0,
                 initial_velocity_sigma: 5.0,
+                recovery_height_gate: 9.0,
                 max_tilt_error: 20.0_f64.to_radians(),
                 accelerometer_process_noise_variance: 10.0,
                 visual_feature_noise_variance: 100.0,
                 field_containment_sigma: 1.0,
                 max_heading_error: 20.0_f64.to_radians(),
+                max_heading_reference_drift_per_second: 0.5_f64.to_radians(),
+                tracking_timeout: Duration::from_secs(2),
+                visual_tracking_timeout: Duration::from_secs(2),
             },
             &FieldDimensions::SPL_2025,
         )
@@ -608,6 +612,50 @@ mod tests {
         // Two 2-cm penetrations: quadrupling sigma divides their likelihood cost by 16.
         assert!((costs[0] - 4.0).abs() < 1.0e-10);
         assert!((costs[0] / costs[1] - 16.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn sustained_fast_turn_preserves_off_grid_camera_estimates() {
+        let mut estimator = estimator();
+        let mut max_error = 0.0_f64;
+        for index in 0..=1500 {
+            let t = index as f64 * 0.002;
+            estimator
+                .ingest_imu(
+                    estimator.origin + Duration::from_millis(index * 2),
+                    ImuState {
+                        roll_pitch_yaw: vector![0.0, 0.0, (4.0 * t) as f32],
+                        angular_velocity: vector![0.0, 0.0, 4.0],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            if index == 0 || index % 25 != 0 {
+                continue;
+            }
+            let solved = estimator.solve();
+            assert!(solved.estimate.is_some(), "{:?}", solved.diagnostics);
+            let exposure = estimator.latest_time - Duration::from_millis(37);
+            let (segment, tau) = estimator.segment_and_tau(exposure).unwrap();
+            let controls = control_keys(&estimator.controls, segment).unwrap();
+            let spline = estimator.spline(controls).unwrap();
+            let sample = spline.linearize().unwrap().pose(tau).unwrap();
+            let expected = nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.0, 4.0 * (t - 0.037));
+            max_error = max_error.max(sample.pose.inner.rotation.angle_to(&expected));
+            let covariance = estimator
+                .graph
+                .joint_covariance(&controls.map(|key| key.block_id()))
+                .unwrap();
+            let covariance = SMatrix::<f64, 24, 24>::from_fn(|r, c| covariance[(r, c)]);
+            assert!(sample.covariance(&covariance).cholesky().is_some());
+        }
+        eprintln!(
+            "off-grid camera-time fast-turn max error: {:.6} deg",
+            max_error.to_degrees()
+        );
+        // The unchanged zero-rotation process prior biases sustained blind turns:
+        // the raw-IMU baseline reaches 6.351317 degrees in this same experiment.
+        assert!(max_error < 6.5_f64.to_radians());
     }
 
     #[test]
@@ -1154,6 +1202,442 @@ mod tests {
             assert!(estimator.pending_visuals.is_empty());
             assert_eq!(estimator.reprojection_batches.len(), 1);
         }
+    }
+
+    fn recovery_fixture() -> (
+        Estimator,
+        TimeWrapper<VisualLocalizationFrame>,
+        HeadingReference,
+    ) {
+        recovery_fixture_with_timing(Default::default())
+    }
+
+    fn recovery_fixture_with_timing(
+        timing: crate::parameters::TimingParameters,
+    ) -> (
+        Estimator,
+        TimeWrapper<VisualLocalizationFrame>,
+        HeadingReference,
+    ) {
+        use types::visual_localization_next::{FieldMarkAssociation, VisualAssociationSource};
+        let camera = recovery_camera();
+        let truth = nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(-2.0, 1.0, 0.55),
+            nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 0.4),
+        );
+        let field_points: [linear_algebra::Point3<coordinate_systems::Field>; 3] = [
+            point![-3.0, 0.0, 0.0],
+            point![-1.0, 0.0, 0.0],
+            point![-2.0, 2.0, 0.0],
+        ];
+        let associations = field_points
+            .into_iter()
+            .map(|field_point| {
+                let p = camera.robot_to_camera.inner * truth.inverse() * field_point.inner;
+                // The global matcher is free to emit the half-turned representative.
+                FieldMarkAssociation {
+                    field_point: point![-field_point.x(), -field_point.y(), 0.0],
+                    detection: camera.intrinsics.project(Vector3::wrap(p.coords)),
+                }
+            })
+            .collect();
+        let mut estimator = estimator();
+        let wrong_pose = Isometry3::wrap(nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(10.0, -5.0, 4.0),
+            nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 2.0),
+        ));
+        estimator.parameters.timing = timing;
+        estimator = Estimator::new(
+            estimator.origin,
+            7,
+            wrong_pose,
+            &camera.intrinsics,
+            estimator.parameters.clone(),
+            &FieldDimensions::SPL_2025,
+        )
+        .unwrap();
+        let time = Time::from_nanos(4_375_000_000);
+        let frame = TimeWrapper {
+            time,
+            inner: VisualLocalizationFrame {
+                epoch: 7,
+                source: VisualAssociationSource::Global,
+                generation: 0,
+                robot_to_camera: camera.robot_to_camera,
+                camera_intrinsic: camera.intrinsics,
+                associations,
+            },
+        };
+        for index in 0..=1800 {
+            estimator
+                .ingest_imu(
+                    estimator.origin + Duration::from_millis(index * 2),
+                    ImuState {
+                        roll_pitch_yaw: Vector3::wrap(nalgebra::Vector3::new(0.1, -0.05, 2.0)),
+                        linear_acceleration: Vector3::wrap(
+                            wrong_pose.inner.rotation.inverse() * nalgebra::vector![0.0, 0.0, 9.81],
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            if index > 0 && index % 100 == 0 {
+                estimator.solve().estimate.unwrap();
+            }
+        }
+        // This whole interval spans exposure and adjacent knots. Moving the knot
+        // origin to exposure would make it unsupported or truncate its motion.
+        let delta = types::odometry::KinematicOdometryDelta {
+            previous_time: Time::from_nanos(4_210_000_000),
+            time: Time::from_nanos(4_590_000_000),
+            current_to_previous: linear_algebra::Isometry2::identity(),
+        };
+        assert!(estimator.ingest_kinematic_odometry(delta).unwrap());
+        assert!(
+            estimator
+                .ingest_visual_odometry(
+                    types::visual_odometry::VisualOdometer {
+                        time: delta.time,
+                        epoch: 4,
+                        delta: Some(types::visual_odometry::VisualOdometryDelta {
+                            previous_time: delta.previous_time,
+                            current_left_camera_to_previous_left_camera:
+                                nalgebra::Isometry3::identity(),
+                        }),
+                        current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
+                    },
+                    Some(&camera),
+                    Some(&camera)
+                )
+                .unwrap()
+        );
+        // Epoch resets without motion must also survive reconstruction.
+        assert!(
+            !estimator
+                .ingest_visual_odometry(
+                    types::visual_odometry::VisualOdometer {
+                        time: delta.time,
+                        epoch: 9,
+                        delta: None,
+                        current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
+                    },
+                    None,
+                    None
+                )
+                .unwrap()
+        );
+        let mut feet = kinematics::robot_kinematics::RobotKinematics::default();
+        let offset = wrong_pose.inner.rotation.inverse() * nalgebra::Vector3::new(0.0, 0.0, -0.55);
+        feet.left_leg.sole_to_robot.inner.translation.vector = offset;
+        feet.right_leg.sole_to_robot.inner.translation.vector = offset;
+        assert!(
+            estimator
+                .ingest_kinematics(TimeWrapper {
+                    time: delta.time,
+                    inner: feet
+                })
+                .unwrap()
+        );
+        let heading = HeadingReference::new(
+            estimator.origin,
+            linear_algebra::Orientation2::new(0.4),
+            linear_algebra::Orientation3::from_euler_angles(0.1, -0.05, 2.0),
+        );
+        (estimator, frame, heading)
+    }
+
+    #[test]
+    fn nondefault_grids_survive_bias_retirement_and_recovery() {
+        let timing = crate::parameters::TimingParameters {
+            trajectory_spacing: Duration::from_millis(400),
+            bias_spacing: Duration::from_millis(1200),
+            preintegration_interval: Duration::from_millis(50),
+            optimization_window: Duration::from_millis(2400),
+            ..Default::default()
+        };
+        let (estimator, frame, heading) = recovery_fixture_with_timing(timing.clone());
+        let origin = estimator.origin;
+        let latest = estimator.latest_time;
+        let (segment, tau) = estimator.segment_and_tau(frame.time).unwrap();
+        assert_eq!(segment, 8);
+        assert!((tau - 0.4375).abs() < 1e-12);
+        assert_eq!(*estimator.controls.first_key_value().unwrap().0, 2);
+        assert_eq!(*estimator.biases.first_key_value().unwrap().0, 1);
+        assert_eq!(estimator.biases.len(), 4);
+        assert!(estimator.preintegration.interval_count() <= 49);
+        let bias = estimator.bias_at(frame.time).unwrap();
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.origin, origin);
+        assert_eq!(candidate.parameters.timing, timing);
+        assert_eq!(candidate.segment_and_tau(latest).unwrap().0, 9);
+        assert!((candidate.bias_at(latest).unwrap().gyroscope - bias.gyroscope).norm() < 1e-6);
+        let solved = candidate.solve_with_heading(Some(&heading));
+        assert!(solved.estimate.is_some(), "{:?}", solved.diagnostics);
+        assert!(candidate.accepted_visual_rms().unwrap() < 0.01);
+        // Recovery replay and another retirement must continue on the original grids.
+        for millis in (3602..=4000).step_by(2) {
+            candidate
+                .ingest_imu(
+                    origin + Duration::from_millis(millis),
+                    ImuState {
+                        roll_pitch_yaw: vector![0.1, -0.05, 2.0],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let solved = candidate.solve_with_heading(Some(&heading));
+        assert!(solved.estimate.is_some(), "{:?}", solved.diagnostics);
+        assert_eq!(*candidate.controls.first_key_value().unwrap().0, 3);
+        assert!(candidate.preintegration.interval_count() <= 49);
+    }
+
+    #[test]
+    fn fractional_window_retains_support_for_late_samples_and_recovery() {
+        let timing = crate::parameters::TimingParameters {
+            trajectory_spacing: Duration::from_millis(400),
+            bias_spacing: Duration::from_millis(1200),
+            preintegration_interval: Duration::from_millis(50),
+            optimization_window: Duration::from_millis(2500),
+            ..Default::default()
+        };
+        let (mut estimator, frame, heading) = recovery_fixture_with_timing(timing.clone());
+        let latest = estimator.latest_time;
+        let cutoff = latest - timing.optimization_window;
+        let imu = ImuState {
+            roll_pitch_yaw: vector![0.1, -0.05, 2.0],
+            ..Default::default()
+        };
+        assert!(
+            !estimator
+                .ingest_imu(cutoff - Duration::from_nanos(1), imu)
+                .unwrap()
+        );
+        assert!(estimator.ingest_imu(cutoff, imu).unwrap());
+        let solved = estimator.solve();
+        assert_eq!(
+            solved
+                .estimate
+                .expect("late sample inside window must retain spline support")
+                .time,
+            latest
+        );
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        assert!(candidate.ingest_imu(cutoff, imu).unwrap());
+        let solved = candidate.solve_with_heading(Some(&heading));
+        assert!(solved.estimate.is_some(), "{:?}", solved.diagnostics);
+        assert!(candidate.accepted_visual_rms().unwrap() < 0.01);
+    }
+
+    #[test]
+    fn imu_preparation_failure_does_not_retry_a_stale_graph_without_visuals() {
+        let (estimator, frame, heading) = recovery_fixture();
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        assert!(!candidate.pending_visuals.is_empty());
+        let mut parameters = candidate.parameters.clone();
+        parameters.accelerometer = Some(crate::parameters::AccelerometerParameters {
+            scale: nalgebra::vector![1e154, 1.0, 1.0],
+            ..Default::default()
+        });
+        assert!(parameters.validate().is_ok());
+        // Deliberate fault injection bypasses the public restart-required update guard.
+        candidate.parameters = parameters;
+        let start = candidate.latest_time;
+        // Finite accepted readings can still overflow covariance propagation.
+        for millis in [2, 4, 6] {
+            candidate
+                .ingest_imu(
+                    start + Duration::from_millis(millis),
+                    ImuState {
+                        linear_acceleration: vector![f32::MAX, 0.0, 9.81],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let result = candidate.solve();
+        assert!(result.estimate.is_none());
+        assert!(!result.visual_rejected);
+        assert_eq!(result.diagnostics.iterations, None);
+        assert!(
+            result
+                .diagnostics
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("IMU propagation"),
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(candidate.pending_visuals.is_empty());
+    }
+
+    #[test]
+    fn reconstruction_preserves_motion_and_admission_state() {
+        let (mut estimator, frame, heading) = recovery_fixture();
+        estimator.parameters.accelerometer = Some(Default::default());
+        for nanos in [4_490_000_000, 4_590_000_000] {
+            let time = Time::from_nanos(nanos);
+            let force = estimator
+                .attitude_at(time)
+                .unwrap()
+                .rotation::<Robot>()
+                .inverse()
+                * vector![0.0, 0.0, 9.81];
+            estimator
+                .accept_motion(recovery::MotionRecord::Imu {
+                    time,
+                    force,
+                    angular_velocity: Vector3::zeros(),
+                    attitude: estimator.attitude_at(time).unwrap(),
+                })
+                .unwrap();
+        }
+        let delta = types::odometry::KinematicOdometryDelta {
+            previous_time: Time::from_nanos(4_210_000_000),
+            time: Time::from_nanos(4_590_000_000),
+            current_to_previous: linear_algebra::Isometry2::identity(),
+        };
+        assert!(estimator.motion_history.len() < 1200);
+        assert!(estimator.controls.len() < 20);
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.latest_time, estimator.latest_time);
+        candidate.prepare_preintegration().unwrap();
+        assert!(candidate.preintegration.interval_count() > 0);
+        assert_eq!(candidate.origin, estimator.origin);
+        assert_eq!(
+            candidate.motion_history.len(),
+            estimator.motion_history.len()
+        );
+        assert_eq!(candidate.latest_vo_epoch, Some(9));
+        assert_eq!(candidate.latest_kinematic_time, Some(delta.time));
+        assert!(!candidate.ingest_kinematic_odometry(delta).unwrap());
+        assert_eq!(
+            candidate.segment_and_tau(delta.previous_time).unwrap().0 + 1,
+            candidate.segment_and_tau(delta.time).unwrap().0
+        );
+        let recovered = candidate
+            .solve()
+            .estimate
+            .unwrap()
+            .robot_to_field
+            .unwrap()
+            .pose
+            .inner;
+        assert!((recovered.translation.vector - nalgebra::vector![-2.0, 1.0, 0.55]).norm() < 1e-4);
+        assert!(
+            recovered
+                .rotation
+                .angle_to(&nalgebra::UnitQuaternion::from_euler_angles(
+                    0.1, -0.05, 0.4
+                ))
+                < 1e-4
+        );
+    }
+
+    #[test]
+    fn bootstrap_height_is_not_a_millimetre_prior() {
+        let (estimator, frame, heading) = recovery_fixture();
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        let evaluate = OptimizeOptions {
+            gradient_tolerance: f64::MAX,
+            ..candidate.options
+        };
+        let before = candidate
+            .optimizer
+            .solve_batch(&mut candidate.graph, &evaluate)
+            .unwrap()
+            .initial_cost;
+        for key in candidate.controls.values() {
+            let mut control = candidate.graph.get(*key).unwrap().clone();
+            control.pose.inner.translation.z += 1.0;
+            candidate.graph.set(*key, control).unwrap();
+        }
+        let after = candidate
+            .optimizer
+            .solve_batch(&mut candidate.graph, &evaluate)
+            .unwrap()
+            .initial_cost;
+        // Reprojections disagree, but there is no extra 500,000-cost height pseudo-observation.
+        // Feet above the floor remain legal: this must not impose a contact equality.
+        assert!(
+            after > before && after - before < 1000.0,
+            "{before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn repeated_heading_rejection_keeps_the_window_bounded() {
+        let (estimator, frame, heading) = recovery_fixture();
+        let mut candidate = estimator
+            .bootstrap_candidate(frame, Some(&heading))
+            .unwrap()
+            .unwrap();
+        candidate.solve().estimate.unwrap();
+        let saved_biases = candidate
+            .biases
+            .values()
+            .map(|key| (*key, candidate.graph.get(*key).unwrap().clone()))
+            .collect::<Vec<_>>();
+        let wrong_heading = HeadingReference::new(
+            candidate.latest_time,
+            linear_algebra::Orientation2::new(-2.0),
+            linear_algebra::Orientation3::from_euler_angles(0.1, -0.05, 2.0),
+        );
+        let mut pending = candidate.latest_visual_frame.clone().unwrap();
+        pending.time = candidate.latest_time;
+        assert!(candidate.ingest_visual(pending).unwrap());
+        for index in 1..=150 {
+            candidate
+                .ingest_imu(
+                    Time::from_nanos(4_600_000_000) + Duration::from_millis(index * 20),
+                    ImuState {
+                        roll_pitch_yaw: vector![0.1, -0.05, 2.0],
+                        angular_velocity: vector![if index == 1 { 0.03 } else { 0.0 }, 0.0, 0.0],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let rejected = candidate.solve_with_heading(Some(&wrong_heading));
+            assert!(rejected.estimate.is_none());
+            assert!(rejected.motion_invalid);
+            assert_eq!(rejected.visual_rejected, index == 1);
+            if index == 1 {
+                for (key, bias) in &saved_biases {
+                    let restored = candidate.graph.get(*key).unwrap();
+                    assert_eq!(restored.accelerometer, bias.accelerometer);
+                    assert_eq!(restored.gyroscope, bias.gyroscope);
+                }
+            }
+            assert!(
+                candidate.controls.len() < 20,
+                "rejection must still retire the restored graph"
+            );
+        }
+        assert!(candidate.motion_checkpoint.as_ref().unwrap().time < candidate.history_start);
+        let mut motion = candidate.motion_candidate().unwrap().unwrap();
+        assert!(motion.controls.len() < 20);
+        let recovered = motion.solve();
+        let estimate = recovered
+            .estimate
+            .expect("expired checkpoint remains usable");
+        assert!(estimate.robot_to_field.is_none());
+        assert!((estimate.robot_to_local.pose.inner.translation.z - 0.55).abs() < 0.01);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub struct TimingParameters {
     pub preintegration_interval: Duration,
     pub optimization_window: Duration,
     pub max_imu_gap: Duration,
+    pub max_camera_gap: Duration,
 }
 
 impl Default for TimingParameters {
@@ -24,6 +25,7 @@ impl Default for TimingParameters {
             preintegration_interval: Duration::from_millis(100),
             optimization_window: Duration::from_secs(2),
             max_imu_gap: Duration::from_millis(20),
+            max_camera_gap: Duration::from_millis(20),
         }
     }
 }
@@ -263,6 +265,8 @@ pub struct Localization3dParameters {
     /// Broad initialization distributions, not measured standing height or zero velocity.
     pub initial_height_sigma: f64,
     pub initial_velocity_sigma: f64,
+    /// Squared normalized innovation allowed between old and candidate height predictions.
+    pub recovery_height_gate: f64,
     /// Maximum discrepancy between estimated and measured up directions, in radians.
     pub max_tilt_error: f64,
     /// Translational white-noise-on-acceleration spectral density.
@@ -275,6 +279,18 @@ pub struct Localization3dParameters {
     pub field_containment_sigma: f64,
     /// Maximum field-heading innovation against propagated IMU heading, in radians (< pi/2).
     pub max_heading_error: f64,
+    /// Maximum correction of the IMU-to-field reference during visual tracking, in rad/s.
+    pub max_heading_reference_drift_per_second: f64,
+    /// Time without a converged aligned backend result before localization is declared lost.
+    #[serde(default = "default_tracking_timeout")]
+    pub tracking_timeout: Duration,
+    /// Time without a newly acknowledged, valid visual reprojection before tracking is lost.
+    #[serde(default = "default_tracking_timeout")]
+    pub visual_tracking_timeout: Duration,
+}
+
+fn default_tracking_timeout() -> Duration {
+    Duration::from_secs(2)
 }
 
 impl Localization3dParameters {
@@ -285,10 +301,13 @@ impl Localization3dParameters {
         let mut live = self.clone();
         live.solver = candidate.solver.clone();
         live.visual = candidate.visual.clone();
-
+        live.recovery_height_gate = candidate.recovery_height_gate;
         live.max_tilt_error = candidate.max_tilt_error;
         live.max_heading_error = candidate.max_heading_error;
-
+        live.max_heading_reference_drift_per_second =
+            candidate.max_heading_reference_drift_per_second;
+        live.tracking_timeout = candidate.tracking_timeout;
+        live.visual_tracking_timeout = candidate.visual_tracking_timeout;
         if &live != candidate {
             return Err(
                 "localization timing, model, calibration, noise and input changes require restart"
@@ -306,6 +325,7 @@ impl Localization3dParameters {
             t.preintegration_interval,
             t.optimization_window,
             t.max_imu_gap,
+            t.max_camera_gap,
             self.imu_preintegration.reference_duration,
         ] {
             if duration.is_zero() || duration.as_nanos() > i64::MAX as u128 {
@@ -396,6 +416,8 @@ impl Localization3dParameters {
         if !self.max_heading_error.is_finite()
             || self.max_heading_error <= 0.0
             || self.max_heading_error >= std::f64::consts::FRAC_PI_2
+            || !self.max_heading_reference_drift_per_second.is_finite()
+            || self.max_heading_reference_drift_per_second < 0.0
         {
             return Err(
                 "heading error must be in (0, pi/2), and heading drift finite and >= 0".into(),
@@ -410,7 +432,11 @@ impl Localization3dParameters {
         {
             return Err("kinematic odometry noise must be finite and > 0".into());
         }
-        for value in [self.initial_height_sigma, self.initial_velocity_sigma] {
+        for value in [
+            self.initial_height_sigma,
+            self.initial_velocity_sigma,
+            self.recovery_height_gate,
+        ] {
             if !valid_scale(value) || !(value * value).is_finite() {
                 return Err(
                     "initial uncertainties and recovery height gate must be finite and positive"
@@ -449,7 +475,16 @@ impl Localization3dParameters {
         if !valid_scale(self.field_containment_sigma) {
             return Err("field_containment_sigma must be finite and > 0".to_string());
         }
-
+        for (name, timeout) in [
+            ("tracking_timeout", self.tracking_timeout),
+            ("visual_tracking_timeout", self.visual_tracking_timeout),
+        ] {
+            if timeout.is_zero() || timeout.as_nanos() > i64::MAX as u128 {
+                return Err(format!(
+                    "{name} must be positive and representable in signed nanoseconds"
+                ));
+            }
+        }
         Ok(())
     }
 }

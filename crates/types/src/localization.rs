@@ -59,6 +59,13 @@ pub struct LocalizationEstimate {
     pub robot_to_field: Option<PoseEstimate<Robot, Field>>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq, Eq)]
+pub enum LocalizationState {
+    Startup,
+    Tracking,
+    LostTrack,
+}
+
 /// An exposure-time robot heading constraint, independent of optimized Local.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq)]
 pub struct HeadingConstraint {
@@ -101,6 +108,15 @@ impl FieldHeadingReference {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Message, PartialEq)]
+pub struct LocalizationStatus {
+    pub time: Time,
+    pub epoch: u64,
+    pub generation: u64,
+    pub state: LocalizationState,
+    pub heading: Option<FieldHeadingReference>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Message)]
 pub struct ScoredPose {
     pub state: MultivariateNormalDistribution<3>,
@@ -131,6 +147,7 @@ mod tests {
     #[test]
     fn localization_output_schemas_are_valid() {
         LocalizationEstimate::schema();
+        LocalizationStatus::schema();
     }
 
     #[test]
