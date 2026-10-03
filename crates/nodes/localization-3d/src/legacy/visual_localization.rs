@@ -14,7 +14,7 @@ use types::{
     },
 };
 
-use crate::live_odometry::LiveVisualOdometryLocalization;
+use super::live_odometry::LiveVisualOdometryLocalization;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GlobalVisualLock {

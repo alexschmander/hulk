@@ -5,7 +5,7 @@ use localization_factrs::{InitialState, OptimizationResult};
 use projection::camera_matrix::CameraMatrix;
 use types::{field_dimensions::FieldDimensions, time_wrapper::TimeWrapper};
 
-use crate::camera::camera_intrinsics_from_matrix;
+use super::camera::camera_intrinsics_from_matrix;
 
 /// Constructs the backend initial state from the first live camera matrix.
 ///

@@ -6,7 +6,7 @@ use types::{
     field_dimensions::FieldDimensions, primary_state::PrimaryState, time_wrapper::TimeWrapper,
 };
 
-use crate::{
+use super::{
     live_odometry::LiveVisualOdometryLocalization, pose::initial_state_from_camera_matrix,
     publish::LocalizationPublishers, visual_localization::GlobalVisualLock,
 };

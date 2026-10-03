@@ -10,7 +10,7 @@ use types::{
     visual_odometry::{VisualOdometer, VisualOdometryDelta as VisualOdometryDeltaMessage},
 };
 
-use crate::{
+use super::{
     camera::{fresh_camera_matrix, intrinsic_from_camera_intrinsics},
     ingest::ingest_visual_odometry,
     live_odometry::LiveVisualOdometryLocalization,

@@ -9,7 +9,7 @@ use types::{
     time_wrapper::TimeWrapper, visual_odometry::VisualOdometryDelta as VisualOdometryDeltaMessage,
 };
 
-use crate::camera::robot_to_camera;
+use super::camera::robot_to_camera;
 
 /// Ingests one visual-odometry delta into the VINS frontend.
 ///

@@ -6,7 +6,7 @@ use ros_z::{pubsub::Publisher, time::Time};
 use tokio::task::JoinHandle;
 use types::time_wrapper::TimeWrapper;
 
-use crate::diagnostics::SolveDiagnostics;
+use super::diagnostics::SolveDiagnostics;
 
 pub(crate) fn spawn_backend_task(
     mut backend: VinsBackend,

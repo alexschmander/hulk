@@ -8,7 +8,7 @@ use types::{
     visual_localization::{AssociationPoseHint, AssociationPoseHintSource},
 };
 
-use crate::{
+use super::{
     pose::initial_localization_for_branch_hint, visual_localization::association_pose_hint,
 };
 
