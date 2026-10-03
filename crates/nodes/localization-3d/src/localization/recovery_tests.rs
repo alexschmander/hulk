@@ -130,6 +130,7 @@ fn new_localization() -> Localization {
         model: Default::default(),
         solver: Default::default(),
         visual: Default::default(),
+        inputs: Default::default(),
         imu_preintegration: Default::default(),
         imu_bias: Default::default(),
         kinematic_odometry_noise: Some(Default::default()),

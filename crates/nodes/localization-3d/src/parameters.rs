@@ -15,6 +15,7 @@ pub struct TimingParameters {
     pub optimization_window: Duration,
     pub max_imu_gap: Duration,
     pub max_camera_gap: Duration,
+    pub startup_kinematics_freshness: Duration,
 }
 
 impl Default for TimingParameters {
@@ -26,6 +27,7 @@ impl Default for TimingParameters {
             optimization_window: Duration::from_secs(2),
             max_imu_gap: Duration::from_millis(20),
             max_camera_gap: Duration::from_millis(20),
+            startup_kinematics_freshness: Duration::from_millis(100),
         }
     }
 }
@@ -148,6 +150,34 @@ impl Default for VisualParameters {
     }
 }
 
+/// Restart-required queue/cache capacities, in messages.
+#[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputParameters {
+    pub imu_queue: usize,
+    pub kinematics_queue: usize,
+    pub visual_queue: usize,
+    pub visual_odometry_queue: usize,
+    pub kinematic_odometry_queue: usize,
+    pub camera_cache: usize,
+    pub kinematics_cache: usize,
+    pub field_cache: usize,
+}
+impl Default for InputParameters {
+    fn default() -> Self {
+        Self {
+            imu_queue: 500,
+            kinematics_queue: 500,
+            visual_queue: 60,
+            visual_odometry_queue: 60,
+            kinematic_odometry_queue: 60,
+            camera_cache: 1500,
+            kinematics_cache: 1000,
+            field_cache: 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImuPreintegrationParameters {
@@ -256,6 +286,8 @@ pub struct Localization3dParameters {
     #[serde(default)]
     pub visual: VisualParameters,
     #[serde(default)]
+    pub inputs: InputParameters,
+    #[serde(default)]
     pub kinematic_odometry_noise: Option<KinematicOdometryNoise>,
     pub accelerometer: Option<AccelerometerParameters>,
     #[serde(default)]
@@ -326,6 +358,7 @@ impl Localization3dParameters {
             t.optimization_window,
             t.max_imu_gap,
             t.max_camera_gap,
+            t.startup_kinematics_freshness,
             self.imu_preintegration.reference_duration,
         ] {
             if duration.is_zero() || duration.as_nanos() > i64::MAX as u128 {
@@ -387,7 +420,21 @@ impl Localization3dParameters {
                     .into(),
             );
         }
-
+        let i = &self.inputs;
+        if [
+            i.imu_queue,
+            i.kinematics_queue,
+            i.visual_queue,
+            i.visual_odometry_queue,
+            i.kinematic_odometry_queue,
+            i.camera_cache,
+            i.kinematics_cache,
+            i.field_cache,
+        ]
+        .contains(&0)
+        {
+            return Err("input queue/cache capacities must be positive".into());
+        }
         let p = &self.imu_preintegration;
         for value in [
             p.gyroscope_noise_density,
@@ -491,4 +538,122 @@ impl Localization3dParameters {
 
 fn valid_scale(value: f64) -> bool {
     value.is_finite() && value >= f64::MIN_POSITIVE.sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_json_defaults_and_grid_validation() {
+        let configured: Localization3dParameters =
+            json5::from_str(include_str!("parameters_fixture.json5")).unwrap();
+        configured.validate().unwrap();
+        let mut legacy = serde_json::to_value(&configured).unwrap();
+        for key in ["timing", "model", "solver", "visual", "inputs"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        legacy["imu_preintegration"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reference_duration");
+        let legacy: Localization3dParameters = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy, configured);
+        for (trajectory, bias, interval, window) in [
+            (0, 5000, 100, 2000),
+            (200, 5100, 100, 2000),
+            (200, 5000, 30, 2000),
+            (200, 5000, 100, 200),
+        ] {
+            let mut invalid = configured.clone();
+            invalid.timing.trajectory_spacing = Duration::from_millis(trajectory);
+            invalid.timing.bias_spacing = Duration::from_millis(bias);
+            invalid.timing.preintegration_interval = Duration::from_millis(interval);
+            invalid.timing.optimization_window = Duration::from_millis(window);
+            assert!(invalid.validate().is_err());
+        }
+        let mut invalid = configured.clone();
+        invalid.visual.min_associations = 2;
+        assert!(invalid.validate().is_err());
+        invalid = configured.clone();
+        invalid.inputs.imu_queue = 0;
+        assert!(invalid.validate().is_err());
+        let mut long_timeout = configured;
+        long_timeout.tracking_timeout = Duration::from_secs(48 * 3600);
+        assert!(long_timeout.validate().is_ok());
+        long_timeout.tracking_timeout = Duration::MAX;
+        assert!(long_timeout.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_unusable_whitening_and_timer_ranges() {
+        let parameters = Localization3dParameters {
+            timing: Default::default(),
+            model: Default::default(),
+            solver: Default::default(),
+            visual: Default::default(),
+            inputs: Default::default(),
+            imu_preintegration: Default::default(),
+            imu_bias: Default::default(),
+            kinematic_odometry_noise: Some(Default::default()),
+            accelerometer: None,
+            initial_height_sigma: 1.0,
+            initial_velocity_sigma: 5.0,
+            recovery_height_gate: 9.0,
+            max_tilt_error: 20.0_f64.to_radians(),
+            accelerometer_process_noise_variance: 10.0,
+            visual_feature_noise_variance: 10000.0,
+            field_containment_sigma: 1.0,
+            max_heading_error: 20.0_f64.to_radians(),
+            max_heading_reference_drift_per_second: 0.5_f64.to_radians(),
+            tracking_timeout: Duration::from_secs(2),
+            visual_tracking_timeout: Duration::from_secs(2),
+        };
+        assert!(parameters.validate().is_ok());
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut invalid = parameters.clone();
+            invalid.imu_bias.accelerometer_initial_sigma = value;
+            assert!(invalid.validate().is_err());
+            invalid = parameters.clone();
+            invalid.imu_bias.gyroscope_random_walk = value;
+            assert!(invalid.validate().is_err());
+        }
+        let mut calibrated = parameters.clone();
+        calibrated.accelerometer = Some(AccelerometerParameters::default());
+        assert!(calibrated.validate().is_ok());
+        calibrated.accelerometer.as_mut().unwrap().scale.x = 0.0;
+        assert!(calibrated.validate().is_err());
+        calibrated.accelerometer = Some(AccelerometerParameters {
+            noise_density: f64::NAN,
+            ..Default::default()
+        });
+        assert!(calibrated.validate().is_err());
+        for error in [0.0, f64::NAN, std::f64::consts::FRAC_PI_2] {
+            let mut invalid = parameters.clone();
+            invalid.max_heading_error = error;
+            assert!(invalid.validate().is_err());
+        }
+        for drift in [-1.0, f64::INFINITY, f64::NAN] {
+            let mut invalid = parameters.clone();
+            invalid.max_heading_reference_drift_per_second = drift;
+            assert!(invalid.validate().is_err());
+        }
+        let mut invalid = parameters.clone();
+        invalid.accelerometer_process_noise_variance = 1.0e-250;
+        assert!(invalid.validate().is_err());
+        invalid = parameters.clone();
+        invalid.visual_feature_noise_variance = f64::INFINITY;
+        assert!(invalid.validate().is_err());
+        invalid = parameters.clone();
+        invalid.field_containment_sigma = 1.0e-250;
+        assert!(invalid.validate().is_err());
+        for timeout in [Duration::ZERO, Duration::MAX] {
+            invalid = parameters.clone();
+            invalid.tracking_timeout = timeout;
+            assert!(invalid.validate().is_err());
+            invalid = parameters.clone();
+            invalid.visual_tracking_timeout = timeout;
+            assert!(invalid.validate().is_err());
+        }
+    }
 }
