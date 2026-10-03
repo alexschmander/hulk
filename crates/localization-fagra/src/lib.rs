@@ -5,6 +5,7 @@ pub mod variables;
 pub mod alignment;
 
 pub mod factors;
+pub mod preintegration;
 pub mod spline;
 
 use fagra::EvaluationError;

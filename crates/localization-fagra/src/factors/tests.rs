@@ -200,6 +200,97 @@ ordinary_case!(BiasPriorCase, ImuBiasPrior, |input, states| {
     }
 });
 
+ordinary_case!(PreintegratedCase, PreintegratedImu, |input, states| {
+    use crate::preintegration::{ImuDelta, PreintegrationInformation};
+    let biases = std::array::from_fn(|i| {
+        states.insert(ImuBias {
+            gyroscope: Framed::wrap(Vector3::new(c(input.values[i]), c(0.01), c(-0.02))),
+            accelerometer: Framed::wrap(Vector3::new(c(0.02), c(input.values[i + 2]), c(-0.01))),
+        })
+    });
+    PreintegratedImu {
+        controls: input.controls(states),
+        biases,
+        duration: c(0.25),
+        start_tau: c(0.2),
+        end_tau: c(0.6),
+        delta: ImuDelta {
+            duration: c(0.1),
+            rotation: Transform::wrap(UnitQuaternion::from_euler_angles(
+                c(0.01),
+                c(-0.02),
+                c(0.03),
+            )),
+            velocity: Framed::wrap(Vector3::new(c(0.01), c(-0.02), c(0.98))),
+            position: Framed::wrap(Vector3::new(c(0.001), c(0.002), c(0.049))),
+            reference_biases: [ImuBias::identity(), ImuBias::identity()],
+            bias_jacobians: std::array::from_fn(|i| {
+                SMatrix::from_fn(|r, k| c((1 + i + r + 2 * k) as f64 * 0.0003))
+            }),
+        },
+        information: if input.bridge {
+            PreintegrationInformation::Rotation(root())
+        } else {
+            PreintegrationInformation::Full(root())
+        },
+        gravity_compensation: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(9.81))),
+        position: Framed::wrap(if input.stationary {
+            Vector3::zeros()
+        } else {
+            Vector3::new(c(0.12), c(-0.03), c(0.08))
+        }),
+    }
+});
+fagra::factor_tests!(preintegrated_f64, PreintegratedCase, f64);
+fagra::factor_tests!(preintegrated_f32, PreintegratedCase, f32);
+
+#[test]
+fn preintegration_at_offset_imu_preserves_fast_rotation_about_robot_origin() {
+    use crate::preintegration::{ImuNoise, ImuPreintegrator};
+    let mut states = Scene::new();
+    let controls = std::array::from_fn(|i| {
+        states.graph.add(PoseControl {
+            pose: Framed::wrap(Isometry3::from_parts(
+                Vector3::zeros().into(),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 4.0 * (i as f64 - 1.0) * 0.2),
+            )),
+        })
+    });
+    let biases = std::array::from_fn(|_| states.graph.add(ImuBias::identity()));
+    let position = Vector3::new(0.12, -0.03, 0.08);
+    let omega = Vector3::new(0.0, 0.0, 4.0);
+    let force = Vector3::new(0.0, 0.0, 9.81) + omega.cross(&omega.cross(&position));
+    let mut integrated = ImuPreintegrator::new([ImuBias::identity(), ImuBias::identity()], true);
+    for i in 0..50 {
+        integrated
+            .integrate(
+                Framed::wrap(omega),
+                Some(Framed::wrap(force)),
+                0.002,
+                (0.05 + i as f64 * 0.002 + 0.001) / 5.0,
+                ImuNoise {
+                    gyroscope: 2e-5,
+                    accelerometer: 0.09,
+                    integration: 1e-8,
+                },
+            )
+            .unwrap();
+    }
+    let mut factor = PreintegratedImu {
+        controls,
+        biases,
+        duration: 0.2,
+        start_tau: 0.25,
+        end_tau: 0.75,
+        information: integrated.information().unwrap(),
+        delta: integrated.delta,
+        position: Framed::wrap(position),
+        gravity_compensation: Framed::wrap(Vector3::new(0.0, 0.0, 9.81)),
+    };
+    assert!(factor.cost(&states).unwrap() < 1e-3);
+    factor.position = Framed::wrap(Vector3::zeros());
+    assert!(factor.cost(&states).unwrap() > 1.0);
+}
 ordinary_case!(BiasWalkCase, ImuBiasWalk, |input, states| {
     ImuBiasWalk {
         biases: [
