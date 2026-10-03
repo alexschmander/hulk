@@ -98,6 +98,7 @@ pub struct Estimator {
     intrinsics: StateKey<CameraIntrinsics<f64>>,
     latest_time: Time,
     last_converged_time: Option<Time>,
+    motion_checkpoint: Option<recovery::MotionCheckpoint>,
     latest_vo_epoch: Option<u64>,
     latest_kinematic_time: Option<Time>,
     measurements: BTreeMap<i64, usize>,
@@ -198,6 +199,7 @@ impl Estimator {
             intrinsics,
             latest_time: origin,
             last_converged_time: None,
+            motion_checkpoint: None,
             latest_vo_epoch: None,
             latest_kinematic_time: None,
             measurements: BTreeMap::new(),
@@ -332,6 +334,18 @@ impl Estimator {
             }
             if let Some(key) = self.current_yaw.take() {
                 self.graph.remove_factor(key)?;
+            }
+            if result.is_ok() {
+                let (segment, tau) = self.segment_and_tau(self.latest_time)?;
+                if let Some(attitude) = self.attitude_at(self.latest_time) {
+                    self.motion_checkpoint = Some(recovery::MotionCheckpoint {
+                        time: self.latest_time,
+                        state: self
+                            .spline(control_keys(&self.controls, segment)?)?
+                            .state(tau)?,
+                        attitude,
+                    });
+                }
             }
             // Retire the restored graph after rejection too; continuous motion
             // must not grow an unbounded graph while field updates are withheld.
@@ -1026,6 +1040,120 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(estimator.latest_time, Time::from_nanos(1_000_000_000));
+    }
+
+    fn recovery_camera() -> CameraGeometry {
+        CameraGeometry {
+            robot_to_camera: Isometry3::wrap(
+                nalgebra::Isometry3::from_parts(
+                    nalgebra::Translation3::new(0.12, -0.04, 0.2),
+                    nalgebra::UnitQuaternion::from_euler_angles(std::f32::consts::PI, 0.0, 0.0),
+                )
+                .inverse(),
+            ),
+            intrinsics: Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]),
+        }
+    }
+
+    #[test]
+    fn startup_replaces_drifted_height_prior_with_landmark_fit() {
+        use types::visual_localization_next::FieldMarkAssociation;
+        let camera = recovery_camera();
+        let truth = nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(-2.0, 1.0, 0.55),
+            nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 0.4),
+        );
+        let associations: Vec<_> = [
+            point![-3.0, 0.0, 0.0],
+            point![-1.0, 0.0, 0.0],
+            point![-2.0, 2.0, 0.0],
+        ]
+        .into_iter()
+        .map(|field_point| {
+            let p = camera.robot_to_camera.inner * truth.inverse() * field_point.inner;
+            FieldMarkAssociation {
+                field_point,
+                detection: camera.intrinsics.project(Vector3::wrap(p.coords)),
+            }
+        })
+        .collect();
+        for wrong_height in [0.55, 4.0] {
+            let mut estimator = estimator();
+            let wrong_pose = Isometry3::wrap(nalgebra::Isometry3::from_parts(
+                nalgebra::Translation3::new(100.0, -50.0, wrong_height),
+                nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.05, 0.0),
+            ));
+            estimator = Estimator::new(
+                estimator.origin,
+                estimator.epoch,
+                wrong_pose,
+                &camera.intrinsics,
+                estimator.parameters.clone(),
+                &FieldDimensions::SPL_2025,
+            )
+            .unwrap();
+            let time = Time::from_nanos(1_100_000_000);
+            for index in 0..=400 {
+                estimator
+                    .ingest_imu(
+                        estimator.origin + Duration::from_millis(index * 2),
+                        ImuState {
+                            roll_pitch_yaw: vector![0.1, -0.05, 0.0],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            let origin = estimator.origin;
+            estimator = estimator
+                .bootstrap_candidate(
+                    TimeWrapper {
+                        time,
+                        inner: VisualLocalizationFrame {
+                            epoch: 7,
+                            source:
+                                types::visual_localization_next::VisualAssociationSource::Tracking,
+                            generation: 0,
+                            robot_to_camera: camera.robot_to_camera,
+                            camera_intrinsic: camera.intrinsics,
+                            associations: associations.clone(),
+                        },
+                    },
+                    None,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(estimator.origin, origin);
+            assert!(estimator.reprojection_batches.is_empty());
+            let controls = control_keys(&estimator.controls, 0).unwrap();
+            let seeded = estimator.spline(controls).unwrap().pose(0.0).unwrap();
+            assert!((seeded.inner.translation.vector.z - 0.55).abs() < 1e-5);
+            for index in 0..100 {
+                estimator
+                    .ingest_imu(
+                        time + Duration::from_millis(index * 2),
+                        ImuState {
+                            roll_pitch_yaw: Vector3::wrap(nalgebra::Vector3::new(0.1, -0.05, 0.0)),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            let solved = estimator.solve();
+            assert!(
+                solved.diagnostics.failure.is_none(),
+                "{:?}",
+                solved.diagnostics
+            );
+            let field = solved.estimate.unwrap().robot_to_field.unwrap().pose.inner;
+            assert!(
+                (field.translation.vector - truth.translation.vector.cast::<f64>()).norm() < 1e-4
+            );
+            assert!(field.rotation.angle_to(&truth.rotation.cast::<f64>()) < 1e-4);
+            assert!(estimator.accepted_visual_rms().unwrap() < 0.01);
+            assert!(estimator.pending_visuals.is_empty());
+            assert_eq!(estimator.reprojection_batches.len(), 1);
+        }
     }
 
     #[test]

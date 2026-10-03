@@ -50,7 +50,11 @@ impl ImuIntervals {
             terminal: None,
         }
     }
-
+    pub(super) fn restore_boundary(&mut self, origin: Time, start: Time, source: &Self) {
+        if let Some((&time, &sample)) = source.samples.range(..start).next_back() {
+            self.insert(origin, time, sample.gyro, sample.force);
+        }
+    }
     #[cfg(test)]
     pub(super) fn interval_count(&self) -> usize {
         self.intervals.len()
