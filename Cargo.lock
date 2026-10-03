@@ -6463,10 +6463,13 @@ dependencies = [
  "booster",
  "color-eyre",
  "coordinate_systems",
+ "fagra",
  "field_mark_association",
+ "json5",
  "kinematics",
  "linear_algebra",
  "localization-factrs",
+ "localization-fagra",
  "mcap",
  "nalgebra 0.34.2",
  "projection",
@@ -6475,6 +6478,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "types",
 ]
 
