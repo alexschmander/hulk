@@ -58,6 +58,8 @@ pub struct ModelParameters {
     pub anchor_yaw_sigma: f64,
     /// Ground contact standard deviation, metres.
     pub foot_sigma: f64,
+    /// VO standard deviation, metres/radians.
+    pub visual_odometry_sigma: f64,
     /// Relative yaw variance per observation, radians squared.
     pub relative_yaw_variance: f64,
     /// Rotational process spectral density, rad²/s.
@@ -82,6 +84,7 @@ impl Default for ModelParameters {
             anchor_xy_sigma: 0.001,
             anchor_yaw_sigma: 0.001,
             foot_sigma: 0.01,
+            visual_odometry_sigma: 0.1,
             relative_yaw_variance: 2e-5,
             rotation_process_variance: 0.01,
             gap_uncertainty_multiplier: 10.0,
@@ -220,6 +223,24 @@ impl Default for AccelerometerParameters {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KinematicOdometryNoise {
+    /// Forward/lateral displacement noise floor, in metres.
+    pub position_sigma: nalgebra::Vector2<f64>,
+    /// Forward/lateral displacement variance growth, in m²/s.
+    pub translation_variance_per_second: nalgebra::Vector2<f64>,
+}
+
+impl Default for KinematicOdometryNoise {
+    fn default() -> Self {
+        Self {
+            position_sigma: nalgebra::Vector2::repeat(0.005),
+            translation_variance_per_second: nalgebra::Vector2::repeat(0.001),
+        }
+    }
+}
+
 /// Runtime parameters for the 3D localization node.
 #[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -232,6 +253,8 @@ pub struct Localization3dParameters {
     pub solver: SolverParameters,
     #[serde(default)]
     pub visual: VisualParameters,
+    #[serde(default)]
+    pub kinematic_odometry_noise: Option<KinematicOdometryNoise>,
     pub accelerometer: Option<AccelerometerParameters>,
     #[serde(default)]
     pub imu_bias: ImuBiasParameters,
@@ -308,6 +331,7 @@ impl Localization3dParameters {
             m.anchor_xy_sigma,
             m.anchor_yaw_sigma,
             m.foot_sigma,
+            m.visual_odometry_sigma,
             m.relative_yaw_variance,
             m.rotation_process_variance,
             m.gap_uncertainty_multiplier,
@@ -377,7 +401,15 @@ impl Localization3dParameters {
                 "heading error must be in (0, pi/2), and heading drift finite and >= 0".into(),
             );
         }
-
+        if let Some(noise) = &self.kinematic_odometry_noise
+            && !noise
+                .position_sigma
+                .iter()
+                .chain(noise.translation_variance_per_second.iter())
+                .all(|v| valid_scale(*v) && (*v * *v).is_finite())
+        {
+            return Err("kinematic odometry noise must be finite and > 0".into());
+        }
         for value in [self.initial_height_sigma, self.initial_velocity_sigma] {
             if !valid_scale(value) || !(value * value).is_finite() {
                 return Err(

@@ -150,6 +150,12 @@ impl Estimator {
             }
             self.graph.remove_batch(entry.remove())?;
         }
+        while let Some(entry) = self.odometry_batches.first_entry() {
+            if *entry.key() >= oldest {
+                break;
+            }
+            self.graph.remove_batch(entry.remove())?;
+        }
         for &(index, batch) in &self.reprojection_batches {
             if index < oldest {
                 self.graph.remove_batch(batch)?;

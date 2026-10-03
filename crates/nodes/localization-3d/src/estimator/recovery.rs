@@ -1,6 +1,7 @@
 use color_eyre::Result;
 use coordinate_systems::Robot;
-use linear_algebra::{Point3, Vector3};
+use linear_algebra::{Isometry3, Point3, Vector3};
+use nalgebra::Matrix2;
 use ros_z::time::Time;
 
 use super::Estimator;
@@ -20,18 +21,35 @@ pub(super) enum MotionRecord {
         left: Point3<Robot, f64>,
         right: Point3<Robot, f64>,
     },
+    Kinematic {
+        previous_time: Time,
+        time: Time,
+        translation: linear_algebra::Vector2<coordinate_systems::Ground, f64>,
+        information_root: Matrix2<f64>,
+    },
+    Visual {
+        previous_time: Time,
+        time: Time,
+        transform: Isometry3<Robot, Robot, f64>,
+    },
 }
 
 impl MotionRecord {
     fn start(&self) -> Time {
         match self {
             Self::Imu { time, .. } | Self::Feet { time, .. } => *time,
+            Self::Kinematic { previous_time, .. } | Self::Visual { previous_time, .. } => {
+                *previous_time
+            }
         }
     }
 
     fn end(&self) -> Time {
         match self {
-            Self::Imu { time, .. } | Self::Feet { time, .. } => *time,
+            Self::Imu { time, .. }
+            | Self::Feet { time, .. }
+            | Self::Kinematic { time, .. }
+            | Self::Visual { time, .. } => *time,
         }
     }
 
@@ -44,6 +62,22 @@ impl MotionRecord {
                 force,
             } => estimator.insert_imu(time, angular_velocity, attitude, force),
             Self::Feet { time, left, right } => estimator.insert_feet(time, left, right),
+            Self::Kinematic {
+                previous_time,
+                time,
+                translation,
+                information_root,
+            } => estimator.insert_kinematic_odometry(
+                previous_time,
+                time,
+                translation,
+                information_root,
+            ),
+            Self::Visual {
+                previous_time,
+                time,
+                transform,
+            } => estimator.insert_visual_odometry(previous_time, time, transform),
         }
     }
 }

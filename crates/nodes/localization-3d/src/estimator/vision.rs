@@ -1,12 +1,20 @@
-use super::{Estimator, control_keys};
+use super::{Estimator, control_keys, recovery::MotionRecord};
 use crate::alignment::{reprojection_rms, valid_visual_frame, valid_visual_rms};
 use crate::heading::HeadingReference;
 use color_eyre::{Result, eyre::eyre};
-use coordinate_systems::Field;
-use linear_algebra::{IntoTransform, Orientation2, Point2, Point3};
-use localization_fagra::factors::{FrameReprojections, ReprojectionObservation};
+use coordinate_systems::{Field, Robot};
+use linear_algebra::{IntoTransform, Isometry3, Orientation2, Point2, Point3};
+use localization_fagra::factors::{
+    AdjacentVisualOdometry, FrameReprojections, ReprojectionObservation, VisualOdometry,
+    VisualOdometryObservation,
+};
+use nalgebra::SMatrix;
 use ros_z::time::Time;
-use types::{time_wrapper::TimeWrapper, visual_localization_next::VisualLocalizationFrame};
+use types::camera_geometry::CameraGeometry;
+use types::{
+    time_wrapper::TimeWrapper, visual_localization_next::VisualLocalizationFrame,
+    visual_odometry::VisualOdometer,
+};
 
 pub(super) struct PendingVisual {
     segment: i64,
@@ -57,7 +65,7 @@ impl Estimator {
     }
 
     /// Validate before either publication or marginalization can retain a bad field update.
-    pub fn validate_heading(&self, reference: &HeadingReference) -> Result<()> {
+    pub(super) fn validate_heading(&self, reference: &HeadingReference) -> Result<()> {
         let (&time, _) = self
             .attitudes
             .range(..=self.latest_time)
@@ -81,7 +89,7 @@ impl Estimator {
         Ok(())
     }
 
-    pub fn validate_tilt(&self) -> Result<()> {
+    pub(super) fn validate_tilt(&self) -> Result<()> {
         let Some((&time, &attitude)) = self.attitudes.range(..=self.latest_time).next_back() else {
             return Ok(());
         };
@@ -101,7 +109,7 @@ impl Estimator {
         Ok(())
     }
 
-    pub fn validate_pending_visuals(&self) -> Result<()> {
+    pub(super) fn validate_pending_visuals(&self) -> Result<()> {
         if self.pending_visuals.iter().any(|pending| {
             !valid_visual_frame(&pending.frame.inner, &self.parameters.visual)
                 || !valid_visual_rms(self.frame_rms(&pending.frame), &self.parameters.visual)
@@ -111,7 +119,7 @@ impl Estimator {
         Ok(())
     }
 
-    pub fn accept_visuals(&mut self) {
+    pub(super) fn accept_visuals(&mut self) {
         for pending in self.pending_visuals.drain(..) {
             self.reprojection_batches
                 .push((pending.segment, pending.batch));
@@ -125,7 +133,7 @@ impl Estimator {
         }
     }
 
-    pub fn discard_visuals(&mut self) -> Result<()> {
+    pub(super) fn discard_visuals(&mut self) -> Result<()> {
         for pending in self.pending_visuals.drain(..) {
             for key in &pending.factors {
                 self.graph.remove_factor(*key)?;
@@ -200,5 +208,117 @@ impl Estimator {
         });
         self.commit_time(time);
         Ok(true)
+    }
+
+    pub fn ingest_visual_odometry(
+        &mut self,
+        sample: VisualOdometer,
+        previous_camera: Option<&CameraGeometry>,
+        current_camera: Option<&CameraGeometry>,
+    ) -> Result<bool> {
+        let Some((current_segment, _)) = self.check_time(sample.time, "visual odometry")? else {
+            return Ok(false);
+        };
+        if self
+            .latest_vo_epoch
+            .is_some_and(|epoch| sample.epoch < epoch)
+        {
+            tracing::warn!(epoch = sample.epoch, "discarding old VO epoch");
+            return Ok(false);
+        }
+        self.latest_vo_epoch = Some(sample.epoch);
+        let Some(delta) = sample.delta else {
+            return Ok(false);
+        };
+        if !delta
+            .current_left_camera_to_previous_left_camera
+            .to_homogeneous()
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            tracing::warn!("discarding invalid VO timestamp or transform");
+            return Ok(false);
+        }
+        let (Some(previous_camera), Some(current_camera)) = (previous_camera, current_camera)
+        else {
+            tracing::warn!("discarding visual odometry without endpoint camera geometry");
+            return Ok(false);
+        };
+        let Some((previous_segment, _)) =
+            self.check_time(delta.previous_time, "visual odometry")?
+        else {
+            return Ok(false);
+        };
+        if sample.time <= delta.previous_time || current_segment - previous_segment > 1 {
+            tracing::warn!("discarding unsupported visual odometry interval");
+            return Ok(false);
+        }
+        if delta.previous_time.as_nanos()
+            < self
+                .latest_time
+                .max(sample.time)
+                .as_nanos()
+                .saturating_sub(self.parameters.timing.window_ns())
+        {
+            tracing::warn!("discarding visual odometry outside optimization window");
+            return Ok(false);
+        }
+        let transform = previous_camera
+            .robot_to_camera
+            .inner
+            .cast::<f64>()
+            .inverse()
+            * delta
+                .current_left_camera_to_previous_left_camera
+                .cast::<f64>()
+            * current_camera.robot_to_camera.inner.cast::<f64>();
+        self.accept_motion(MotionRecord::Visual {
+            previous_time: delta.previous_time,
+            time: sample.time,
+            transform: transform.framed_transform(),
+        })
+    }
+
+    pub(super) fn insert_visual_odometry(
+        &mut self,
+        previous_time: Time,
+        time: Time,
+        transform: Isometry3<Robot, Robot, f64>,
+    ) -> Result<()> {
+        let (previous_segment, previous_tau) = self.segment_and_tau(previous_time)?;
+        let (current_segment, current_tau) = self.segment_and_tau(time)?;
+        let observation = VisualOdometryObservation {
+            previous_tau,
+            current_tau,
+            current_to_previous: transform,
+        };
+        let information_root = SMatrix::identity() / self.parameters.model.visual_odometry_sigma;
+        if previous_segment == current_segment {
+            let controls = self.ensure_segment(current_segment)?;
+            let batch = *self
+                .odometry_batches
+                .entry(current_segment)
+                .or_insert_with(|| {
+                    self.graph.add_batch(VisualOdometry {
+                        controls,
+                        duration: self.parameters.timing.trajectory_spacing.as_secs_f64(),
+                        information_root,
+                        huber_threshold: self.parameters.model.huber_threshold,
+                    })
+                });
+            self.graph.add_factor_to(batch, observation)?;
+        } else {
+            let a = self.ensure_segment(previous_segment)?;
+            let b = self.ensure_segment(current_segment)?;
+            self.graph.add_factor(AdjacentVisualOdometry {
+                controls: [a[0], a[1], a[2], a[3], b[3]],
+                duration: self.parameters.timing.trajectory_spacing.as_secs_f64(),
+                observation,
+                information_root,
+                huber_threshold: self.parameters.model.huber_threshold,
+            })?;
+        }
+        *self.measurements.entry(previous_segment).or_default() += 1;
+        Ok(())
     }
 }

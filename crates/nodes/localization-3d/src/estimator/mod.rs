@@ -13,9 +13,10 @@ use fagra::{
 use linear_algebra::{Framed, Isometry3, Vector2, Vector3, vector};
 use localization_fagra::{
     factors::{
-        CameraIntrinsicsPrior, FieldContainment, FootGround, FootObservation, FrameReprojections,
-        ImuBiasPrior, ImuBiasWalk, ImuKinematics, MotionPrior, PreintegratedImu,
-        ReprojectionObservation, TrajectoryPrior,
+        AdjacentKinematicOdometry, AdjacentVisualOdometry, CameraIntrinsicsPrior, FieldContainment,
+        FootGround, FootObservation, FrameReprojections, ImuBiasPrior, ImuBiasWalk, ImuKinematics,
+        KinematicOdometry, MotionPrior, PreintegratedImu, ReprojectionObservation, TrajectoryPrior,
+        VisualOdometry, VisualOdometryObservation,
     },
     variables::{CameraIntrinsics, FieldAlignment, ImuBias, PoseControl, TrajectoryState},
 };
@@ -34,7 +35,7 @@ mod attitude;
 mod bias;
 mod covariance;
 mod inertial;
-
+mod kinematic_odometry;
 mod preintegration;
 mod recovery;
 mod vision;
@@ -58,10 +59,14 @@ fagra::factors! {
         motion: MotionPrior,
         yaw: localization_fagra::factors::RelativeYaw,
         containment: FieldContainment,
+        adjacent_odometry: AdjacentVisualOdometry,
+        kinematic_odometry: KinematicOdometry,
+        adjacent_kinematic_odometry: AdjacentKinematicOdometry,
         imu: ImuKinematics,
         preintegrated_imu: PreintegratedImu,
         feet: Batch<FootGround, FootObservation>,
         reprojections: Batch<FrameReprojections, ReprojectionObservation>,
+        odometry: Batch<VisualOdometry, VisualOdometryObservation>,
     }
 }
 
@@ -86,12 +91,15 @@ pub struct Estimator {
     biases: BTreeMap<i64, StateKey<ImuBias>>,
     preintegration: preintegration::ImuIntervals,
     foot_batches: BTreeMap<i64, BatchKey<FootGround<f64>>>,
+    odometry_batches: BTreeMap<i64, BatchKey<VisualOdometry<f64>>>,
     /// Accepted batches awaiting retirement; pending batches belong to PendingVisual.
     reprojection_batches: Vec<(i64, BatchKey<FrameReprojections<f64>>)>,
     alignment: Option<StateKey<FieldAlignment<f64>>>,
     intrinsics: StateKey<CameraIntrinsics<f64>>,
     latest_time: Time,
     last_converged_time: Option<Time>,
+    latest_vo_epoch: Option<u64>,
+    latest_kinematic_time: Option<Time>,
     measurements: BTreeMap<i64, usize>,
     latest_visual_frame: Option<TimeWrapper<VisualLocalizationFrame>>,
     pending_visuals: Vec<vision::PendingVisual>,
@@ -184,11 +192,14 @@ impl Estimator {
             biases: BTreeMap::new(),
             preintegration: preintegration::ImuIntervals::new(&parameters.timing),
             foot_batches: BTreeMap::new(),
+            odometry_batches: BTreeMap::new(),
             reprojection_batches: Vec::new(),
             alignment: None,
             intrinsics,
             latest_time: origin,
             last_converged_time: None,
+            latest_vo_epoch: None,
+            latest_kinematic_time: None,
             measurements: BTreeMap::new(),
             latest_visual_frame: None,
             pending_visuals: Vec::new(),
@@ -512,16 +523,20 @@ mod tests {
 
     use linear_algebra::{IntoTransform, point};
     use projection::intrinsic::Intrinsic;
+    use types::camera_geometry::CameraGeometry;
 
     use super::*;
 
     pub(super) fn estimator() -> Estimator {
-        let intrinsics = Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]);
+        let camera = CameraGeometry {
+            intrinsics: Intrinsic::new(nalgebra::vector![300.0, 300.0], point![160.0, 120.0]),
+            ..Default::default()
+        };
         Estimator::new(
             Time::from_nanos(1_000_000_000),
             7,
             nalgebra::Isometry3::identity().framed_transform(),
-            &intrinsics,
+            &camera.intrinsics,
             Localization3dParameters {
                 timing: Default::default(),
                 model: Default::default(),
@@ -529,6 +544,7 @@ mod tests {
                 visual: Default::default(),
                 imu_preintegration: Default::default(),
                 imu_bias: Default::default(),
+                kinematic_odometry_noise: Some(Default::default()),
                 accelerometer: None,
                 initial_height_sigma: 1.0,
                 initial_velocity_sigma: 5.0,
@@ -771,6 +787,118 @@ mod tests {
     }
 
     #[test]
+    fn kinematic_odometry_stops_blind_motion_and_survives_marginalization() {
+        use types::odometry::KinematicOdometryDelta;
+        let run = |observe_stop: bool| {
+            let mut estimator = estimator();
+            let origin = estimator.origin;
+            let mut last_delta = None;
+            for index in 0..=80 {
+                let time = origin + Duration::from_millis(index * 50);
+                estimator.ingest_imu(time, ImuState::default()).unwrap();
+                if index > 0 && (index <= 20 || observe_stop) {
+                    let delta = KinematicOdometryDelta {
+                        previous_time: time - Duration::from_millis(50),
+                        time,
+                        current_to_previous: linear_algebra::Isometry2::from_parts(
+                            vector![if index <= 20 { 0.02 } else { 0.0 }, 0.0],
+                            0.0,
+                        ),
+                    };
+                    assert!(estimator.ingest_kinematic_odometry(delta).unwrap());
+                    last_delta = Some(delta);
+                }
+                if index == 0 {
+                    continue;
+                }
+                let solved = estimator.solve();
+                assert!(
+                    solved.diagnostics.failure.is_none(),
+                    "{:?}",
+                    solved.diagnostics
+                );
+            }
+            assert!(
+                !estimator
+                    .ingest_kinematic_odometry(last_delta.unwrap())
+                    .unwrap()
+            );
+            let (segment, tau) = estimator.segment_and_tau(estimator.latest_time).unwrap();
+            let controls = control_keys(&estimator.controls, segment).unwrap();
+            estimator.spline(controls).unwrap().state(tau).unwrap()
+        };
+        let stopped = run(true);
+        assert!(stopped.velocity.norm() < 0.02, "{stopped:?}");
+        assert!(
+            (stopped.pose.inner.translation.vector.x - 0.4).abs() < 0.05,
+            "{stopped:?}"
+        );
+        let unobserved = run(false);
+        assert!(unobserved.velocity.x() > 0.2, "{unobserved:?}");
+        assert!(
+            unobserved.pose.inner.translation.vector.x > 1.0,
+            "{unobserved:?}"
+        );
+    }
+
+    #[test]
+    fn head_motion_odometry_does_not_move_stationary_body_without_ground_geometry() {
+        use types::visual_odometry::{VisualOdometer, VisualOdometryDelta};
+
+        let mut estimator = estimator();
+        let camera = |angle| CameraGeometry {
+            robot_to_camera: Isometry3::wrap(
+                nalgebra::Isometry3::from_parts(
+                    nalgebra::Translation3::new(0.05, 0.0, 0.25),
+                    nalgebra::UnitQuaternion::from_euler_angles(0.0, angle, 0.0),
+                )
+                .inverse(),
+            ),
+            ..Default::default()
+        };
+        let mut previous = camera(0.0);
+        for index in 0..100 {
+            let time = Time::from_nanos(1_000_000_000 + index * 2_000_000);
+            estimator.ingest_imu(time, ImuState::default()).unwrap();
+            if index > 0 {
+                let current = camera(index as f32 * 0.005);
+                let delta =
+                    previous.robot_to_camera.inner * current.robot_to_camera.inner.inverse();
+                assert!(
+                    estimator
+                        .ingest_visual_odometry(
+                            VisualOdometer {
+                                time,
+                                epoch: 0,
+                                delta: Some(VisualOdometryDelta {
+                                    previous_time: time - Duration::from_millis(2),
+                                    current_left_camera_to_previous_left_camera: delta,
+                                }),
+                                current_left_camera_to_visual_odometer: current
+                                    .robot_to_camera
+                                    .inner
+                                    .inverse(),
+                            },
+                            Some(&previous),
+                            Some(&current),
+                        )
+                        .unwrap()
+                );
+                previous = current;
+            }
+        }
+        let result = estimator.solve();
+        assert!(
+            result.diagnostics.failure.is_none(),
+            "{:?}",
+            result.diagnostics
+        );
+        let pose = result.estimate.unwrap().robot_to_local.pose.inner;
+        assert!(pose.translation.vector.norm() < 1e-5, "{pose:?}");
+        assert!(pose.rotation.angle() < 1e-5, "{pose:?}");
+    }
+
+    #[test]
     fn solve_retires_controls_outside_two_second_window() {
         let mut estimator = estimator();
         for index in 0..=110 {
@@ -794,6 +922,86 @@ mod tests {
             estimator.solve().estimate.unwrap().time,
             Time::from_nanos(3_200_000_000)
         );
+    }
+
+    #[test]
+    fn imu_bias_learns_from_motion_evidence_and_stays_bounded_across_retirement() {
+        use types::visual_odometry::{VisualOdometer, VisualOdometryDelta};
+        let mut estimator = estimator();
+        estimator.parameters.accelerometer = Some(Default::default());
+        estimator.parameters.kinematic_odometry_noise = None;
+        let camera = CameraGeometry::default();
+        let origin = estimator.origin;
+        let bias_at = |t: f64| ImuBias {
+            gyroscope: vector![0.003 + 0.00005 * t, -0.004, 0.006],
+            accelerometer: vector![0.025 + 0.0001 * t, -0.03, 0.015],
+        };
+        let mut last_bias = None;
+        let mut last_pose = None;
+        for index in 0..=2000 {
+            let t = index as f64 * 0.01;
+            let time = origin + Duration::from_millis(index * 10);
+            let truth_bias = bias_at(t);
+            estimator
+                .ingest_imu(
+                    time,
+                    ImuState {
+                        angular_velocity: Vector3::wrap(truth_bias.gyroscope.inner.cast()),
+                        linear_acceleration: Vector3::wrap(
+                            (truth_bias.accelerometer.inner + nalgebra::vector![0.1, 0.0, 9.81])
+                                .cast(),
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            if index > 0 && index % 2 == 0 {
+                estimator
+                    .ingest_visual_odometry(
+                        VisualOdometer {
+                            time,
+                            epoch: 0,
+                            delta: Some(VisualOdometryDelta {
+                                previous_time: time - Duration::from_millis(20),
+                                current_left_camera_to_previous_left_camera:
+                                    nalgebra::Isometry3::translation(
+                                        (0.05 * (t * t - (t - 0.02).powi(2))) as f32,
+                                        0.0,
+                                        0.0,
+                                    ),
+                            }),
+                            current_left_camera_to_visual_odometer: nalgebra::Isometry3::identity(),
+                        },
+                        Some(&camera),
+                        Some(&camera),
+                    )
+                    .unwrap();
+            }
+            if index > 0 && index % 5 == 0 {
+                let solved = estimator.solve();
+                let estimate = solved.estimate.expect("biased but observable motion");
+                last_pose = Some(estimate.robot_to_local.pose);
+                last_bias = solved.diagnostics.imu_bias;
+                assert!(
+                    estimator.biases.len() <= 3,
+                    "coarse calibration must retire with the window"
+                );
+                assert!(estimator.preintegration.interval_count() <= 22);
+            }
+        }
+        let bias = last_bias.unwrap();
+        assert!(
+            (bias.accelerometer - bias_at(20.0).accelerometer).norm() < 0.012,
+            "{bias:?}"
+        );
+        assert!(
+            (bias.gyroscope - bias_at(20.0).gyroscope).norm() < 0.001,
+            "{bias:?}"
+        );
+        // Real acceleration stays in the trajectory, not in the learned bias.
+        assert!((last_pose.unwrap().translation().x() - 20.0).abs() < 0.2);
+        assert!(estimator.biases.first_key_value().unwrap().0 >= &3);
+        assert!(bias.covariance.iter().flatten().all(|v| v.is_finite()));
     }
 
     #[test]

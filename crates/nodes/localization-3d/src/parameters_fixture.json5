@@ -28,6 +28,7 @@
     "anchor_xy_sigma": 0.001,
     "anchor_yaw_sigma": 0.001,
     "foot_sigma": 0.01,
+    "visual_odometry_sigma": 0.1,
     "relative_yaw_variance": 2e-05,
     "rotation_process_variance": 0.01,
     "gap_uncertainty_multiplier": 10.0,
@@ -52,6 +53,7 @@
     "max_rms_px": 10.0,
     "min_downward_ray": 1e-06
   },
+  "kinematic_odometry_noise": null,
   "imu_preintegration": {
     "gyroscope_noise_density": 0.00447213595499958,
     "integration_noise_density": 0.0001,
