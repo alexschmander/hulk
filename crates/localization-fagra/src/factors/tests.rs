@@ -89,6 +89,25 @@ impl Inputs {
                 * Vector3::z(),
         )
     }
+
+    fn odometry<R: RealField + Copy>(
+        &self,
+        previous: f64,
+        current: f64,
+    ) -> VisualOdometryObservation<R> {
+        VisualOdometryObservation {
+            previous_tau: c(previous),
+            current_tau: c(current),
+            current_to_previous: Transform::wrap(Isometry3::from_parts(
+                Vector3::new(c(self.values[6]), c(self.values[7]), c(self.values[8])).into(),
+                UnitQuaternion::from_euler_angles(
+                    c(self.values[7]),
+                    c(self.values[8]),
+                    c(self.values[6]),
+                ),
+            )),
+        }
+    }
 }
 
 macro_rules! ordinary_case {
@@ -426,6 +445,51 @@ impl<const ROBUST: bool> TestFactorBatch for ReprojectionCase<ROBUST> {
 }
 
 #[derive(Debug)]
+struct OdometryCase<const ROBUST: bool>(Inputs);
+impl<const ROBUST: bool> TestFactorBatch for OdometryCase<ROBUST> {
+    type Batch<R: RealField + Copy> = VisualOdometry<R>;
+    fn cases() -> impl Strategy<Value = Self> {
+        Inputs::cases().prop_map(Self)
+    }
+    fn build<R: RealField + Copy>(
+        &self,
+        states: &mut TestStates<R>,
+    ) -> (VisualOdometry<R>, Vec<VisualOdometryObservation<R>>) {
+        (
+            VisualOdometry {
+                controls: self.0.controls(states),
+                duration: c(0.25),
+                information_root: root(),
+                huber_threshold: c(if ROBUST { 0.15 } else { 1e6 }),
+            },
+            vec![
+                self.0.odometry(0.0, 0.4),
+                self.0.odometry(0.3, 0.9),
+                self.0.odometry(0.0, 1.0),
+            ],
+        )
+    }
+}
+
+#[derive(Debug)]
+struct AdjacentCase<const ROBUST: bool>(Inputs);
+impl<const ROBUST: bool> TestFactor for AdjacentCase<ROBUST> {
+    type Factor<R: RealField + Copy> = AdjacentVisualOdometry<R>;
+    fn cases() -> impl Strategy<Value = Self> {
+        Inputs::cases().prop_map(Self)
+    }
+    fn build<R: RealField + Copy>(&self, states: &mut TestStates<R>) -> AdjacentVisualOdometry<R> {
+        AdjacentVisualOdometry {
+            controls: self.0.controls(states),
+            duration: c(0.25),
+            observation: self.0.odometry(0.8, 0.2),
+            information_root: root(),
+            huber_threshold: c(if ROBUST { 0.15 } else { 1e6 }),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct KinematicCase<const N: usize, const ROBUST: bool>(Inputs);
 impl<const N: usize, const ROBUST: bool> TestFactor for KinematicCase<N, ROBUST> {
     type Factor<R: RealField + Copy> = KinematicOdometry<R, N>;
@@ -462,13 +526,16 @@ fagra::factor_tests!(yaw_f64, YawCase, f64);
 fagra::factor_tests!(yaw_f32, YawCase, f32);
 fagra::factor_tests!(containment_f64, ContainmentCase, f64);
 fagra::factor_tests!(containment_f32, ContainmentCase, f32);
-
+fagra::factor_tests!(adjacent_raw_f64, AdjacentCase<false>, f64);
+fagra::factor_tests!(adjacent_raw_f32, AdjacentCase<false>, f32);
 fagra::factor_tests!(imu_f64, ImuCase, f64);
 fagra::factor_tests!(imu_f32, ImuCase, f32);
 fagra::factor_batch_tests!(foot_f64, FootCase, f64);
 fagra::factor_batch_tests!(foot_f32, FootCase, f32);
 fagra::factor_batch_tests!(reprojection_raw_f64, ReprojectionCase<false>, f64);
 fagra::factor_batch_tests!(reprojection_raw_f32, ReprojectionCase<false>, f32);
+fagra::factor_batch_tests!(odometry_raw_f64, OdometryCase<false>, f64);
+fagra::factor_batch_tests!(odometry_raw_f32, OdometryCase<false>, f32);
 
 #[test]
 fn robust_local_models() {
@@ -476,6 +543,10 @@ fn robust_local_models() {
     testing::check_factor::<KinematicCase<5, true>, f64>(FactorProperty::LocalModel);
     testing::check_factor_batch::<ReprojectionCase<true>, f64>(FactorProperty::LocalModel);
     testing::check_factor_batch::<ReprojectionCase<true>, f32>(FactorProperty::LocalModel);
+    testing::check_factor_batch::<OdometryCase<true>, f64>(FactorProperty::LocalModel);
+    testing::check_factor_batch::<OdometryCase<true>, f32>(FactorProperty::LocalModel);
+    testing::check_factor::<AdjacentCase<true>, f64>(FactorProperty::LocalModel);
+    testing::check_factor::<AdjacentCase<true>, f32>(FactorProperty::LocalModel);
 }
 
 #[test]
@@ -502,6 +573,7 @@ fagra::factors! { Factors {
     yaw: RelativeYaw, containment: FieldContainment,
     imu: ImuKinematics, feet: Batch<FootGround, FootObservation>,
     pixels: Batch<FrameReprojections, ReprojectionObservation>,
+    odometry: Batch<VisualOdometry, VisualOdometryObservation>, adjacent: AdjacentVisualOdometry,
 } }
 
 struct Scene {
@@ -945,6 +1017,40 @@ fn bearing_cost_is_monotone_through_side_plane_and_behind_camera() {
             previous = cost;
             scene.graph.remove_factor(key).unwrap();
         }
+    }
+}
+
+#[test]
+fn odometry_irls_curvature_and_shared_control_blocks() {
+    let scene = Scene::new();
+    let mut model = AdjacentVisualOdometry {
+        controls: scene.controls,
+        duration: 0.25,
+        observation: VisualOdometryObservation {
+            previous_tau: 0.8,
+            current_tau: 0.2,
+            current_to_previous: Transform::wrap(Isometry3::translation(3.0, 4.0, 0.0)),
+        },
+        information_root: SMatrix::identity(),
+        huber_threshold: 1e6,
+    };
+    let mut raw = Capture::default();
+    model.linearize(&scene, &mut raw).unwrap();
+    assert_eq!(
+        raw.residuals[0].as_slice(),
+        &[0.0, 0.0, 0.0, -3.0, -4.0, 0.0]
+    );
+    assert_eq!(model.cost(&scene).unwrap(), 12.5);
+    model.huber_threshold = 2.0;
+    let mut robust = Capture::default();
+    model.linearize(&scene, &mut robust).unwrap();
+    assert_eq!(model.cost(&scene).unwrap(), 8.0);
+    assert_eq!(robust.blocks[0].len(), 5);
+    let scale = (2.0_f64 / 5.0).sqrt();
+    assert!((&robust.residuals[0] - &raw.residuals[0] * scale).norm() < 1e-12);
+    for ((key, j), (raw_key, raw_j)) in robust.blocks[0].iter().zip(&raw.blocks[0]) {
+        assert_eq!(key, raw_key);
+        assert!((j - raw_j * scale).norm() < 1e-12);
     }
 }
 

@@ -171,3 +171,284 @@ fn release_timings() {
     timings::<f32>();
     timings::<f64>();
 }
+
+mod factor_workload {
+    use super::*;
+    use fagra::Variable;
+    use linear_algebra::{Framed, Transform};
+    use localization_fagra::{
+        factors::*,
+        preintegration::{ImuDelta, PreintegrationInformation},
+        variables::{CameraIntrinsics, FieldAlignment, ImuBias, TrajectoryState},
+    };
+    use nalgebra::{Matrix3, SMatrix};
+
+    fagra::states! { States<R> { controls: PoseControl<R>, alignment: FieldAlignment<R>, intrinsics: CameraIntrinsics<R>, biases: ImuBias<R> } }
+    fagra::factors! { Factors<R> {
+        trajectory: TrajectoryPrior<R>, calibration: CameraIntrinsicsPrior<R>, motion: MotionPrior<R>,
+        bias_prior: ImuBiasPrior<R>, bias_walk: ImuBiasWalk<R>,
+        yaw: RelativeYaw<R>, containment: FieldContainment<R>,
+        imu: ImuKinematics<R>,
+        preintegrated_imu: PreintegratedImu<R>,
+        feet: Batch<FootGround<R>, FootObservation<R>>,
+        pixels: Batch<FrameReprojections<R>, ReprojectionObservation<R>>,
+        odometry: Batch<VisualOdometry<R>, VisualOdometryObservation<R>>, adjacent: AdjacentVisualOdometry<R>,
+        kinematic: KinematicOdometry<R>, adjacent_kinematic: AdjacentKinematicOdometry<R>,
+    } }
+
+    fn graph<R: fagra::Real>() -> fagra::Solver<States<R>, Factors<R>> {
+        let c = |x| R::from_f64(x).unwrap();
+        let mut graph = fagra::Solver::new();
+        let controls = controls::<R>(0.02).map(|control| graph.add(control));
+        let fifth = graph.add(PoseControl::identity());
+        let alignment = graph.add(FieldAlignment::identity());
+        let calibration = CameraIntrinsics {
+            focal_lengths: Framed::wrap(nalgebra::Vector2::new(c(300.0), c(310.0))),
+            optical_center: Framed::wrap(nalgebra::Point2::new(c(160.0), c(120.0))),
+        };
+        let intrinsics = graph.add(calibration.clone());
+        graph
+            .add_factor(CameraIntrinsicsPrior {
+                intrinsics,
+                reference: calibration,
+                information_root: SMatrix::identity(),
+            })
+            .unwrap();
+        graph
+            .add_factor(TrajectoryPrior {
+                controls,
+                duration: c(0.2),
+                tau: c(0.0),
+                reference: TrajectoryState::identity(),
+                information_root: SMatrix::identity(),
+            })
+            .unwrap();
+        graph
+            .add_factor(MotionPrior {
+                controls,
+                duration: c(0.2),
+                information_root: SMatrix::identity(),
+                use_start_velocity: true,
+            })
+            .unwrap();
+        graph
+            .add_factor(RelativeYaw {
+                controls,
+                duration: c(0.2),
+                end_tau: c(1.0),
+                measured_yaw_change: c(0.1),
+                information_root: c(1.0),
+            })
+            .unwrap();
+        graph
+            .add_factor(RelativeYaw {
+                controls,
+                duration: c(0.2),
+                end_tau: c(0.6),
+                measured_yaw_change: c(0.1),
+                information_root: c(1.0),
+            })
+            .unwrap();
+        graph
+            .add_factor(FieldContainment {
+                controls,
+                duration: c(0.2),
+                tau: c(0.5),
+                alignment,
+                half_extents: Framed::wrap(nalgebra::Vector2::new(c(5.0), c(3.0))),
+                sigma: c(0.5),
+            })
+            .unwrap();
+        graph
+            .add_factor(AdjacentVisualOdometry {
+                controls: [controls[0], controls[1], controls[2], controls[3], fifth],
+                duration: c(0.2),
+                observation: VisualOdometryObservation {
+                    previous_tau: c(0.8),
+                    current_tau: c(0.2),
+                    current_to_previous: Transform::wrap(Isometry3::identity()),
+                },
+                information_root: SMatrix::identity(),
+                huber_threshold: c(2.0),
+            })
+            .unwrap();
+        let biases = std::array::from_fn(|_| graph.add(ImuBias::identity()));
+        graph
+            .add_factor(KinematicOdometry {
+                controls,
+                duration: c(0.2),
+                previous_tau: c(0.2),
+                current_tau: c(0.8),
+                translation: Framed::wrap(nalgebra::Vector2::zeros()),
+                information_root: nalgebra::Matrix2::identity(),
+                huber_threshold: c(2.0),
+            })
+            .unwrap();
+        graph
+            .add_factor(AdjacentKinematicOdometry {
+                controls: [controls[0], controls[1], controls[2], controls[3], fifth],
+                duration: c(0.2),
+                previous_tau: c(0.8),
+                current_tau: c(0.2),
+                translation: Framed::wrap(nalgebra::Vector2::zeros()),
+                information_root: nalgebra::Matrix2::identity(),
+                huber_threshold: c(2.0),
+            })
+            .unwrap();
+        for information in [
+            PreintegrationInformation::Rotation(Matrix3::identity()),
+            PreintegrationInformation::Full(SMatrix::identity()),
+        ] {
+            graph
+                .add_factor(PreintegratedImu {
+                    controls,
+                    biases,
+                    duration: c(0.2),
+                    start_tau: c(0.0),
+                    end_tau: c(0.5),
+                    delta: ImuDelta {
+                        duration: c(0.1),
+                        rotation: Transform::wrap(UnitQuaternion::identity()),
+                        velocity: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(0.981))),
+                        position: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(0.04905))),
+                        reference_biases: std::array::from_fn(|_| ImuBias::identity()),
+                        bias_jacobians: [SMatrix::repeat(c(0.01)); 2],
+                    },
+                    information,
+                    gravity_compensation: Framed::wrap(Vector3::new(c(0.0), c(0.0), c(9.81))),
+                    position: Framed::wrap(Vector3::new(c(0.1), c(0.0), c(0.05))),
+                })
+                .unwrap();
+        }
+        graph
+            .add_factor(ImuBiasPrior {
+                bias: biases[0],
+                reference: ImuBias::identity(),
+                information_root: SMatrix::identity(),
+            })
+            .unwrap();
+        graph
+            .add_factor(ImuBiasWalk {
+                biases,
+                information_root: SMatrix::identity(),
+            })
+            .unwrap();
+        let imu = ImuKinematics {
+            controls,
+            biases,
+            duration: c(0.2),
+            gyroscope_information_root: Matrix3::identity(),
+            tilt_information_root: Matrix3::identity(),
+            tau: c(0.0),
+            bias_tau: c(0.0),
+            angular_velocity: Framed::wrap(Vector3::zeros()),
+            measured_up: Some(Framed::wrap(Vector3::z())),
+        };
+        let feet = graph.add_batch(FootGround {
+            controls,
+            duration: c(0.2),
+            sigma: c(0.1),
+        });
+        let odometry = graph.add_batch(VisualOdometry {
+            controls,
+            duration: c(0.2),
+            information_root: SMatrix::identity(),
+            huber_threshold: c(2.0),
+        });
+        for i in 0..10 {
+            let tau = c(i as f64 / 10.0);
+            graph
+                .add_factor(ImuKinematics {
+                    tau,
+                    bias_tau: tau,
+                    ..imu.clone()
+                })
+                .unwrap();
+            graph
+                .add_factor_to(
+                    feet,
+                    FootObservation {
+                        tau,
+                        left_sole: Framed::wrap(nalgebra::Point3::new(c(0.0), c(0.1), c(-0.6))),
+                        right_sole: Framed::wrap(nalgebra::Point3::new(c(0.0), c(-0.1), c(-0.6))),
+                    },
+                )
+                .unwrap();
+            graph
+                .add_factor_to(
+                    odometry,
+                    VisualOdometryObservation {
+                        previous_tau: tau,
+                        current_tau: tau + c(0.05),
+                        current_to_previous: Transform::wrap(Isometry3::identity()),
+                    },
+                )
+                .unwrap();
+        }
+        let pixels = graph.add_batch(FrameReprojections {
+            controls,
+            alignment,
+            intrinsics,
+            duration: c(0.2),
+            tau: c(0.5),
+            robot_to_camera: Transform::wrap(Isometry3::identity()),
+            angular_information_root: c(300.0),
+            huber_threshold: c(2.0),
+            min_range: c(0.01),
+        });
+        for i in 0..100 {
+            graph
+                .add_factor_to(
+                    pixels,
+                    ReprojectionObservation {
+                        field_point: Framed::wrap(nalgebra::Point3::new(
+                            c(i as f64 * 0.01),
+                            c(0.0),
+                            c(5.0),
+                        )),
+                        detection: Framed::wrap(nalgebra::Point2::new(c(160.0), c(120.0))),
+                    },
+                )
+                .unwrap();
+        }
+        graph
+    }
+
+    fn check_allocations<R: fagra::Real>() {
+        let mut graph = graph::<R>();
+        let mut method = fagra::GaussNewton::default();
+        // Deliberate evaluation-only pass: evaluate cost and assemble all factor
+        // Jacobians, then stop at the gradient check without changing any state.
+        let options = fagra::OptimizeOptions {
+            gradient_tolerance: R::from_f64(1e30).unwrap(),
+            ..Default::default()
+        };
+        graph.optimize_with(&mut method, &options).unwrap();
+        ALLOCATIONS.with(|count| count.set(Some(0)));
+        for _ in 0..10 {
+            black_box(graph.optimize_with(&mut method, &options).unwrap());
+        }
+        let count = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+        assert_eq!(count, 0, "warmed factor evaluation allocated");
+    }
+
+    #[test]
+    fn all_factors_allocate_nothing_after_workspace_warmup() {
+        check_allocations::<f32>();
+        check_allocations::<f64>();
+    }
+
+    #[test]
+    #[ignore = "release microbenchmark; cost + Jacobians + dense assembly, no solve"]
+    fn all_factor_timings() {
+        let mut graph = graph::<f64>();
+        let mut method = fagra::GaussNewton::default();
+        let options = fagra::OptimizeOptions {
+            gradient_tolerance: 1e30,
+            ..Default::default()
+        };
+        measure("factor workload (f64)", |_| {
+            graph.optimize_with(&mut method, &options).unwrap()
+        });
+    }
+}
