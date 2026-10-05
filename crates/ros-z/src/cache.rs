@@ -5,12 +5,14 @@
 //!
 //! # Stamp strategies
 //!
-//! Two indexing strategies are available, selected at build time:
+//! Indexing strategies are selected at build time:
 //!
 //! - **[`ZenohStamp`](crate::cache::ZenohStamp)** (default) — indexes by the
 //!   Zenoh transport timestamp (`uhlc::Timestamp` → [`crate::time::Time`]). Zero-config;
 //!   works for any message type as long as timestamping is enabled in the Zenoh
 //!   config (already enabled in the ros-z default config).
+//! - **[`SourceStamp`](crate::cache::SourceStamp)** indexes by the ROS-Z publication
+//!   source time, using the publisher's clock rather than the transport wall clock.
 //! - **[`ExtractorStamp`](crate::cache::ExtractorStamp)** — indexes by a
 //!   user-supplied closure that extracts a [`crate::time::Time`] from each deserialized
 //!   message. Required for `header.stamp` / sensor capture time alignment.
@@ -57,6 +59,10 @@ use crate::time::Time;
 /// timestamp (timestamping disabled on the peer), the cache falls back to
 /// the current wallclock time at receive time and logs a one-time warning.
 pub struct ZenohStamp;
+
+/// Index by the ROS-Z publication source time returned by `recv_with_metadata`.
+/// This preserves the publisher's clock and the age of delayed publications.
+pub struct SourceStamp;
 
 /// Index by an application-supplied extractor closure.
 ///
@@ -398,8 +404,9 @@ impl<T> Cache<T> {
 /// Builder for [`Cache<T>`].
 ///
 /// Created by `node.subscriber::<T>(topic).cache(capacity)`.
-/// Use [`with_stamp`](CacheBuilder::with_stamp) to switch from the default
-/// Zenoh transport timestamp to an application-level extractor.
+/// Use [`with_source_time`](CacheBuilder::with_source_time) for ROS-Z source time,
+/// or [`with_stamp`](CacheBuilder::with_stamp) for a timestamp inside the message,
+/// instead of the default Zenoh transport timestamp.
 pub struct CacheBuilder<T, S = SerdeCdrCodec<T>, Stamp = ZenohStamp> {
     pub(crate) sub_builder: SubscriberBuilder<T, S>,
     capacity: usize,
@@ -415,8 +422,8 @@ where
     /// `capacity` is the maximum number of messages retained by the cache. A
     /// capacity of `0` keeps the subscriber alive but stores no messages. By
     /// default, samples are indexed by their Zenoh transport timestamp; call
-    /// [`CacheBuilder::with_stamp`] to use an application-level timestamp such
-    /// as `header.stamp` instead.
+    /// [`CacheBuilder::with_source_time`] for the ROS-Z publication source time,
+    /// or [`CacheBuilder::with_stamp`] for a timestamp such as `header.stamp`.
     ///
     /// Configure subscriber options such as QoS, locality, or transient-local
     /// replay before calling `cache`, because this method switches from the
@@ -443,6 +450,18 @@ impl<T, S> CacheBuilder<T, S, ZenohStamp> {
             sub_builder,
             capacity,
             stamp: ZenohStamp,
+        }
+    }
+
+    /// Index by the publication source time in the ROS-Z metadata.
+    /// Use this when comparing cached timestamps with a node's logical clock.
+    /// Samples without valid ROS-Z metadata are rejected rather than assigned
+    /// a receive-time timestamp that would make delayed commands appear fresh.
+    pub fn with_source_time(self) -> CacheBuilder<T, S, SourceStamp> {
+        CacheBuilder {
+            sub_builder: self.sub_builder,
+            capacity: self.capacity,
+            stamp: SourceStamp,
         }
     }
 
@@ -534,6 +553,32 @@ where
     }
 }
 
+impl<T, S> CacheBuilder<T, S, SourceStamp>
+where
+    T: Send + Sync + 'static,
+    S: for<'a> WireDecoder<Input<'a> = &'a [u8], Output = T> + Send + Sync + 'static,
+{
+    pub async fn build(self) -> Result<Cache<T>> {
+        let subscriber = self.sub_builder.build().await?;
+        let inner = Arc::new(RwLock::new(CacheInner::new(self.capacity)));
+        let received = inner.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                match subscriber.recv_with_metadata().await {
+                    Ok(sample) => received.write().insert(sample.source_time, sample.message),
+                    Err(error) => {
+                        tracing::error!("[CACHE] Failed to receive source-timed sample: {error}")
+                    }
+                }
+            }
+        });
+        Ok(Cache {
+            inner,
+            _raw_subscriber_task: task,
+        })
+    }
+}
+
 impl<T, S, F, O> CacheBuilder<T, S, ExtractorStamp<T, F, O>>
 where
     F: Fn(&T) -> O + Send + Sync + 'static,
@@ -600,6 +645,64 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_time_cache_preserves_logical_time_and_delayed_sample_age() {
+        use crate::{context::ContextBuilder, time::Clock};
+        use std::time::Duration;
+
+        let clock = Clock::logical(Time::from_nanos(5_000_000_000));
+        let context = ContextBuilder::default()
+            .with_mode("peer")
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(std::iter::empty::<&str>())
+            .with_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+        let node = context
+            .create_node("source_time_cache_test")
+            .build()
+            .await
+            .unwrap();
+        let publisher = node.publisher::<String>("commands").build().await.unwrap();
+        let cache = node
+            .subscriber::<String>("commands")
+            .cache(3)
+            .with_source_time()
+            .build()
+            .await
+            .unwrap();
+        let source = Time::from_nanos(2_000_000_000);
+        // Same-time changes are valid while paused; delayed data must not become fresh.
+        for (count, (message, time)) in [
+            ("first", source),
+            ("second", source),
+            ("delayed", source - Duration::from_secs(1)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            publisher
+                .publish_with_source_time(&message.to_owned(), time)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while cache.len() != count + 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let (stamp, message) = cache.get_latest_with_stamp().unwrap();
+        assert_eq!(stamp, source);
+        assert_eq!(message.as_str(), "second");
+        assert_eq!(clock.now().duration_since(stamp), Duration::from_secs(3));
+        drop(cache);
+        context.shutdown().unwrap();
+    }
 
     #[test]
     fn cache_inner_capacity_zero_retains_no_messages() {
