@@ -84,9 +84,11 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
 
     let parameters = node.bind_parameter_as::<Parameters>("motion")?;
 
+    // Command age must use the node clock, not Zenoh's wall-clock transport time.
     let motion_command_cache = node
         .subscriber::<MotionCommand>("behavior/motion_command")
         .cache(1)
+        .with_source_time()
         .build()
         .await
         .wrap_err("failed to build motion_command subscriber")?;
