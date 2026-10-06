@@ -191,7 +191,7 @@ fn setup_palette(
                 }
 
                 sidebar.spawn((
-                    Text::new("Drag an object onto the field.\n\nClick a ball to select it, then drag to move it. Physics pauses during dragging.\n\nClick the field to deselect."),
+                    Text::new("Drag an object onto the field.\n\nClick a ball to select it, then drag to move it. Physics pauses during dragging.\n\nWhile paused, click a robot. Drag arrows to move it or rings to rotate it. Escape cancels a drag.\n\nClick the field to deselect."),
                     TextFont::from_font_size(12.0),
                     TextColor(Color::srgb(0.38, 0.44, 0.52)),
                     Node {

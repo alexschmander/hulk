@@ -303,6 +303,7 @@ pub fn spawn(commands: &mut Commands, assets: &RobotAssets, transform: Transform
     for link in LINKS {
         commands.spawn((
             Name::new(link.mesh),
+            Pickable::default(),
             ObjectPart(owner),
             MujocoBody::new(owner, link.body),
             Mesh3d(assets.meshes[link.mesh].clone()),
@@ -397,7 +398,7 @@ fn load_binary_stl(path: &Path) -> Result<Mesh, String> {
 
     Ok(Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
+        RenderAssetUsages::default(),
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals))

@@ -25,6 +25,10 @@ struct BallDrag {
 }
 
 impl BallSelection {
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+    }
+
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
     }
