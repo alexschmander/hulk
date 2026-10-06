@@ -148,6 +148,18 @@ impl RobotBinding {
         }
     }
 
+    pub fn joint_positions(&self, data: &Data) -> [f32; 22] {
+        std::array::from_fn(|index| data.qpos()[self.joints[index].0] as f32)
+    }
+
+    pub fn apply_damping(&self, data: &mut Data, kd: f32) {
+        for &(_, velocity, actuator) in &self.joints {
+            let torque = -f64::from(kd) * data.qvel()[velocity];
+            let [minimum, maximum] = data.model().actuator_ctrlrange()[actuator];
+            data.ctrl_mut()[actuator] = torque.clamp(minimum, maximum);
+        }
+    }
+
     pub fn reset_joints(&self, data: &mut Data) {
         for &(q, v, actuator) in &self.joints {
             data.qpos_mut()[q] = data.model().qpos0()[q];

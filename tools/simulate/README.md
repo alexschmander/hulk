@@ -89,9 +89,14 @@ are 3.4 m/s and all flags disabled. The soft policy ignores strong
 and quick. **Stand up** exposes the fast flag, disabled by default, for full-body
 get-up inference. Arm commands come directly from the main node: walking and
 kicking use its configured arm controller, and get-up controls all joints.
-**Damping** (also the **Damp robot** shortcut) currently sends zero commands and
-gains, following upstream behavior. **Prepare** requests Booster's preparation
-mode. The simulator acknowledges this mode but does not implement Booster's preparation pose controller.
+**Damping** (also the **Damp robot** shortcut) hands control to the simulated
+manufacturer controller. It clears old joint targets and applies velocity damping
+with zero position stiffness and zero feedforward torque. A damped robot can fall
+and its joints can bend. **Prepare** blends from the measured joint positions to a
+standing pose over two seconds of simulation time, then holds that pose with PD
+control. This is a simulator approximation of Booster's preparation mode, without
+active balancing or get-up recovery. It does not pin or teleport the robot; use
+**Stand up** for recovery from a fall.
 
 The editor still refuses path-based **Walk** and suggests **Walk with velocity**.
 External path requests use the upstream walking controller. Kick speed, ball velocity,
@@ -135,15 +140,19 @@ legend identifies the active command, including autonomous output. Arrows do not
 `hardware_interface` publishes raw CDR `LowCommand` messages on `rt/joint_ctrl`.
 MuJoCo applies `tau + kp * (q_target - q) + kd * (dq_target - dq)` every physics
 step, clamped to each actuator's torque limits. Commands are serial and must
-contain exactly 22 finite motor commands with nonnegative gains. The last valid
-command is held between messages; without a command actuator torque is zero.
-The model represents full custom control, so command blending weight is not used.
+contain exactly 22 finite motor commands with nonnegative gains. In Custom mode, the last valid
+command is held between messages. Mode changes clear it; Custom waits for a fresh
+packet and applies damping until it arrives. Joint packets received in Damping or
+Prepare cannot override the simulated manufacturer controller. The model represents
+full custom control, so command blending weight is not used.
 
-A small raw SDK responder acknowledges Damping, Prepare, and Custom mode changes
-on `rt/LocoApiTopicReq` / `rt/LocoApiTopicResp`. This completes the real hardware interface's
-mode-change requests. Other SDK actions are rejected. Prepare has no
-simulated SDK pose controller, and LEDs are not modeled. Raw SDK and joint topics
-are unnamespaced: use a dedicated router, with one controlled robot per router.
+The simulator serves Damping, Prepare, and Custom mode requests on
+`rt/LocoApiTopicReq` / `rt/LocoApiTopicResp` and switches actuator ownership before
+acknowledging them. It starts in Damping, matching the hardware interface's assumed
+initial mode. This server also runs with `--no-robotics`, allowing an external stack to
+use the same mode protocol. Other SDK actions are rejected, and LEDs are not modeled.
+Raw SDK and joint topics are unnamespaced: use a dedicated router, with one controlled
+robot per router. No robotics node changes are needed for this emulation.
 
 ## Behavior input map
 
