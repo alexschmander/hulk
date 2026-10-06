@@ -2,7 +2,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use bevy::prelude::Resource;
-use booster::{LowCommand, LowState};
+use booster::LowState;
 use color_eyre::{Result, eyre::eyre};
 use coordinate_systems::{Ground, Robot};
 use linear_algebra::Isometry3;
@@ -23,7 +23,7 @@ use types::{
     motion_command::MotionCommand, time_wrapper::TimeWrapper,
 };
 
-use crate::robot_io::{Observation, RobotBinding};
+use crate::robot_io::Observation;
 
 #[derive(Clone)]
 pub struct StackConfiguration {
@@ -55,7 +55,7 @@ pub struct Robotics {
     game: Publisher<FilteredGameControllerState>,
     field: Option<Publisher<FieldDimensions>>,
     field_updates: watch::Sender<Option<FieldDimensions>>,
-    commands: watch::Receiver<Option<LowCommand>>,
+    commands: watch::Receiver<crate::simulated_sdk::Control>,
     command_task: JoinHandle<()>,
     stack_task: JoinHandle<()>,
     status: watch::Receiver<String>,
@@ -194,27 +194,7 @@ impl Robotics {
             .join("live")
             .to_string_lossy()
             .into_owned();
-        let sub = context
-            .session()
-            .declare_subscriber("rt/joint_ctrl")
-            .await
-            .map_err(|e| eyre!("{e}"))?;
-        let (commands_tx, commands) = watch::channel(None);
-        let command_task = runtime.spawn(async move {
-            while let Ok(sample) = sub.recv_async().await {
-                match cdr::deserialize::<LowCommand>(&sample.payload().to_bytes())
-                    .map_err(|e| eyre!("{e}"))
-                    .and_then(|command| {
-                        RobotBinding::validate_command(&command)?;
-                        Ok(command)
-                    }) {
-                    Ok(command) => {
-                        commands_tx.send_replace(Some(command));
-                    }
-                    Err(error) => bevy::log::warn!("invalid rt/joint_ctrl command: {error:#}"),
-                }
-            }
-        });
+        let (commands, command_task) = crate::simulated_sdk::start(&runtime, &context).await?;
         let (status_tx, status) = watch::channel(if configuration.launch_nodes {
             "Behavior and motion nodes running".to_owned()
         } else {
@@ -241,7 +221,6 @@ impl Robotics {
                 return;
             }
             let mut tasks = JoinSet::new();
-            tasks.spawn(crate::simulated_sdk::run(ctx.clone()));
             tasks.spawn(behavior_node::node::run_boxed(ctx.clone()));
             tasks.spawn(fall_detection::run_boxed(ctx.clone()));
             tasks.spawn(ball_state_composer::run_boxed(ctx.clone()));
@@ -319,7 +298,12 @@ impl Robotics {
         )
     }
 
-    pub fn latest_command(&self) -> Option<LowCommand> {
+    #[cfg(test)]
+    pub fn latest_command(&self) -> Option<booster::LowCommand> {
+        self.commands.borrow().command.clone()
+    }
+
+    pub fn actuator_control(&self) -> crate::simulated_sdk::Control {
         self.commands.borrow().clone()
     }
 
@@ -540,7 +524,8 @@ impl Drop for Robotics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use booster::MotorState;
+    use crate::robot_io::RobotBinding;
+    use booster::{LowCommand, MotorState};
     use std::time::Duration;
     use types::motion_command::HeadMotion;
 
@@ -666,6 +651,7 @@ mod tests {
             .expect("real inference did not initialize");
         });
         assert_eq!(clock.now(), Time::zero());
+        let mut controller = crate::simulated_sdk::Controller::default();
         let mut driven = 0;
         let mut maximum_head_yaw = 0.0_f32;
         let mut walk_start_x = 0.0;
@@ -688,7 +674,7 @@ mod tests {
             }
             // Match Bevy's catch-up batches at roughly 60 rendered frames per second.
             for _ in 0..8 {
-                binding.apply(world.data_mut(), io.latest_command().as_ref());
+                controller.apply(&binding, world.data_mut(), &io.actuator_control());
                 world.data_mut().step();
                 world.data_mut().forward();
                 let time = Time::from_nanos((world.data().time() * 1e9).round() as i64);
@@ -957,6 +943,25 @@ mod tests {
                     "simulator must not publish behavior commands"
                 );
                 assert_eq!(game.recv().await.unwrap().remaining_number_of_messages, 23);
+                let responses = io
+                    .context
+                    .session()
+                    .declare_subscriber("rt/LocoApiTopicResp")
+                    .await
+                    .unwrap();
+                let request = booster::RpcReqMsg {
+                    uuid: "external-custom".into(),
+                    header: r#"{"api_id":2000}"#.into(),
+                    body: r#"{"mode":3}"#.into(),
+                };
+                let payload = cdr::serialize::<_, _, cdr::CdrLe>(&request, cdr::Infinite).unwrap();
+                io.context
+                    .session()
+                    .put("rt/LocoApiTopicReq", payload)
+                    .await
+                    .unwrap();
+                responses.recv_async().await.unwrap();
+                io.commands.borrow_and_update();
                 let command = LowCommand {
                     command_type: booster::CommandType::Serial,
                     motor_commands: vec![
@@ -1166,7 +1171,6 @@ mod tests {
                     GetUp,
                     Joints
                 );
-                tasks.spawn(crate::simulated_sdk::run(io.context.clone()));
                 tasks.spawn(global_parameter_provider::run_boxed(io.context.clone()));
                 tasks.spawn(behavior_node::node::run_boxed(io.context.clone()));
                 tasks.spawn(fall_detection::run_boxed(io.context.clone()));
@@ -1210,10 +1214,12 @@ mod tests {
         for _ in 0..30 {
             step(io);
         }
+        assert_eq!(io.actuator_control().mode, booster::RobotMode::Damping);
         io.input_motion = MotionCommand::Prepare;
         for _ in 0..10 {
             step(io);
         }
+        assert_eq!(io.actuator_control().mode, booster::RobotMode::Prepare);
         io.input_motion = MotionCommand::WalkWithVelocity {
             head: HeadMotion::ZeroAngles,
             velocity: linear_algebra::vector![0.25, -0.1],
@@ -1242,11 +1248,29 @@ mod tests {
                 .iter()
                 .any(|motor| motor.kp > 0.0)
         );
+        assert_eq!(io.actuator_control().mode, booster::RobotMode::Custom);
+        io.input_motion = MotionCommand::Damping;
+        for _ in 0..10 {
+            step(io);
+        }
+        assert_eq!(io.actuator_control().mode, booster::RobotMode::Damping);
+        assert!(
+            io.latest_command().is_none(),
+            "Damping must release the last inference targets"
+        );
+        io.input_motion = MotionCommand::Prepare;
+        for _ in 0..10 {
+            step(io);
+        }
+        assert_eq!(io.actuator_control().mode, booster::RobotMode::Prepare);
+        assert!(io.latest_command().is_none());
         io.clear_injection().unwrap();
         for _ in 0..10 {
             step(io);
         }
         assert!(matches!(io.active_motion(), MotionCommand::Stand { .. }));
+        assert_eq!(io.actuator_control().mode, booster::RobotMode::Custom);
+        assert!(io.latest_command().is_some());
         let board = blackboard.get_latest().unwrap();
         assert!(!board.is_injected_motion_command);
         assert_eq!(

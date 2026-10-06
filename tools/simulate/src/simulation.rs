@@ -27,6 +27,7 @@ struct Binding {
     generation: Option<u64>,
     robot: Option<RobotBinding>,
     last_input: Option<f64>,
+    controller: crate::simulated_sdk::Controller,
 }
 
 pub struct MotionSimulationPlugin;
@@ -99,15 +100,18 @@ fn bind_robot(
 
 fn apply_command(
     mut world: ResMut<MujocoWorld>,
-    binding: Res<Binding>,
+    mut binding: ResMut<Binding>,
     io: Res<Robotics>,
     mode: Res<SimulationMode>,
 ) {
     if *mode == SimulationMode::Paused {
         return;
     }
-    if let Some(robot) = &binding.robot {
-        robot.apply(world.data_mut(), io.latest_command().as_ref());
+    let Binding {
+        robot, controller, ..
+    } = &mut *binding;
+    if let Some(robot) = robot {
+        controller.apply(robot, world.data_mut(), &io.actuator_control());
     }
 }
 
@@ -173,6 +177,7 @@ fn reset_robot(
     )
     .expect("publish reset observation");
     binding.last_input = None;
+    binding.controller = Default::default();
 }
 
 fn simulation_time(seconds: f64) -> RosTime {

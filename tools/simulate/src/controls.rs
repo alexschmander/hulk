@@ -631,17 +631,21 @@ fn update_status(
             }
             .into(),
             PanelLabel::Telemetry => format!(
-                "{}     {:.3} s     Joints: {}\nBehavior output: {}",
+                "{}     {:.3} s     Motor control: {}\nBehavior output: {}",
                 if *mode == SimulationMode::Paused {
                     "Paused"
                 } else {
                     "Running"
                 },
                 world.data().time(),
-                if io.latest_command().is_some() {
-                    "connected"
-                } else {
-                    "waiting"
+                {
+                    let control = io.actuator_control();
+                    match control.mode {
+                        booster::RobotMode::Prepare => "Prepare",
+                        booster::RobotMode::Custom if control.command.is_some() => "Custom",
+                        booster::RobotMode::Custom => "Custom (waiting for joints)",
+                        _ => "Damping",
+                    }
                 },
                 variant(&value(io.active_motion()))
             ),
