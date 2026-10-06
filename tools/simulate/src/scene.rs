@@ -6,6 +6,7 @@ pub mod goal;
 pub mod object;
 pub mod palette;
 pub mod robot;
+pub mod robot_interaction;
 pub mod visual;
 
 use bevy::prelude::*;
@@ -22,6 +23,7 @@ impl Plugin for ObjectsPlugin {
         app.init_resource::<visual::ObjectVisualAssets>()
             .add_plugins((
                 ball_interaction::BallInteractionPlugin,
+                robot_interaction::RobotInteractionPlugin,
                 command_vectors::CommandVectorsPlugin,
             ))
             .init_resource::<ball::SpawnedBalls>()

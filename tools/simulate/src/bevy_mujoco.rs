@@ -243,6 +243,11 @@ impl MujocoWorld {
         Ok(())
     }
 
+    pub fn object_pose(&self, entity: Entity) -> Option<Transform> {
+        let binding = self.objects.get(&entity)?;
+        self.body_pose(&binding.root_body)
+    }
+
     pub fn contains_object(&self, entity: Entity) -> bool {
         self.objects.contains_key(&entity)
     }
@@ -283,9 +288,9 @@ impl MujocoWorld {
             .reduce(f64::min)
     }
 
-    fn body_pose(&self, body: &MujocoBody) -> Option<Transform> {
+    fn body_pose(&self, name: &str) -> Option<Transform> {
         let data = self.data.as_ref()?;
-        let body = data.body(&body.name)?.view(data);
+        let body = data.body(name)?.view(data);
         Some(from_mujoco(
             [body.xpos[0], body.xpos[1], body.xpos[2]],
             [body.xquat[0], body.xquat[1], body.xquat[2], body.xquat[3]],
@@ -327,6 +332,9 @@ pub struct MujocoModelUpdateSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
 pub struct MujocoStepSet;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
+pub struct MujocoPoseUpdateSet;
+
 impl Plugin for MujocoWorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MujocoWorld>()
@@ -335,7 +343,12 @@ impl Plugin for MujocoWorldPlugin {
             .configure_sets(PreUpdate, MujocoModelUpdateSet)
             .add_systems(PreUpdate, update_objects.in_set(MujocoModelUpdateSet))
             .add_systems(FixedUpdate, step_world.in_set(MujocoStepSet))
-            .add_systems(Update, (apply_pose_commands, sync_bodies).chain());
+            .add_systems(
+                Update,
+                (apply_pose_commands, sync_bodies)
+                    .chain()
+                    .in_set(MujocoPoseUpdateSet),
+            );
     }
 }
 
@@ -432,7 +445,7 @@ fn sync_bodies(
     mut bodies: Query<(&MujocoBody, &mut Transform, Option<&mut Visibility>)>,
 ) {
     for (body, mut transform, visibility) in &mut bodies {
-        if let Some(pose) = world.body_pose(body) {
+        if let Some(pose) = world.body_pose(&body.name) {
             *transform = pose;
             if let Some(mut visibility) = visibility {
                 *visibility = Visibility::Visible;
@@ -623,7 +636,7 @@ mod tests {
             assert!(world.minimum_object_z(object).unwrap().abs() < 1e-6);
         }
         let ball_body = MujocoBody::new(ball, "ball");
-        let ball_pose = world.body_pose(&ball_body).unwrap();
+        let ball_pose = world.body_pose(&ball_body.name).unwrap();
         assert!((ball_pose.translation.x - 1.0).abs() < 1e-6);
         assert!((ball_pose.translation.z - 2.0).abs() < 1e-6);
 
@@ -632,7 +645,7 @@ mod tests {
         assert!(
             app.world()
                 .resource::<MujocoWorld>()
-                .body_pose(&ball_body)
+                .body_pose(&ball_body.name)
                 .is_none()
         );
     }
@@ -720,7 +733,7 @@ mod tests {
             robot_qpos: robot_joint.qpos.to_vec(),
             robot_qvel: robot_joint.qvel.to_vec(),
             robot_ctrl: data.ctrl()[actuator],
-            goal_pose: world.body_pose(&MujocoBody::new(goal, "goal")).unwrap(),
+            goal_pose: world.object_pose(goal).unwrap(),
             time: data.time(),
         }
     }

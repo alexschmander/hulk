@@ -4,7 +4,9 @@ use bevy::prelude::*;
 use ros_z::time::Time as RosTime;
 
 use crate::{
-    bevy_mujoco::{MujocoModelUpdateSet, MujocoStepSet, MujocoWorld, SimulationMode},
+    bevy_mujoco::{
+        MujocoModelUpdateSet, MujocoPoseUpdateSet, MujocoStepSet, MujocoWorld, SimulationMode,
+    },
     parameters::{CurrentSimulatorParameters, SimulatorParameterSyncSet},
     robot_io::RobotBinding,
     robotics::Robotics,
@@ -53,7 +55,10 @@ impl Plugin for MotionSimulationPlugin {
             )
             .add_systems(
                 Update,
-                publish_world.run_if(|mode: Res<SimulationMode>| *mode == SimulationMode::Paused),
+                (publish_paused_observation, publish_world)
+                    .chain()
+                    .after(MujocoPoseUpdateSet)
+                    .run_if(|mode: Res<SimulationMode>| *mode == SimulationMode::Paused),
             );
     }
 }
@@ -204,4 +209,17 @@ fn publish_world(
         simulation_time(data.time()),
     )
     .expect("publish behavior ground truth");
+}
+
+// Pose editing updates measurements without advancing simulation time.
+fn publish_paused_observation(world: Res<MujocoWorld>, binding: Res<Binding>, io: Res<Robotics>) {
+    if world.is_changed()
+        && let Some(robot) = &binding.robot
+    {
+        io.publish_observation(
+            robot.observe(world.data()),
+            simulation_time(world.data().time()),
+        )
+        .expect("publish edited robot observation");
+    }
 }

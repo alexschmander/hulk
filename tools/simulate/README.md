@@ -65,6 +65,16 @@ when simulation resumes. Injection follows the production tree's priorities:
 Stop overrides it, and remotely enabling the behavior remote-control mode also
 takes precedence. Normal motion safety checks still apply to injected commands.
 
+While paused, click any part of a robot to select it. A gizmo appears at its
+body center. Drag a colored arrow to translate along that world axis, or a ring
+to rotate around it. The green arrow moves vertically. This works for both the
+controlled robot and robots placed from the palette. Joint positions are preserved;
+the edited pose is applied to MuJoCo and its sensor observations without advancing
+time. Releasing the handle keeps the new pose. **Escape** cancels an active drag,
+or deselects the robot when idle. Clicking the field or a ball also deselects it.
+The gizmo hides while running and returns when paused. Camera movement and the
+Space shortcut are disabled during a handle drag.
+
 To test the head, select **Stand** and **LookAround** in the Motion command form,
 click **Inject command**, then **Run / Pause**. **Space** toggles play/pause unless you are editing a text
 field or dragging a ball. **ZeroAngles** returns the head

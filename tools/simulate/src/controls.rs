@@ -220,11 +220,13 @@ fn toggle_play_pause(
     mut focus: ResMut<InputFocus>,
     editors: Query<(), With<bevy::text::EditableText>>,
     balls: Res<crate::scene::ball_interaction::BallSelection>,
+    robots: Res<crate::scene::robot_interaction::RobotSelection>,
     mut mode: ResMut<SimulationMode>,
 ) {
     if !keys.just_pressed(KeyCode::Space)
         || focus.get().is_some_and(|entity| editors.contains(entity))
         || balls.is_dragging()
+        || robots.is_dragging()
     {
         return;
     }
@@ -242,12 +244,14 @@ fn gate_camera_input(
     editors: Query<(), With<bevy::text::EditableText>>,
     mut camera: Single<&mut FreeCameraState>,
     balls: Res<crate::scene::ball_interaction::BallSelection>,
+    robots: Res<crate::scene::robot_interaction::RobotSelection>,
 ) {
     let over_scene = window
         .cursor_position()
         .is_some_and(|position| position.x >= 240.0 && position.x < window.width() - PANEL_WIDTH);
     camera.enabled = over_scene
         && !balls.is_dragging()
+        && !robots.is_dragging()
         && !focus.get().is_some_and(|entity| editors.contains(entity));
     if !camera.enabled {
         camera.velocity = Vec3::ZERO;
