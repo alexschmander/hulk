@@ -161,6 +161,7 @@ pub struct SimulatorBehaviorTickOutput {
 fn create_behavior_blackboard(parameters: BehaviorParameters) -> BehaviorBlackboard {
     BehaviorBlackboard {
         field_dimensions: FieldDimensions::default(),
+        walking_velocity_limits: Default::default(),
         parameters,
         world_state: WorldState::default(),
         controller_input: None,

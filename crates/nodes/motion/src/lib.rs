@@ -260,7 +260,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             .await?;
 
         // dirty hack
-        if matches!(&motion_command, &MotionCommand::Stand { .. }) {
+        if matches!(&*motion_command, &MotionCommand::Stand { .. }) {
             robot_command = match robot_command {
                 RobotCommand::Custom { mut joints_command } => {
                     joints_command.left_leg.ankle_up.kp /= 2.0;
