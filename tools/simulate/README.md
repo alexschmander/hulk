@@ -94,8 +94,8 @@ manufacturer controller. It clears old joint targets and applies velocity dampin
 with zero position stiffness and zero feedforward torque. A damped robot can fall
 and its joints can bend. **Prepare** blends from the measured joint positions to a
 standing pose over two seconds of simulation time, then holds that pose with PD
-control. Its joint targets satisfy the default fall detector's stand-up readiness
-pose tolerance. This is a simulator approximation of Booster's preparation mode, without
+control. Its arms use the FastGetUp policy offsets, matching the fall detector's
+stand-up readiness pose. This is a simulator approximation of Booster's preparation mode, without
 active balancing or get-up recovery. It does not pin or teleport the robot; use
 **Stand up** for recovery from a fall.
 
