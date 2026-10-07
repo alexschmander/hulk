@@ -94,7 +94,8 @@ manufacturer controller. It clears old joint targets and applies velocity dampin
 with zero position stiffness and zero feedforward torque. A damped robot can fall
 and its joints can bend. **Prepare** blends from the measured joint positions to a
 standing pose over two seconds of simulation time, then holds that pose with PD
-control. This is a simulator approximation of Booster's preparation mode, without
+control. Its joint targets satisfy the default fall detector's stand-up readiness
+pose tolerance. This is a simulator approximation of Booster's preparation mode, without
 active balancing or get-up recovery. It does not pin or teleport the robot; use
 **Stand up** for recovery from a fall.
 
@@ -102,10 +103,13 @@ The editor still refuses path-based **Walk** and suggests **Walk with velocity**
 External path requests use the upstream walking controller. Kick speed, ball velocity,
 and policy flags are forwarded to inference, which applies its policy limits.
 Head and body services run concurrently using the main node's service clients.
-Service errors, stale inputs, and recovery transitions use the upstream motion
-safety lifecycle. A latched control fault needs Damping followed by Prepare,
-then the desired command, or **Reset robot & stack**. Fall detection runs on
-measured simulated joints/IMU; recovery completion is not faked.
+Service errors and stale commands use the upstream motion emergency-stop signal.
+The simulator responds by holding the primary state in Damping until
+**Reset robot & stack**, including when a motion injection is enabled. Fall detection
+runs on measured simulated joints/IMU; recovery completion is not faked. The current
+behavior tree prioritizes falling protection over injected commands, but injections
+take precedence over autonomous get-up once the robot is fallen. Clear the injection
+to restore autonomous recovery in game states that allow it.
 
 **Look at first ball** immediately sends `Stand { head: LookAt { ... } }` for the first
 spawned ball still in the scene and opens the constructed command in the form.
@@ -167,7 +171,7 @@ continues to aim toward world +X, independently of team side.
 | --- | --- | --- |
 | `field_dimensions` | Real global provider, synchronized to simulator field | Field geometry, kickoff poses, goals, and rule geometry follow field edits. |
 | `player_number` | Real global provider (`global.player_number`) | Correct player penalty and configured role; editable through Twix. |
-| `primary_state` | UI filtered game state mapped directly, including this player's penalty | Initial/Ready/Set/Playing/Stop/Penalized/Finished work. Physical button arming and primary-state-filter transitions are bypassed. Damping/Prepare are available as motion injections. |
+| `primary_state` | UI filtered game state mapped directly, including this player's penalty | Initial/Ready/Set/Playing/Stop/Penalized/Finished work. Physical button arming is bypassed. `motion/emergency_stop` holds primary state in Damping until reset. Damping/Prepare are also available as motion injections. |
 | `filtered_game_controller_state` | Existing Game form | Match phase, kickoff, penalties and set plays can be exercised manually; no referee, whistle detection, countdown, or automatic match progression. |
 | `ground_to_field` | MuJoCo foot midpoint and torso yaw, with team-side rotation | Localization-dependent walking and aiming work perfectly; no localization drift, ambiguity, or relocalization tests. |
 | `ball_state` | Real ball composer from ground-truth `ball_filter/ball_position` | Oldest remaining ball, measured position/velocity, simulation-time last-seen stamp. Pursuit, interception, and kicking work; no visibility, occlusion, camera noise, false detections, or team-ball fusion. No balls publishes `None`. |
@@ -177,7 +181,6 @@ continues to aim toward world +X, independently of team side.
 | `obstacles` | Ground-truth passive robot torso positions, conservative radii | Robot avoidance can be exercised; passive robots have physics but no decisions. Goal structures remain physical collisions and are not supplied as planner obstacles. No detection noise or classification tests. |
 | `position_of_interest` | Ball position, otherwise one metre straight ahead | Deterministic gaze fallback, without a tactical attention model. |
 | `fall_detection/status` | Real fall detector from MuJoCo `inputs/low_state` | Measured falling/fallen/upright classification and readiness; thresholds and dynamics remain those of the production node and simulated robot. |
-| `motion/execution` | Real motion node | Actual recovery phase, completion, and fault feedback; no fabricated successful get-up. |
 | `player_states` | Absent; behavior defaults to all players absent | Behavior selects its last-player striker/search branch. Cooperative role allocation, supporter positioning, Voronoi ownership contests, teammate passing, and the ordinary goalkeeper branch are not exercised. Passive robots do not count as teammates. Requires simulated team identities and independent stacks/state messages. |
 | `hypothetical_ball_positions` | Absent; empty default | No uncertain-ball gaze candidates. Ground truth cannot produce meaningful perception hypotheses without an observation model. |
 | `suggested_search_position` | Absent; `None` default | No distributed search suggestion. Current search subtree already uses its turning search action; the suggested-position walking branch is commented out upstream. |
@@ -201,7 +204,7 @@ you override either. The default router listens on loopback; for another machine
 run a shared reachable router and pass its endpoint to both programs.
 
 Useful Text topics are `behavior/motion_command`, `behavior/blackboard`,
-`behavior/trace`, `fall_detection/status`, `motion/execution`,
+`behavior/trace`, `fall_detection/status`, `motion/emergency_stop`,
 `motion_inference/status`, `hardware_interface/status`, `ball_state`,
 `ground_to_field`, and `rule_obstacles`. The Parameter panel can edit
 `/simulator/robot/behavior_node`, including `control.injected_motion_command`
@@ -224,6 +227,7 @@ ROS-Z topics below are relative to `--robot-namespace` (default
 | Publish | `camera_matrix` | `TimeWrapper<CameraMatrix>`, MuJoCo camera definition and pose |
 | Publish | `ground_to_robot` | `TimeWrapper<Option<Isometry3<Ground, Robot>>>`, ground truth |
 | Observe | `behavior/motion_command` | `MotionCommand`, emitted only by behavior |
+| Receive | `motion/emergency_stop` | Unit message; holds primary state in Damping until reset |
 | Publish | `filtered_game_controller_state` | `FilteredGameControllerState`, UI |
 | Publish | `field_dimensions` | `FieldDimensions`, actual simulator parameters, retained |
 | Publish | `joint_limits` | `JointLimits`, robotics global parameters, retained |
@@ -286,8 +290,9 @@ reject stale drafts instead of overwriting another editor's changes.
 
 The rebased inference node rejects live inference parameter changes: edit its
 configuration before starting a new simulator process. The UI reports that rejection;
-a stack reset alone does not apply a rejected draft. Hardware RPC timeouts, shared
-joint limits, and head settings can be changed live.
+a stack reset alone does not apply a rejected draft. Hardware RPC timeouts and head
+settings can be changed live. Shared joint limits can be edited live, but the motion
+node reads them at startup, so use **Reset robot & stack** to apply them consistently.
 
 The simulator adds a temporary writable parameter layer, so UI edits survive
 **Reset robot & stack** and do not alter repository configuration files. They are
