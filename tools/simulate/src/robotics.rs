@@ -51,7 +51,7 @@ pub struct Robotics {
     injection_task: JoinHandle<()>,
     injection_status: watch::Receiver<String>,
     motion: ros_z::cache::Cache<MotionCommand>,
-    execution: ros_z::cache::Cache<types::motion_execution::MotionExecution>,
+    emergency_stop: ros_z::cache::Cache<()>,
     game: Publisher<FilteredGameControllerState>,
     field: Option<Publisher<FieldDimensions>>,
     field_updates: watch::Sender<Option<FieldDimensions>>,
@@ -139,12 +139,8 @@ impl Robotics {
             .cache(1)
             .build()
             .await?;
-        let execution = node
-            .subscriber(types::motion_execution::MOTION_EXECUTION_TOPIC)
-            .qos(QosProfile {
-                reliability: ros_z::qos::QosReliability::BestEffort,
-                ..latest
-            })
+        let emergency_stop = node
+            .subscriber("motion/emergency_stop")
             .cache(1)
             .build()
             .await?;
@@ -260,7 +256,7 @@ impl Robotics {
             camera,
             ground,
             motion,
-            execution,
+            emergency_stop,
             behavior_inputs,
             injection,
             injection_task,
@@ -281,10 +277,8 @@ impl Robotics {
     }
 
     pub fn status(&self) -> String {
-        if let Some(execution) = self.execution.get_latest()
-            && let Some(reason) = &execution.fault
-        {
-            return format!("Motion fault: {reason}");
+        if self.emergency_stop.get_latest().is_some() {
+            return "Motion requested emergency stop; reset robot & stack to resume.".into();
         }
         self.inference_status.borrow().as_ref().map_or_else(
             || {
@@ -337,7 +331,9 @@ impl Robotics {
             true
         });
         self.runtime.block_on(async {
-            self.behavior_inputs.publish_game(&self.input_game).await?;
+            self.behavior_inputs
+                .publish_game(&self.input_game, self.emergency_stop.get_latest().is_some())
+                .await?;
             self.game.publish(&self.input_game).await?;
             Ok(())
         })
@@ -535,10 +531,7 @@ mod tests {
         use crate::bevy_mujoco::{MjcfObject, MujocoWorld, MujocoWorldPlugin, SimulationMode};
         use bevy::prelude::*;
         use ros_z::time::Time;
-        use types::{
-            fall_detection::{FALL_DETECTION_TOPIC, FallDetection},
-            robot_command::RobotCommand,
-        };
+        use types::{fall_detection::FallDetection, robot_command::RobotCommand};
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let router = format!("tcp/127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -584,7 +577,7 @@ mod tests {
             };
             let fall = io
                 ._node
-                .subscriber::<FallDetection>(FALL_DETECTION_TOPIC)
+                .subscriber::<FallDetection>("fall_detection/status")
                 .qos(qos)
                 .cache(1)
                 .build()
@@ -696,11 +689,7 @@ mod tests {
                         .abs(),
                 );
             }
-            assert!(
-                io.execution.get_latest().is_none_or(|e| e.fault.is_none()),
-                "{}",
-                io.status()
-            );
+            assert!(io.emergency_stop.get_latest().is_none(), "{}", io.status());
         }
 
         assert!(
@@ -1001,6 +990,12 @@ mod tests {
         );
         exercise_observation_clock_ordering(&runtime, &io, &clock);
         exercise_behavior_and_motion(&runtime, &mut io, &clock);
+        assert!(io.emergency_stop.get_latest().is_some());
+        io.restart().unwrap();
+        assert!(
+            io.emergency_stop.get_latest().is_none(),
+            "reset must clear the emergency stop"
+        );
         drop(io);
         server.shutdown().unwrap();
     }
@@ -1076,7 +1071,7 @@ mod tests {
     ) {
         use kinematics::joints::{Joints, body::LowerBodyJoints};
         use motion_inference::{
-            inference::{InferenceCommand, InferenceResponse, PolicyExecution},
+            inference::InferenceCommand,
             node::{
                 GETUP_INFERENCE_SERVICE, GetUpInferenceService, KICK_INFERENCE_SERVICE,
                 KickInferenceService, WALK_INFERENCE_SERVICE, WalkInferenceService,
@@ -1126,26 +1121,18 @@ mod tests {
                             .await
                             .unwrap();
                         let sender = sender.clone();
-                        let clock = clock.clone();
                         tasks.spawn(async move {
                             loop {
                                 let (request, reply) =
                                     service.take_request_async().await?.into_parts();
-                                let command = InferenceCommand::$variant(request.command);
+                                let command = InferenceCommand::$variant(request);
                                 sender.send(command).unwrap();
-                                let result = Ok(InferenceResponse {
-                                    joints: $joints::fill(MotorCommand {
+                                let result: motion_inference::node::InferenceResult<_> =
+                                    Ok($joints::fill(MotorCommand {
                                         kp: 40.0,
                                         kd: 1.0,
                                         ..MotorCommand::zeros()
-                                    }),
-                                    execution: PolicyExecution {
-                                        policy: command.policy(),
-                                        started_at: clock.now(),
-                                        sensor_time: clock.now(),
-                                        progress: None,
-                                    },
-                                });
+                                    }));
                                 reply.reply_async(&result).await?;
                             }
                             #[allow(unreachable_code)]
@@ -1305,6 +1292,67 @@ mod tests {
             "behavior did not pursue the ball: {:?}",
             io.active_motion()
         );
+        // Exercise the real detector's command freshness on the logical clock.
+        // Zero joints are within its default stand-up pose tolerance.
+        io.input_motion = MotionCommand::StandUp { fast: false };
+        io.inject_current_motion().unwrap();
+        for _ in 0..30 {
+            io.publish_inputs().unwrap();
+            let time = clock.now() + Duration::from_millis(20);
+            let mut low_state = LowState {
+                motor_state_serial: vec![MotorState::default(); 22],
+                ..Default::default()
+            };
+            low_state.imu_state.roll_pitch_yaw =
+                linear_algebra::vector![0.0, std::f32::consts::FRAC_PI_2, 0.0];
+            io.publish_observation(
+                Observation {
+                    low_state,
+                    camera_matrix: CameraMatrix::default(),
+                    ground_to_robot: Isometry3::identity(),
+                },
+                time,
+            )
+            .unwrap();
+            runtime.block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        }
+        assert_eq!(
+            blackboard
+                .get_latest()
+                .unwrap()
+                .world_state
+                .fall_detection
+                .unwrap()
+                .posture,
+            types::fall_detection::Posture::StandingUp,
+            "fall detector must acknowledge StandUp commands stamped in simulation time"
+        );
+        let emergency = runtime.block_on(async {
+            io._node
+                .publisher::<()>("motion/emergency_stop")
+                .build()
+                .await
+                .unwrap()
+        });
+        runtime.block_on(emergency.publish(&())).unwrap();
+        io.input_motion = MotionCommand::Stand {
+            head: HeadMotion::ZeroAngles,
+        };
+        io.inject_current_motion().unwrap();
+        for _ in 0..10 {
+            step(io);
+        }
+        assert_eq!(io.active_motion(), MotionCommand::Damping);
+        assert_eq!(
+            blackboard
+                .get_latest()
+                .unwrap()
+                .world_state
+                .robot
+                .primary_state,
+            types::primary_state::PrimaryState::Damping
+        );
+        assert!(io.status().contains("emergency stop"));
         runtime.block_on(async {
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}

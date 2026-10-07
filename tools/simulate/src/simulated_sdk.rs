@@ -132,11 +132,13 @@ fn requested_mode(request: &RpcReqMsg) -> Option<RobotMode> {
 // Simulator approximations, not Booster's proprietary gains or preparation trajectory.
 const DAMPING_KD: f32 = 1.0;
 const PREPARE_SECONDS: f64 = 2.0;
-// Serial order: head, left arm, right arm, left leg, right leg. Arms down,
-// knees slightly bent, feet level. The floating base is never pinned or teleported.
+// Serial order: head, left arm, right arm, left leg, right leg. Matches the
+// default fall detector stand_up_pose within its readiness tolerance; the ankle
+// targets keep the simulated feet level.
+// The floating base is never pinned or teleported.
 const PREPARE_POSE: [f32; 22] = [
-    0.0, 0.0, 0.0, -1.35, 0.0, -0.5, 0.0, 1.35, 0.0, 0.5, -0.2, 0.0, 0.0, 0.4, -0.2, 0.0, -0.2,
-    0.0, 0.0, 0.4, -0.2, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.2, 0.0, 0.0, 0.4, -0.2, 0.0, -0.2, 0.0,
+    0.0, 0.4, -0.2, 0.0,
 ];
 
 #[derive(Default)]
@@ -181,7 +183,9 @@ impl Controller {
                         .map(|(index, &target)| {
                             let (kp, kd) = match index {
                                 0..2 => (10.0, 1.2),
-                                2..10 => (20.0, 1.5),
+                                // The light arm joints need lower explicit damping at
+                                // the 2 ms physics timestep to avoid torque oscillation.
+                                2..10 => (20.0, 0.5),
                                 _ => (80.0, 4.0),
                             };
                             booster::MotorCommand {
@@ -215,7 +219,7 @@ impl Controller {
 mod tests {
     use super::*;
     use mujoco_rs::prelude::{MjData, MjSpec, MjtGeom, MjtObj};
-    use ros_z::prelude::ContextBuilder;
+    use ros_z::{parameter::NodeParametersExt, prelude::ContextBuilder};
     use std::time::Duration;
 
     async fn request(context: &Context, api: i32, mode: i32) -> bool {
@@ -409,7 +413,7 @@ mod tests {
         );
         assert!(
             (positions[3] - PREPARE_POSE[3]).abs() < 0.2,
-            "Prepare must lower the arm"
+            "Prepare must move the arm to its readiness pose"
         );
         // A fresh Prepare after another mode must recapture the measured pose,
         // even when the render/physics thread did not see the intermediate mode.
@@ -418,5 +422,74 @@ mod tests {
         data.qvel_mut().fill(0.0);
         controller.apply(&robot, &mut data, &control);
         assert!(data.ctrl().iter().all(|torque| torque.abs() < 1e-5));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepare_makes_a_fallen_robot_ready_for_the_real_detector() {
+        let context = ContextBuilder::default()
+            .with_namespace("/prepare_readiness_test")
+            .with_mode("peer")
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(std::iter::empty::<&str>())
+            .with_parameter_layers([std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../etc/parameters/base")])
+            .build()
+            .await
+            .unwrap();
+        let node = context.create_node("parameters").build().await.unwrap();
+        let parameters = node
+            .bind_parameter_as::<fall_detection::Parameters>("fall_detection")
+            .unwrap();
+        let parameters = parameters.snapshot();
+        for side in [-1.0, 1.0] {
+            let mut data = model();
+            data.qpos_mut()[2] = 0.25;
+            data.qpos_mut()[3..7].copy_from_slice(&[
+                std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                side * std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+            ]);
+            // Start outside the readiness pose, as after a fall from walking.
+            for (name, angle) in [("Left_Shoulder_Roll", -1.35), ("Right_Shoulder_Roll", 1.35)] {
+                let joint = data.model().name_to_id(MjtObj::mjOBJ_JOINT, name).unwrap();
+                let q = data.model().jnt_qposadr()[joint] as usize;
+                data.qpos_mut()[q] = angle;
+            }
+            data.forward();
+            let robot = RobotBinding::new(&data, "").unwrap();
+            let mut controller = Controller::default();
+            let mut control = Control::default();
+            control.change_mode(RobotMode::Prepare);
+            let mut detector = fall_detection::Detector::default();
+            let mut last = None;
+            while data.time() < 6.0 {
+                controller.apply(&robot, &mut data, &control);
+                data.step();
+                data.forward();
+                let observation = fall_detection::Observation::from_low_state(
+                    &robot.observe(&data).low_state,
+                    ros_z::time::Time::from_nanos((data.time() * 1e9).round() as i64),
+                )
+                .unwrap();
+                last = detector
+                    .update(observation, false, parameters.typed())
+                    .or(last);
+            }
+            assert_eq!(
+                last.unwrap().posture,
+                types::fall_detection::Posture::Fallen {
+                    ready_for_standup: true
+                },
+                "Prepare must reach the configured readiness pose; observation: {:?}",
+                fall_detection::Observation::from_low_state(
+                    &robot.observe(&data).low_state,
+                    ros_z::time::Time::zero()
+                )
+                .unwrap()
+            );
+        }
+        context.shutdown().unwrap();
     }
 }

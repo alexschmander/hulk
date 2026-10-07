@@ -48,7 +48,17 @@ impl BehaviorInputs {
         })
     }
 
-    pub async fn publish_game(&self, game: &FilteredGameControllerState) -> Result<()> {
+    pub async fn publish_game(
+        &self,
+        game: &FilteredGameControllerState,
+        emergency_stop: bool,
+    ) -> Result<()> {
+        // The simulator maps game state directly instead of running primary_state_filter.
+        // Preserve its emergency-stop behavior until Reset robot & stack clears the cache.
+        if emergency_stop {
+            self.primary.publish(&PrimaryState::Damping).await?;
+            return Ok(());
+        }
         // Wait for the configured player number rather than applying another player's penalty.
         if let Some(player) = self.player.get_latest() {
             self.primary.publish(&primary_state(game, *player)).await?;

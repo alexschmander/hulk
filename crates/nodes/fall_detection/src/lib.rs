@@ -246,6 +246,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
     let motion_command_cache = node
         .subscriber::<MotionCommand>("behavior/motion_command")
         .cache(1)
+        .with_source_time()
         .build()
         .await?;
     let fall_detection_publisher = node
