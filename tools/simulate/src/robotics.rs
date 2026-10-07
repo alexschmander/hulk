@@ -1293,14 +1293,25 @@ mod tests {
             io.active_motion()
         );
         // Exercise the real detector's command freshness on the logical clock.
-        // Zero joints are within its default stand-up pose tolerance.
+        // Use the configured preparation pose for the detector readiness gate.
+        let fall_parameters = io
+            ._node
+            .bind_parameter_as::<fall_detection::Parameters>("fall_detection")
+            .unwrap();
+        let ready_positions = fall_parameters.snapshot().typed().stand_up_pose;
         io.input_motion = MotionCommand::StandUp { fast: false };
         io.inject_current_motion().unwrap();
         for _ in 0..30 {
             io.publish_inputs().unwrap();
             let time = clock.now() + Duration::from_millis(20);
             let mut low_state = LowState {
-                motor_state_serial: vec![MotorState::default(); 22],
+                motor_state_serial: ready_positions
+                    .into_iter()
+                    .map(|position| MotorState {
+                        position,
+                        ..Default::default()
+                    })
+                    .collect(),
                 ..Default::default()
             };
             low_state.imu_state.roll_pitch_yaw =

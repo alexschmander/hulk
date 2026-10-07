@@ -132,12 +132,11 @@ fn requested_mode(request: &RpcReqMsg) -> Option<RobotMode> {
 // Simulator approximations, not Booster's proprietary gains or preparation trajectory.
 const DAMPING_KD: f32 = 1.0;
 const PREPARE_SECONDS: f64 = 2.0;
-// Serial order: head, left arm, right arm, left leg, right leg. Matches the
-// default fall detector stand_up_pose within its readiness tolerance; the ankle
-// targets keep the simulated feet level.
+// Serial order: head, left arm, right arm, left leg, right leg. Arm targets match
+// the FastGetUp policy offsets; the ankle targets keep the simulated feet level.
 // The floating base is never pinned or teleported.
 const PREPARE_POSE: [f32; 22] = [
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.2, 0.0, 0.0, 0.4, -0.2, 0.0, -0.2, 0.0,
+    0.0, 0.0, 0.0, -1.4, -0.4, 0.0, 0.0, 1.4, 0.4, 0.0, -0.2, 0.0, 0.0, 0.4, -0.2, 0.0, -0.2, 0.0,
     0.0, 0.4, -0.2, 0.0,
 ];
 
@@ -442,6 +441,29 @@ mod tests {
             .bind_parameter_as::<fall_detection::Parameters>("fall_detection")
             .unwrap();
         let parameters = parameters.snapshot();
+        let inference_node = context
+            .create_node("policy_parameters")
+            .build()
+            .await
+            .unwrap();
+        let inference = inference_node
+            .bind_parameter_as::<motion_inference::config::Parameters>("motion_inference")
+            .unwrap();
+        let offsets: Vec<_> = motion_inference::config::Policy::FastGetUp
+            .offset(inference.snapshot().typed())
+            .into_iter()
+            .collect();
+        assert_eq!(
+            &PREPARE_POSE[2..10],
+            &offsets[2..10],
+            "Prepare arms must match FastGetUp offsets"
+        );
+        let readiness: Vec<_> = parameters.typed().stand_up_pose.into_iter().collect();
+        assert_eq!(
+            &readiness[2..10],
+            &offsets[2..10],
+            "fall readiness must accept the same arm pose"
+        );
         for side in [-1.0, 1.0] {
             let mut data = model();
             data.qpos_mut()[2] = 0.25;
@@ -451,12 +473,7 @@ mod tests {
                 side * std::f64::consts::FRAC_1_SQRT_2,
                 0.0,
             ]);
-            // Start outside the readiness pose, as after a fall from walking.
-            for (name, angle) in [("Left_Shoulder_Roll", -1.35), ("Right_Shoulder_Roll", 1.35)] {
-                let joint = data.model().name_to_id(MjtObj::mjOBJ_JOINT, name).unwrap();
-                let q = data.model().jnt_qposadr()[joint] as usize;
-                data.qpos_mut()[q] = angle;
-            }
+            // Zero arm positions start outside the FastGetUp readiness pose.
             data.forward();
             let robot = RobotBinding::new(&data, "").unwrap();
             let mut controller = Controller::default();
