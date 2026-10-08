@@ -6,8 +6,9 @@ The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did.
 All simulator wiring and hardware substitutes live under `tools/simulate`; robotics crates need no simulator integration code.
 
 Select a cumulative profile before starting.
-Profiles 1–3 are validated; profile 4 currently remains in acquisition at the default spawn because the production field-association solver exhausts its lookup budget.
-The robotics correction is intentionally deferred at the user's request; no landmarks or truth poses are substituted to bypass it.
+The simulator sits on three explicitly requested upstream squashes: `oleflb/feat/localization-improvements`, `schluis/dev/ball-filter-preferred-20261004` and `BenSampaolo/ball-search-behavior`.
+The new localization solver acquires at the default spawn; the former lookup-budget limitation no longer applies.
+The walking/head-motion fixture measured 0.0152 m maximum position error and 0.0091 rad maximum yaw error over three seconds, using production parameters and no truth pose injection.
 The [profile plan](PROFILES.md) records topic ownership and validation contracts.
 
 | Profile | Additional real nodes | Remaining ideal inputs |
@@ -45,7 +46,7 @@ Twix selects the robot's namespace automatically.
 Only one simulator can run per Twix process.
 Restoring a saved layout does not start robotics or bind UDP sockets.
 
-The robot starts upright and paused in **Initial**, at localization's expected sideline placement: field coordinates `(-length/2, -width/2)`, facing `+90°` into the field.
+The robot starts upright and paused in **Initial**, at the established sideline placement: field coordinates `(-length/2, -width/2)`, facing `+90°` into the field.
 Reset pose returns it to that placement.
 Startup uses the real button bridge, handler and safe-pose check to pass through Prepare to Initial.
 Press **Run** to advance physics.
@@ -184,8 +185,8 @@ The optional startup test launches profiles sequentially and checks producer own
 Set `SIMULATOR_TEST_PROFILE` to `motion_behavior`, `filtering`, `body_state_odometry` or `localization` to select one.
 It also holds the scene-edit lock for 300 ms and checks that raw sensors remain fresh while camera frames are skipped and resume coherently.
 For profile 4 it checks the live input chain, VO ingestion and acquisition status.
-The separate `localization_startup_frame_acquires_with_production_parameters` and `localization_acquisition_and_tracking` tests remain explicitly ignored because of the known production search-budget limitation.
-Running either explicitly currently fails at acquisition; tracking is not validated.
+The captured-frame regression `localization_startup_frame_acquires_with_production_parameters` now runs in the ordinary unit suite and passes with the new production association solver.
+Run `localization_acquisition_and_tracking` explicitly with `--ignored` to exercise live acquisition and walking with ONNX Runtime and motion models.
 OS gamepad capture could not be tested here because no input device or `uinput` was available; external gamepad messages and the no-device local startup path were tested.
 
 On the tested Linux environment, dynamically loading ONNX Runtime 1.22.1 caused an exit-time crash in its global environment destructor.

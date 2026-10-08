@@ -17,12 +17,15 @@ use crate::{
 };
 
 pub fn setup_scene(
-    mut commands: Commands,
-    mut cameras: Query<(Entity, &mut Transform, &mut Camera), Added<PanOrbitCamera>>,
+    mut cameras: Query<(&mut PanOrbitCamera, &mut Transform, &mut Camera), Added<PanOrbitCamera>>,
     mut lights: Query<&mut Transform, (With<DirectionalLight>, Without<Camera>)>,
 ) {
-    for (entity, mut transform, mut camera) in &mut cameras {
-        commands.entity(entity).remove::<PanOrbitCamera>();
+    for (mut orbit, mut transform, mut camera) in &mut cameras {
+        // egui_bevy uses this component to identify its render target camera.
+        // Keep it attached while the simulator owns camera movement.
+        orbit.enabled_motion.orbit = false;
+        orbit.enabled_motion.pan = false;
+        orbit.enabled_motion.zoom = false;
         *transform = Transform::from_xyz(0.0, 4.0, 11.0).looking_at(Vec3::ZERO, Vec3::Y);
         camera.clear_color = ClearColorConfig::Default;
         for mut light in &mut lights {
