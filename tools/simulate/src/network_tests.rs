@@ -114,10 +114,9 @@ async fn real_udp_game_controller_returns_penalties_and_team_messages() {
             sender.send_to(&teammate, hsl_address).await.unwrap();
             if let Ok(Ok(state)) =
                 tokio::time::timeout(Duration::from_millis(50), players.recv()).await
+                && state[PlayerNumber::Two].is_some()
             {
-                if state[PlayerNumber::Two].is_some() {
-                    break;
-                }
+                break;
             }
         }
     })

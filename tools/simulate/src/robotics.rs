@@ -54,7 +54,8 @@ pub struct RobotStack {
     pub field_dimensions: types::field_dimensions::FieldDimensions,
     low_state: Publisher<LowState>,
     imu: Publisher<booster::ImuState>,
-    buttons: Publisher<types::buttons::Buttons<Option<types::buttons::ButtonPressType>>>,
+    pub primary: ros_z::cache::Cache<types::primary_state::PrimaryState>,
+    pub safe_pose: ros_z::cache::Cache<bool>,
     pub field: ros_z::cache::Cache<types::field_dimensions::FieldDimensions>,
     serial: Publisher<kinematics::joints::Joints<booster::MotorState>>,
     camera: Publisher<TimeWrapper<CameraMatrix>>,
@@ -122,7 +123,16 @@ impl RobotStack {
             .build()
             .await?;
         let imu = node.publisher("inputs/imu_state").build().await?;
-        let buttons = node.publisher("buttons").build().await?;
+        let primary = node
+            .subscriber("primary_state")
+            .qos(QosProfile {
+                durability: ros_z::qos::QosDurability::TransientLocal,
+                ..Default::default()
+            })
+            .cache(1)
+            .build()
+            .await?;
+        let safe_pose = node.subscriber("is_safe_pose").cache(1).build().await?;
         let initial_field = node
             .subscriber::<types::field_dimensions::FieldDimensions>("field_dimensions")
             .qos(QosProfile {
@@ -187,6 +197,8 @@ impl RobotStack {
             hardware_interface::run_boxed,
             fall_detection::run_boxed,
             safe_pose_checker::run_boxed,
+            button_event_bridge::run_boxed,
+            button_event_handler::run_boxed,
         );
         spawn_network(&context, &mut tasks);
         let field_dimensions =
@@ -203,7 +215,8 @@ impl RobotStack {
             field_dimensions,
             low_state,
             imu,
-            buttons,
+            primary,
+            safe_pose,
             field,
             serial,
             camera,
@@ -262,23 +275,19 @@ impl RobotStack {
             .unwrap_or_default()
     }
 
-    pub fn press_stand(&self, long: bool) -> Result<()> {
-        use types::buttons::{ButtonPressType, Buttons};
-        Ok(self.runtime.block_on(self.buttons.publish(&Buttons {
-            stand: Some(if long {
-                ButtonPressType::Long
-            } else {
-                ButtonPressType::Short
-            }),
-            ..Default::default()
-        }))?)
+    pub fn button_event(&self, button: i32, event: booster::ButtonEventType) -> Result<()> {
+        self.runtime.block_on(crate::buttons::publish(
+            self.context.session(),
+            button,
+            event,
+        ))
     }
 
     pub fn now(&self) -> Time {
         self.context.clock().now()
     }
 
-    pub fn publish_observation(&self, observation: Observation) -> Result<()> {
+    pub fn publish_observation(&self, observation: &Observation) -> Result<()> {
         let time = self.now();
         self.runtime.block_on(async {
             self.serial
@@ -289,7 +298,7 @@ impl RobotStack {
             self.camera
                 .publish(&TimeWrapper {
                     time,
-                    inner: observation.camera_matrix,
+                    inner: observation.camera_matrix.clone(),
                 })
                 .await?;
             self.ground
