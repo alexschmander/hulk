@@ -10771,6 +10771,7 @@ dependencies = [
  "json5",
  "kinematics",
  "kinematics_provider",
+ "led_handler",
  "linear_algebra",
  "localization-2d",
  "localization-3d",
