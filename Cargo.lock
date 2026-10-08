@@ -796,6 +796,7 @@ dependencies = [
  "coordinate_systems",
  "filtering",
  "geometry",
+ "json5",
  "linear_algebra",
  "linear_sum_assignment",
  "nalgebra 0.34.2",
@@ -4110,18 +4111,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fall_detection"
-version = "0.1.0"
-dependencies = [
- "booster",
- "color-eyre",
- "kinematics",
- "ros-z",
- "serde",
- "types",
-]
-
-[[package]]
 name = "fagra"
 version = "0.1.0"
 source = "git+https://github.com/oleflb/fagra?rev=7b37df61ed615c85f5d59265f5df53ff5d5dc1be#7b37df61ed615c85f5d59265f5df53ff5d5dc1be"
@@ -4132,6 +4121,18 @@ dependencies = [
  "num-dual",
  "proptest",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "fall_detection"
+version = "0.1.0"
+dependencies = [
+ "booster",
+ "color-eyre",
+ "kinematics",
+ "ros-z",
+ "serde",
+ "types",
 ]
 
 [[package]]
@@ -5304,7 +5305,7 @@ dependencies = [
  "ros2",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "types",
@@ -5394,7 +5395,7 @@ dependencies = [
  "ros-z",
  "ros-z-schema",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "types",
@@ -6814,19 +6815,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "loom"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
-dependencies = [
- "cfg-if",
- "generator",
- "scoped-tls",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "low_state_bridge"
 version = "0.1.0"
 dependencies = [
@@ -7138,7 +7126,7 @@ dependencies = [
  "ros-z",
  "ros-z-schema",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tokio",
  "types",
 ]
@@ -9784,7 +9772,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0334639972c0ea5a3fd366aa36116754a11431b619fec3ed559b3f73bcbcebf5"
 dependencies = [
  "ahash",
- "bitflags 2.13.0",
+ "bitflags 2.13.2",
  "num-traits",
  "once_cell",
  "rhai_codegen",
@@ -9803,7 +9791,7 @@ checksum = "3cd3a7535e50bf36857e7be7bec276d334e8c2dfa469c2201226fd01638ea5ca"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.118",
+ "syn 2.0.119",
 ]
 
 [[package]]
