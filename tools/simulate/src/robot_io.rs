@@ -365,6 +365,22 @@ mod tests {
         let camera = observation.camera_matrix;
         assert_eq!(camera.image_size.inner.as_slice(), &[640.0, 544.0]);
         assert!((camera.field_of_view.y.to_degrees() - 94.0).abs() < 1e-4);
+        // Compare the physical MJCF mount with production kinematics and the base
+        // camera_matrix_calculator mounting pitch, which is expressed in degrees.
+        let mount = kinematics::forward::head_to_camera((-0.212_581_1_f32).to_radians());
+        assert!(
+            (camera.head_to_camera.inner.translation.vector - mount.inner.translation.vector)
+                .norm()
+                < 1e-5
+        );
+        assert!(
+            camera
+                .head_to_camera
+                .inner
+                .rotation
+                .angle_to(&mount.inner.rotation)
+                < 1e-5
+        );
         let expected = body_pose(&data, binding.head).inverse() * body_pose(&data, binding.trunk);
         assert!(
             (camera.robot_to_head.inner.translation.vector - expected.translation.vector).norm()

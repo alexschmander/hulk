@@ -1,12 +1,14 @@
 //! Physics and sensor publication run independently of Twix's repaint rate and active tab.
 use crate::{
     bevy_mujoco::{SharedPhysics, SimulationMode},
+    parameters::CurrentSimulatorParameters,
     robot_io::RobotBinding,
     robotics::Robotics,
     scene::{robot, visual::ObjectVisualAssets},
 };
 use bevy::prelude::*;
 use std::{
+    f32::consts::FRAC_PI_2,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -14,6 +16,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use types::field_dimensions::FieldDimensions;
 
 #[derive(Component)]
 pub struct ControlledRobot;
@@ -24,8 +27,23 @@ impl Plugin for MotionSimulationPlugin {
         app.add_systems(Startup, spawn_robot);
     }
 }
-fn spawn_robot(mut commands: Commands, assets: Res<ObjectVisualAssets>) {
-    let robot = robot::spawn(&mut commands, &assets.robot, Transform::default());
+fn initial_pose(field: &FieldDimensions) -> Transform {
+    // Localization's prior is (-length/2, -width/2, yaw +90°) in field coordinates.
+    // Bevy uses (field x, height, -field y); physics sets the standing height.
+    Transform::from_xyz(-field.length / 2.0, 0.0, field.width / 2.0)
+        .with_rotation(Quat::from_rotation_y(FRAC_PI_2))
+}
+
+fn spawn_robot(
+    mut commands: Commands,
+    assets: Res<ObjectVisualAssets>,
+    parameters: Res<CurrentSimulatorParameters>,
+) {
+    let robot = robot::spawn(
+        &mut commands,
+        &assets.robot,
+        initial_pose(&parameters.field_dimensions),
+    );
     commands.entity(robot).insert(ControlledRobot);
 }
 
@@ -96,7 +114,7 @@ impl PhysicsWorker {
                         if !placed {
                             robot.reset_joints(world.data_mut());
                             let entity = world.robot.expect("bound robot");
-                            world.ground_object(entity, Transform::default())?;
+                            world.ground_object(entity, initial_pose(&io.field_dimensions))?;
                             placed = true;
                         }
                         if !initialized.load(Ordering::Acquire)
@@ -154,6 +172,11 @@ impl Drop for PhysicsWorker {
 }
 
 pub fn reset(world: &mut World) {
+    let pose = initial_pose(
+        &world
+            .resource::<CurrentSimulatorParameters>()
+            .field_dimensions,
+    );
     let mut physics = world.resource::<SharedPhysics>().lock();
     physics.mode = SimulationMode::Paused;
     if let Some(robot) = physics.robot {
@@ -161,7 +184,7 @@ pub fn reset(world: &mut World) {
             .expect("controlled robot joints");
         binding.reset_joints(physics.data_mut());
         physics
-            .ground_object(robot, Transform::default())
+            .ground_object(robot, pose)
             .expect("reset controlled robot");
     }
 }
@@ -229,7 +252,11 @@ mod tests {
         }
         assert_eq!(*io.primary.get_latest().unwrap(), PrimaryState::Initial);
         assert_eq!(physics.lock().mode, SimulationMode::Paused);
-        assert!(physics.lock().object_pose(robot).unwrap().translation.y > 0.4);
+        let pose = physics.lock().object_pose(robot).unwrap();
+        assert!(pose.translation.y > 0.4);
+        assert!((pose.translation.x + io.field_dimensions.length / 2.0).abs() < 0.1);
+        assert!((pose.translation.z - io.field_dimensions.width / 2.0).abs() < 0.1);
+        assert!((pose.rotation * Vec3::X).distance(Vec3::NEG_Z) < 0.1);
         // Deliberately hold the same mutex as model recompilation, beyond the real
         // 40/50 ms inference/sensor deadlines. Physics freezes, publications continue.
         let scene_edit = physics.lock();
