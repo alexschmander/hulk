@@ -10,6 +10,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error(transparent)]
     Projection(#[from] ProjectionError),
+    #[error("topic '{0}' is unavailable in this recording")]
+    ReplayTopicUnavailable(String),
     #[error("invalid topic reference '{topic}': {source}")]
     InvalidTopicReference {
         topic: String,
