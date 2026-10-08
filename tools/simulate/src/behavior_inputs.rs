@@ -7,21 +7,30 @@ use linear_algebra::{Isometry2, Point2, point, vector};
 use ros_z::{prelude::*, time::Time};
 use types::{ball_position::BallPosition, field_dimensions::GlobalFieldSide, obstacles::Obstacle};
 
+use crate::{profiles::Profile, reference::Reference};
+
 pub struct BehaviorInputs {
-    pose: Publisher<Isometry2<Ground, Field>>,
-    ball: Publisher<Option<BallPosition<Ground>>>,
-    visual_ball: Publisher<Option<BallPosition<Ground>>>,
-    obstacles: Publisher<Vec<Obstacle>>,
+    pose: Reference<Isometry2<Ground, Field>>,
+    ball: Reference<Option<BallPosition<Ground>>>,
+    visual_ball: Reference<Option<BallPosition<Ground>>>,
+    obstacles: Reference<Vec<Obstacle>>,
     interest: Publisher<Point2<Ground>>,
+    selected_ball: ros_z::cache::Cache<Option<BallPosition<Ground>>>,
 }
 
 impl BehaviorInputs {
-    pub async fn new(node: &Node) -> Result<Self> {
+    pub async fn new(node: &Node, profile: Profile) -> Result<Self> {
         Ok(Self {
-            pose: node.publisher("ground_to_field").build().await?,
-            ball: node.publisher("ball_filter/ball_position").build().await?,
-            visual_ball: node.publisher("visual_kick/ball_position").build().await?,
-            obstacles: node.publisher("obstacles").build().await?,
+            pose: Reference::new(node, "ground_to_field", !profile.localization()).await?,
+            ball: Reference::new(node, "ball_filter/ball_position", !profile.filtering()).await?,
+            visual_ball: Reference::new(node, "visual_kick/ball_position", !profile.filtering())
+                .await?,
+            obstacles: Reference::new(node, "obstacles", !profile.filtering()).await?,
+            selected_ball: node
+                .subscriber("ball_filter/ball_position")
+                .cache(1)
+                .build()
+                .await?,
             interest: node.publisher("position_of_interest").build().await?,
         })
     }
@@ -30,7 +39,7 @@ impl BehaviorInputs {
         &self,
         ground_to_world: nalgebra::Isometry3<f32>,
         ball: Option<([f64; 3], [f64; 3])>,
-        obstacle_positions: Vec<[f64; 3]>,
+        field: &types::field_dimensions::FieldDimensions,
         side: GlobalFieldSide,
         time: Time,
     ) -> Result<()> {
@@ -38,24 +47,30 @@ impl BehaviorInputs {
         let ball = ball
             .map(|(position, velocity)| ball_in_ground(ground_to_world, position, velocity, time));
         let inverse = ground_to_world.inverse();
-        let obstacles = obstacle_positions
+        use types::field_dimensions::{Half, Side};
+        let obstacles = [Half::Own, Half::Opponent]
             .into_iter()
-            .map(|position| {
-                let p = inverse * nalgebra::Point3::from(position.map(|v| v as f32));
-                // Conservative K1 collision footprint; physical contacts still use the full MJCF.
-                Obstacle::robot(point![p.x, p.y], 0.25, 0.3)
+            .flat_map(|half| {
+                [Side::Left, Side::Right].map(|side| {
+                    let position = field.goal_post(half, side);
+                    let p = inverse * nalgebra::point![position.x(), position.y(), 0.0];
+                    Obstacle::goal_post(point![p.x, p.y], field.goal_post_diameter / 2.0)
+                })
             })
             .collect();
-        self.pose.publish_with_source_time(&pose, time).await?;
-        self.ball.publish_with_source_time(&ball, time).await?;
-        self.visual_ball
-            .publish_with_source_time(&ball, time)
-            .await?;
-        self.obstacles
-            .publish_with_source_time(&obstacles, time)
-            .await?;
+        self.pose.publish(&pose, time).await?;
+        self.ball.publish(&ball, time).await?;
+        self.visual_ball.publish(&ball, time).await?;
+        self.obstacles.publish(&obstacles, time).await?;
         self.interest
-            .publish_with_source_time(&ball.map_or(point![1.0, 0.0], |b| b.position), time)
+            .publish_with_source_time(
+                &self
+                    .selected_ball
+                    .get_latest()
+                    .and_then(|ball| *ball)
+                    .map_or(point![1.0, 0.0], |b| b.position),
+                time,
+            )
             .await?;
         Ok(())
     }

@@ -23,7 +23,7 @@ pub fn setup_scene(
 ) {
     for (entity, mut transform, mut camera) in &mut cameras {
         commands.entity(entity).remove::<PanOrbitCamera>();
-        *transform = Transform::from_xyz(0.0, 3.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y);
+        *transform = Transform::from_xyz(0.0, 4.0, 11.0).looking_at(Vec3::ZERO, Vec3::Y);
         camera.clear_color = ClearColorConfig::Default;
         for mut light in &mut lights {
             *light = Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y);
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn projection_and_picking_use_the_same_viewport_coordinates() {
         let view = CameraView {
-            pose: Transform::from_xyz(0.0, 3.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
+            pose: Transform::from_xyz(0.0, 4.0, 11.0).looking_at(Vec3::ZERO, Vec3::Y),
             rect: Rect::from_min_size(egui::pos2(17.0, 123.0), egui::vec2(800.0, 600.0)),
             scale: (std::f32::consts::FRAC_PI_4 / 2.0).tan(),
         };
