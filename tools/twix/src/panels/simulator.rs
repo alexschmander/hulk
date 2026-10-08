@@ -48,7 +48,7 @@ mod enabled {
 
     impl Panel for SimulatorPanel {
         const STORAGE_ID: &'static str = "motion_simulator";
-        const DISPLAY_NAME: &'static str = "Motion simulator";
+        const DISPLAY_NAME: &'static str = "Simulator";
         const ICON: &'static str = egui_material_icons::icons::ICON_SPORTS_SOCCER.codepoint;
 
         fn new(context: PanelCreationContext<'_>) -> Self {
@@ -62,6 +62,13 @@ mod enabled {
                 task: None,
                 error: None,
             }
+        }
+
+        fn header_ui(&mut self, ui: &mut Ui, _: PanelUiContext<'_>) {
+            if self.simulator.is_some() && ui.button("Stop simulator").clicked() {
+                self.simulator = None;
+            }
+            ui.label(&self.settings.namespace);
         }
 
         fn toggle_pause(&mut self) {
@@ -92,6 +99,12 @@ mod enabled {
                                 data.get_temp::<RenderState>(egui::Id::new(RENDER_STATE_ID))
                             });
                             if let Some(renderer) = renderer {
+                                if let Err(error) = context
+                                    .backend
+                                    .set_namespace(self.settings.namespace.clone())
+                                {
+                                    self.error = Some(format!("{error:#}"));
+                                }
                                 self.simulator = Some(Simulator::new(prepared, renderer));
                             } else {
                                 self.error =
@@ -103,22 +116,7 @@ mod enabled {
                 }
             }
             if let Some(simulator) = &mut self.simulator {
-                let mut stop = false;
-                ui.horizontal(|ui| {
-                    stop = ui.button("Stop simulator").clicked();
-                    if ui.button("Inspect this robot in Twix").clicked()
-                        && let Err(error) = context
-                            .backend
-                            .set_namespace(self.settings.namespace.clone())
-                    {
-                        self.error = Some(format!("{error:#}"));
-                    }
-                    ui.label(&self.settings.namespace);
-                });
                 simulator.ui(ui);
-                if stop {
-                    self.simulator = None;
-                }
                 return;
             }
             ui.label("Run one simulated K1 with the real behavior, motion, and HSL message nodes.");
@@ -186,13 +184,13 @@ pub struct SimulatorPanel(serde_json::Value);
 #[cfg(not(feature = "simulator"))]
 impl crate::panel::Panel for SimulatorPanel {
     const STORAGE_ID: &'static str = "motion_simulator";
-    const DISPLAY_NAME: &'static str = "Motion simulator";
+    const DISPLAY_NAME: &'static str = "Simulator";
     const ICON: &'static str = egui_material_icons::icons::ICON_SPORTS_SOCCER.codepoint;
     fn new(context: crate::panel::PanelCreationContext<'_>) -> Self {
         Self(context.value.cloned().unwrap_or_default())
     }
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _: crate::panel::PanelUiContext<'_>) {
-        ui.label("Launch ./twix --simulator to enable the motion simulator.");
+        ui.label("Launch ./twix --simulator to enable the simulator.");
     }
     fn save(&self) -> serde_json::Value {
         self.0.clone()

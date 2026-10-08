@@ -1,7 +1,7 @@
-//! Twix's motion simulator. All hardware substitutes and node wiring live in this tool.
+//! Twix's simulator. All hardware substitutes and node wiring live in this tool.
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bevy::{camera_controller::pan_orbit_camera::prelude::PanOrbitCamera, prelude::*};
+use bevy::prelude::*;
 use color_eyre::{Result, eyre::ensure};
 use eframe::{
     egui::{self, Ui, Widget},
@@ -12,12 +12,14 @@ use tokio::runtime::Handle;
 
 mod behavior_inputs;
 mod bevy_mujoco;
+mod buttons;
 mod parameters;
 mod robot_io;
 mod robotics;
 mod scene;
 mod simulated_sdk;
 mod simulation;
+mod viewport;
 
 use bevy_mujoco::{SharedPhysics, SimulationMode};
 pub use robotics::Configuration;
@@ -71,8 +73,8 @@ pub struct Simulator {
     physics: simulation::PhysicsWorker,
     widget: BevyWidget,
     _lease: Lease,
-    placement: [f32; 6],
-    ball_position: [f32; 2],
+    buttons: buttons::BodyButtons,
+    viewport: viewport::Viewport,
     error: Option<String>,
 }
 
@@ -91,7 +93,7 @@ impl Simulator {
             scene::ObjectsPlugin,
             simulation::MotionSimulationPlugin,
         ))
-        .add_systems(Update, setup_camera);
+        .add_systems(PreUpdate, viewport::setup_scene);
         app.finish();
         app.cleanup();
         let physics = simulation::PhysicsWorker::start(
@@ -102,14 +104,14 @@ impl Simulator {
             physics,
             widget,
             _lease: prepared.lease,
-            placement: [0.0; 6],
-            ball_position: [1.0, 0.0],
+            buttons: buttons::BodyButtons::default(),
+            viewport: viewport::Viewport::default(),
             error: None,
         }
     }
 
     pub fn toggle_pause(&mut self) {
-        if self.error.is_some() {
+        if self.error.is_some() || !self.physics.ready() {
             return;
         }
         let mut physics = self
@@ -140,7 +142,7 @@ impl Simulator {
             let paused = world.resource::<SharedPhysics>().lock().mode == SimulationMode::Paused;
             if ui
                 .add_enabled(
-                    self.error.is_none(),
+                    self.error.is_none() && self.physics.ready(),
                     egui::Button::new(if paused { "Run" } else { "Pause" }),
                 )
                 .clicked()
@@ -151,91 +153,52 @@ impl Simulator {
                     SimulationMode::Paused
                 };
             }
-            if ui.button("Reset pose").clicked() {
+            if ui
+                .add_enabled(self.physics.ready(), egui::Button::new("Reset pose"))
+                .clicked()
+            {
                 simulation::reset(world);
             }
-            for (name, long) in [("Stand: prepare", false), ("Stand: enable", true)] {
-                if ui.button(name).clicked()
-                    && let Err(error) = world.resource::<robotics::Robotics>().press_stand(long)
-                {
+            ui.add_enabled_ui(self.physics.ready(), |ui| {
+                if let Err(error) = self.buttons.ui(ui, world.resource::<robotics::Robotics>()) {
                     self.error = Some(format!("{error:#}"));
                 }
-            }
-            if ui.button("Add ball").clicked() {
-                let position = self.ball_position;
+            });
+            self.viewport.toolbar(ui);
+            if ui
+                .add_enabled(self.physics.ready(), egui::Button::new("Add ball"))
+                .clicked()
+            {
                 world.resource_scope(|world, assets: Mut<scene::visual::ObjectVisualAssets>| {
                     scene::ball::spawn(
                         &mut world.commands(),
                         &assets.ball,
-                        Transform::from_xyz(position[0], 0.0, -position[1]),
+                        Transform::from_xyz(1.0, 0.0, 0.0),
                     );
                 });
             }
-            ui.label(world.resource::<robotics::Robotics>().status());
-        });
-        ui.collapsing("Placement", |ui| {
-            ui.horizontal(|ui| {
-                ui.label("New ball x/y (m)");
-                for value in &mut self.ball_position {
-                    ui.add(egui::DragValue::new(value).speed(0.05));
+            if self.physics.ready() {
+                let io = world.resource::<robotics::Robotics>();
+                if let Some(state) = io.primary.get_latest() {
+                    ui.label(format!("{state:?}"));
                 }
-                if ui.button("Remove balls").clicked() {
-                    let balls = world.resource::<scene::ball::SpawnedBalls>().0.clone();
-                    for ball in balls {
-                        world.despawn(ball);
-                    }
-                }
-            });
-            let paused = world.resource::<SharedPhysics>().lock().mode == SimulationMode::Paused;
-            ui.add_enabled_ui(paused, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Robot x/y/z (m), roll/pitch/yaw (degrees)");
-                    for value in &mut self.placement {
-                        ui.add(egui::DragValue::new(value).speed(0.05));
-                    }
-                    if ui.button("Place robot").clicked() {
-                        let robot = world
-                            .query_filtered::<Entity, With<simulation::ControlledRobot>>()
-                            .single(world);
-                        if let Ok(robot) = robot {
-                            let [x, y, z, roll, pitch, yaw] = self.placement;
-                            let height = world
-                                .resource::<scene::visual::ObjectVisualAssets>()
-                                .robot
-                                .ground_offset();
-                            let rotation = Quat::from_rotation_y(yaw.to_radians())
-                                * Quat::from_rotation_z(-pitch.to_radians())
-                                * Quat::from_rotation_x(roll.to_radians());
-                            if let Err(error) =
-                                world.resource::<SharedPhysics>().lock().set_object_pose(
-                                    robot,
-                                    Transform::from_xyz(x, z + height, -y).with_rotation(rotation),
-                                )
-                            {
-                                self.error = Some(error);
-                            }
-                        }
-                    }
-                });
-            });
+                ui.label(io.status());
+            } else {
+                ui.spinner();
+                ui.label("Initializing robot…");
+            }
         });
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
         }
-        ui.label("Drag to orbit; right-drag to pan; scroll to zoom. Edit motion overrides and parameters in Twix's Parameter panel.");
+        let rect = ui.available_rect_before_wrap();
+        self.viewport
+            .input(ui, rect, self.widget.bevy_app.world_mut());
         self.widget.ui(ui);
+        self.viewport
+            .paint(ui, rect, self.widget.bevy_app.world_mut());
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(16));
-    }
-}
-
-fn setup_camera(mut cameras: Query<(&mut Transform, &mut PanOrbitCamera), Added<PanOrbitCamera>>) {
-    for (mut transform, mut orbit) in &mut cameras {
-        *transform = Transform::from_xyz(4.0, 4.0, 7.0).looking_at(Vec3::ZERO, Vec3::Y);
-        *orbit = PanOrbitCamera {
-            last_anchor_depth: -transform.translation.length() as f64,
-            ..Default::default()
-        };
     }
 }
 
