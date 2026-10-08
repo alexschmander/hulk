@@ -3,7 +3,7 @@ use anyhow::{ensure, Result};
 use clap::Parser;
 use game_controller_core::{
     action::VAction,
-    actions::{Penalize, StartSetPlay, Unpenalize},
+    actions::{Penalize, StartSetPlay, Unpenalize, WaitForSetPlay},
     types::{PenaltyCall, PlayerNumber, SetPlay, Side},
 };
 use game_controller_runtime::{
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         })
         .await??;
         println!("GameController accepted HULKs player 3 return messages (connection=Good)");
-        for stage in ["ready", "penalized", "unpenalized"] {
+        for stage in ["ready", "penalized", "unpenalized", "whistle_in_set"] {
             tokio::time::timeout(Duration::from_secs(20), async {
                 while !exchange.join(stage).exists() {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
                     player: PlayerNumber::new(3),
                     force: true,
                 }))?,
+                "unpenalized" => runtime.action_sender.send(VAction::WaitForSetPlay(WaitForSetPlay))?,
                 _ => {}
             }
         }
@@ -87,7 +88,7 @@ async fn main() -> Result<()> {
             receiver.borrow()["connectionStatus"]["home"][2] == 2,
             "robot stopped returning status"
         );
-        println!("Upstream HSL runtime roundtrip passed: Ready, penalty, removal, live returns");
+        println!("Upstream HSL runtime roundtrip passed: Ready, penalty, removal, whistle in Set, live returns");
         Ok(())
     }
     .await;

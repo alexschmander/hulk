@@ -9,7 +9,7 @@ use projection::camera_matrix::CameraMatrix;
 
 // Booster serial order, also used by Joints::into_iter(). MJCF names differ from Rust names:
 // shoulder_yaw = Elbow_Pitch, elbow = Elbow_Yaw, ankle_up/down = Ankle_Pitch/Roll.
-const JOINTS: [&str; 22] = [
+pub(crate) const JOINTS: [&str; 22] = [
     "AAHead_yaw",
     "Head_pitch",
     "ALeft_Shoulder_Pitch",
@@ -34,7 +34,7 @@ const JOINTS: [&str; 22] = [
     "Right_Ankle_Roll",
 ];
 
-type Data = MjData<Box<MjModel>>;
+pub(crate) type Data = MjData<Box<MjModel>>;
 
 pub struct RobotBinding {
     joints: Vec<(usize, usize, usize)>, // position address, velocity address, actuator
@@ -42,15 +42,35 @@ pub struct RobotBinding {
     head: usize,
     feet: [usize; 2],
     camera: usize,
+    bodies: [usize; 22],
     orientation: usize,
     gyro: usize,
     acceleration: usize,
 }
 
+#[derive(Clone)]
 pub struct Observation {
+    pub robot_to_world: nalgebra::Isometry3<f32>,
+    pub camera_housing: usize,
+    pub camera_to_world: nalgebra::Isometry3<f32>,
+    pub ground_to_world: nalgebra::Isometry3<f32>,
+    pub kinematics: kinematics::robot_kinematics::RobotKinematics,
+    pub support: Option<types::support_foot::SupportFootState>,
     pub low_state: LowState,
     pub ground_to_robot: Isometry3<Ground, Robot>,
     pub camera_matrix: CameraMatrix,
+}
+
+impl Observation {
+    pub fn stationary(&mut self) {
+        for motor in &mut self.low_state.motor_state_serial {
+            motor.velocity = 0.0;
+            motor.acceleration = 0.0;
+        }
+        self.low_state.imu_state.angular_velocity = vector![0.0, 0.0, 0.0];
+        let gravity = self.robot_to_world.rotation.inverse() * nalgebra::vector![0.0, 0.0, 9.81];
+        self.low_state.imu_state.linear_acceleration = linear_algebra::Vector3::wrap(gravity);
+    }
 }
 
 impl RobotBinding {
@@ -84,6 +104,30 @@ impl RobotBinding {
             Ok(model.sensor_adr()[id(MjtObj::mjOBJ_SENSOR, name)?] as usize)
         };
         Ok(Self {
+            bodies: [
+                id(MjtObj::mjOBJ_BODY, "Head_1")?,
+                id(MjtObj::mjOBJ_BODY, "Head_2")?,
+                id(MjtObj::mjOBJ_BODY, "Left_Arm_1")?,
+                id(MjtObj::mjOBJ_BODY, "Left_Arm_2")?,
+                id(MjtObj::mjOBJ_BODY, "Left_Arm_3")?,
+                id(MjtObj::mjOBJ_BODY, "left_hand_link")?,
+                id(MjtObj::mjOBJ_BODY, "Right_Arm_1")?,
+                id(MjtObj::mjOBJ_BODY, "Right_Arm_2")?,
+                id(MjtObj::mjOBJ_BODY, "Right_Arm_3")?,
+                id(MjtObj::mjOBJ_BODY, "right_hand_link")?,
+                id(MjtObj::mjOBJ_BODY, "Left_Hip_Pitch")?,
+                id(MjtObj::mjOBJ_BODY, "Left_Hip_Roll")?,
+                id(MjtObj::mjOBJ_BODY, "Left_Hip_Yaw")?,
+                id(MjtObj::mjOBJ_BODY, "Left_Shank")?,
+                id(MjtObj::mjOBJ_BODY, "Left_Ankle_Cross")?,
+                id(MjtObj::mjOBJ_BODY, "left_foot_link")?,
+                id(MjtObj::mjOBJ_BODY, "Right_Hip_Pitch")?,
+                id(MjtObj::mjOBJ_BODY, "Right_Hip_Roll")?,
+                id(MjtObj::mjOBJ_BODY, "Right_Hip_Yaw")?,
+                id(MjtObj::mjOBJ_BODY, "Right_Shank")?,
+                id(MjtObj::mjOBJ_BODY, "Right_Ankle_Cross")?,
+                id(MjtObj::mjOBJ_BODY, "right_foot_link")?,
+            ],
             joints,
             trunk: id(MjtObj::mjOBJ_BODY, "Trunk")?,
             head: id(MjtObj::mjOBJ_BODY, "Head_2")?,
@@ -227,7 +271,70 @@ impl RobotBinding {
             Isometry3::wrap(head_to_world.inverse() * robot_to_world),
             Isometry3::wrap(camera_to_world.inverse() * head_to_world),
         );
+        let relative = self
+            .bodies
+            .map(|id| robot_to_world.inverse() * body_pose(data, id));
+        let mut kinematics = kinematics::robot_kinematics::RobotKinematics::default();
+        kinematics.head.neck_to_robot = Isometry3::wrap(relative[0]);
+        kinematics.head.head_to_robot = Isometry3::wrap(relative[1]);
+        kinematics.left_arm.inner_shoulder_to_robot = Isometry3::wrap(relative[2]);
+        kinematics.left_arm.outer_shoulder_to_robot = Isometry3::wrap(relative[3]);
+        kinematics.left_arm.upper_arm_to_robot = Isometry3::wrap(relative[4]);
+        kinematics.left_arm.forearm_to_robot = Isometry3::wrap(relative[5]);
+        kinematics.right_arm.inner_shoulder_to_robot = Isometry3::wrap(relative[6]);
+        kinematics.right_arm.outer_shoulder_to_robot = Isometry3::wrap(relative[7]);
+        kinematics.right_arm.upper_arm_to_robot = Isometry3::wrap(relative[8]);
+        kinematics.right_arm.forearm_to_robot = Isometry3::wrap(relative[9]);
+        kinematics.left_leg.pelvis_to_robot = Isometry3::wrap(relative[10]);
+        kinematics.left_leg.hip_to_robot = Isometry3::wrap(relative[11]);
+        kinematics.left_leg.thigh_to_robot = Isometry3::wrap(relative[12]);
+        kinematics.left_leg.tibia_to_robot = Isometry3::wrap(relative[13]);
+        kinematics.left_leg.ankle_to_robot = Isometry3::wrap(relative[14]);
+        kinematics.left_leg.foot_to_robot = Isometry3::wrap(relative[15]);
+        kinematics.right_leg.pelvis_to_robot = Isometry3::wrap(relative[16]);
+        kinematics.right_leg.hip_to_robot = Isometry3::wrap(relative[17]);
+        kinematics.right_leg.thigh_to_robot = Isometry3::wrap(relative[18]);
+        kinematics.right_leg.tibia_to_robot = Isometry3::wrap(relative[19]);
+        kinematics.right_leg.ankle_to_robot = Isometry3::wrap(relative[20]);
+        kinematics.right_leg.foot_to_robot = Isometry3::wrap(relative[21]);
+        kinematics.left_leg.sole_to_robot = Isometry3::wrap(
+            relative[15]
+                * nalgebra::Isometry3::from(nalgebra::Translation3::from(
+                    kinematics::robot_dimensions::RobotDimensions::LEFT_FOOT_TO_LEFT_SOLE.inner,
+                )),
+        );
+        kinematics.right_leg.sole_to_robot = Isometry3::wrap(
+            relative[21]
+                * nalgebra::Isometry3::from(nalgebra::Translation3::from(
+                    kinematics::robot_dimensions::RobotDimensions::RIGHT_FOOT_TO_RIGHT_SOLE.inner,
+                )),
+        );
+        let mut contacts = [false; 2];
+        for (index, contact) in data.contact().iter().enumerate() {
+            if contact.geom.iter().any(|&id| id < 0) || data.contact_force(index)[0] <= 1.0 {
+                continue;
+            }
+            let bodies = contact
+                .geom
+                .map(|id| data.model().geom_bodyid()[id as usize] as usize);
+            for (foot, &body) in self.feet.iter().enumerate() {
+                contacts[foot] |= bodies.contains(&body) && bodies.contains(&0);
+            }
+        }
+        use types::support_foot::SupportFootState;
+        let support = match contacts {
+            [true, true] => Some(SupportFootState::Both),
+            [true, false] => Some(SupportFootState::Left),
+            [false, true] => Some(SupportFootState::Right),
+            _ => None,
+        };
         Observation {
+            robot_to_world,
+            camera_housing: self.head,
+            camera_to_world,
+            ground_to_world,
+            kinematics,
+            support,
             low_state,
             ground_to_robot,
             camera_matrix,
@@ -269,11 +376,12 @@ fn ground_pose(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use booster::JointsMotorState;
     use mujoco_rs::prelude::MjSpec;
 
-    pub(super) fn model() -> Data {
+    pub(crate) fn model() -> Data {
         let mut spec =
             MjSpec::from_xml(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/k1_robot.xml")).unwrap();
         let model = spec.compile().unwrap();
@@ -342,6 +450,50 @@ mod tests {
         assert_eq!(data.ctrl()[actuator], 6.0);
         binding.apply(&mut data, None);
         assert_eq!(data.ctrl()[actuator], 0.0);
+    }
+
+    #[test]
+    fn physical_kinematics_match_production_joint_and_sole_frames() {
+        let mut data = model();
+        let binding = RobotBinding::new(&data, "").unwrap();
+        binding.reset_joints(&mut data);
+        let sample = binding.observe(&data);
+        let joints = sample.low_state.serial_motor_states().unwrap().positions();
+        let pairs = [
+            (
+                sample.kinematics.head.head_to_robot.inner,
+                kinematics::forward::head_to_robot(&joints.head).inner,
+            ),
+            (
+                sample.kinematics.left_leg.sole_to_robot.inner,
+                kinematics::forward::left_sole_to_robot(&joints.left_leg).inner,
+            ),
+            (
+                sample.kinematics.right_leg.sole_to_robot.inner,
+                kinematics::forward::right_sole_to_robot(&joints.right_leg).inner,
+            ),
+        ];
+        for (physical, computed) in pairs {
+            assert!((physical.translation.vector - computed.translation.vector).norm() < 1e-5);
+            assert!(physical.rotation.angle_to(&computed.rotation) < 1e-5);
+        }
+        let mut frozen = sample.clone();
+        frozen.stationary();
+        assert_eq!(
+            frozen.low_state.imu_state.angular_velocity,
+            vector![0.0, 0.0, 0.0]
+        );
+        assert!(
+            frozen
+                .low_state
+                .motor_state_serial
+                .iter()
+                .all(|motor| motor.velocity == 0.0)
+        );
+        assert_eq!(
+            frozen.low_state.motor_state_serial[0].position,
+            sample.low_state.motor_state_serial[0].position
+        );
     }
 
     #[test]

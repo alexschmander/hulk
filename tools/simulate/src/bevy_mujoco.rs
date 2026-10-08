@@ -139,6 +139,7 @@ pub struct MujocoWorld {
     data: Option<MjData<Box<MjModel>>>,
     objects: HashMap<Entity, ObjectBinding>,
     pub generation: u64,
+    pub motion_epoch: u64,
 }
 
 impl Default for MujocoWorld {
@@ -154,6 +155,7 @@ impl Default for MujocoWorld {
             data: Some(MjData::new(Box::new(model))),
             objects: HashMap::new(),
             generation: 0,
+            motion_epoch: 0,
         }
     }
 }
@@ -220,6 +222,9 @@ impl MujocoWorld {
     }
 
     pub fn set_object_pose(&mut self, entity: Entity, transform: Transform) -> Result<(), String> {
+        if self.robot == Some(entity) {
+            self.motion_epoch += 1;
+        }
         let binding = self
             .objects
             .get(&entity)
