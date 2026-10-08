@@ -8,7 +8,7 @@ use types::primary_state::PrimaryState;
 
 #[test]
 #[ignore = "requires ONNX Runtime, motion models, and free GameController UDP ports"]
-fn startup_reaches_initial_and_scene_edits_keep_sensors_live() {
+fn startup_pause_resume_and_scene_edits_preserve_time() {
     for profile in crate::Profile::ALL {
         if std::env::var("SIMULATOR_TEST_PROFILE").is_ok_and(|requested| {
             requested != serde_json::to_value(profile).unwrap().as_str().unwrap()
@@ -100,6 +100,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         .expect("Initial LED command must reach the simulator");
     });
     assert_eq!(physics.lock().mode, SimulationMode::Paused);
+    validate_pause(&runtime, &io, &physics);
     let scene_pose = physics.lock().object_pose(robot).unwrap();
     assert!(scene_pose.translation.y > 0.4);
     assert!((scene_pose.translation.x + io.field_dimensions.length / 2.0).abs() < 0.1);
@@ -156,6 +157,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         .norm();
     eprintln!("{profile:?}: camera translation difference {error:.4} m");
     assert!(error < 0.05, "camera geometry differs by {error} m");
+    physics.lock().mode = SimulationMode::Running;
     if profile == crate::Profile::Localization {
         validate_localization(&runtime, &io, &physics, require_acquisition);
         drop(worker);
@@ -174,7 +176,16 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         thread::sleep(Duration::from_millis(10));
     }
     let first_detection = whistle.get_latest().unwrap().last_detection;
-    thread::sleep(crate::whistle::PULSE_DURATION + Duration::from_millis(500));
+    runtime.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            io.node()
+                .clock()
+                .sleep(crate::whistle::PULSE_DURATION + Duration::from_millis(500)),
+        )
+        .await
+        .unwrap();
+    });
     assert!(!whistle.get_latest().unwrap().is_detected);
     io.whistle();
     let started = Instant::now();
@@ -257,7 +268,11 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
     };
     let started = Instant::now();
     loop {
-        runtime.block_on(controller.publish(&input)).unwrap();
+        runtime
+            .block_on(
+                controller.publish_with_source_time(&input, ros_z::time::Clock::wallclock().now()),
+            )
+            .unwrap();
         if matches!(io.active_motion(), MotionCommand::WalkWithVelocity { velocity, .. } if (velocity.x()-0.15).abs() < 1e-5)
         {
             break;
@@ -270,7 +285,11 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         thread::sleep(Duration::from_millis(20));
     }
     input.buttons.clear();
-    runtime.block_on(controller.publish(&input)).unwrap();
+    runtime
+        .block_on(
+            controller.publish_with_source_time(&input, ros_z::time::Clock::wallclock().now()),
+        )
+        .unwrap();
     // Losing the remote source must stop a commanded walk after its 250 ms freshness window.
     thread::sleep(Duration::from_millis(400));
     assert!(matches!(io.active_motion(), MotionCommand::Stand { .. }));
@@ -289,8 +308,8 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         "{profile:?}: deleted ball expired after {:?}",
         started.elapsed()
     );
-    // Deliberately hold the same mutex as model recompilation, beyond the real
-    // 40/50 ms inference/sensor deadlines. Physics freezes, publications continue.
+    // Scene recompilation freezes both clocks and sampling, even beyond the
+    // 40/50 ms sensor deadlines. Resume must not age the cached sensors.
     let timing = runtime
         .block_on(
             io.node()
@@ -300,10 +319,10 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         )
         .unwrap();
     thread::sleep(Duration::from_millis(80));
-    let skipped_before = timing.get_latest().unwrap().skipped_frames;
     let scene_edit = physics.lock();
     thread::sleep(Duration::from_millis(80));
     let captured = timing.get_latest().unwrap().captured;
+    let frozen_time = io.now();
     thread::sleep(Duration::from_millis(220));
     assert_eq!(
         timing.get_latest().unwrap().captured,
@@ -314,6 +333,11 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         io.safe_pose
             .latest_stamp()
             .is_some_and(|stamp| io.now().duration_since(stamp) < Duration::from_millis(50))
+    );
+    assert_eq!(
+        io.now(),
+        frozen_time,
+        "robotics time advanced during scene rebuild"
     );
     assert_eq!(*io.primary.get_latest().unwrap(), PrimaryState::Initial);
     assert!(!io.status().contains("Emergency stop"));
@@ -326,7 +350,15 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(timing.get_latest().unwrap().skipped_frames >= skipped_before + 5);
+    assert!(
+        timing
+            .get_latest()
+            .unwrap()
+            .captured
+            .duration_since(captured)
+            < Duration::from_millis(100),
+        "scene rebuild caused a catch-up time jump"
+    );
     assert!(worker.poll().is_none());
     if profile == crate::Profile::BodyStateOdometry {
         validate_body_state(&runtime, &io, &physics);
@@ -334,6 +366,114 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
     drop(worker);
     drop(io);
     router.shutdown().unwrap();
+}
+
+fn validate_pause(runtime: &tokio::runtime::Runtime, io: &Robotics, physics: &SharedPhysics) {
+    let (low, motion, frames, whistle) = runtime.block_on(async {
+        let node = io.node();
+        (
+            node.subscriber::<booster::LowState>("inputs/low_state")
+                .cache(1)
+                .build()
+                .await
+                .unwrap(),
+            node.subscriber::<types::motion_command::MotionCommand>("behavior/motion_command")
+                .cache(1)
+                .build()
+                .await
+                .unwrap(),
+            node.subscriber::<crate::observations::FrameTiming>("diagnostics/camera_frames")
+                .cache(1)
+                .build()
+                .await
+                .unwrap(),
+            node.subscriber::<types::filtered_whistle::FilteredWhistle>("filtered_whistle")
+                .cache(1)
+                .build()
+                .await
+                .unwrap(),
+        )
+    });
+    physics.lock().mode = SimulationMode::Running;
+    let start = Instant::now();
+    while low.latest_stamp().is_none()
+        || motion.latest_stamp().is_none()
+        || frames.get_latest().is_none()
+        || whistle.get_latest().is_none()
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "timing probes did not receive data"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    physics.lock().mode = SimulationMode::Paused;
+    // Let already-published samples and in-flight node work drain.
+    thread::sleep(Duration::from_millis(150));
+    let before = io.now();
+    let physical_before = physics.lock().data().time();
+    let low_before = low.latest_stamp();
+    let motion_before = motion.latest_stamp();
+    let frame_before = frames.get_latest().unwrap().captured;
+    let clock = io.node().clock().clone();
+    let deadline = before + Duration::from_millis(100);
+    let timer = runtime.spawn(async move { clock.sleep_until(deadline).await });
+    io.whistle();
+    thread::sleep(crate::whistle::PULSE_DURATION + Duration::from_millis(100));
+    assert_eq!(io.now(), before, "robotics time advanced while paused");
+    assert_eq!(
+        physics.lock().data().time(),
+        physical_before,
+        "physics time advanced while paused"
+    );
+    assert_eq!(
+        low.latest_stamp(),
+        low_before,
+        "paused sensors were restamped"
+    );
+    assert_eq!(
+        motion.latest_stamp(),
+        motion_before,
+        "behavior timer advanced while paused"
+    );
+    assert_eq!(
+        frames.get_latest().unwrap().captured,
+        frame_before,
+        "paused camera kept capturing"
+    );
+    assert!(!timer.is_finished(), "robotics timer expired in wall time");
+    assert!(
+        !whistle.get_latest().unwrap().is_detected,
+        "paused whistle was processed early"
+    );
+    physics.lock().mode = SimulationMode::Running;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), timer)
+            .await
+            .unwrap()
+            .unwrap();
+    });
+    physics.lock().mode = SimulationMode::Paused;
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        whistle.get_latest().unwrap().is_detected,
+        "paused whistle was lost before resume"
+    );
+    let elapsed = io.now().duration_since(before);
+    let physical_elapsed = physics.lock().data().time() - physical_before;
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "resume caught up wall time: {elapsed:?}"
+    );
+    assert!(
+        (elapsed.as_secs_f64() - physical_elapsed).abs() < 1e-6,
+        "robotics/physics clocks diverged"
+    );
+    assert!(!io.status().contains("Emergency stop"), "{}", io.status());
+    eprintln!(
+        "{:?}: pause froze clocks, sensors and behavior; resume advanced {elapsed:?} without catch-up",
+        io.profile
+    );
 }
 
 fn validate_filtering(
@@ -394,8 +534,13 @@ fn validate_filtering(
     // Give the physical ball a sustained rolling velocity, then compare the real
     // filter with the independently sampled position and velocity.
     physics.lock().mode = SimulationMode::Running;
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(2) {
+    let start = io.now();
+    let deadline = Instant::now();
+    while io.now().duration_since(start) < Duration::from_secs(2) {
+        assert!(
+            deadline.elapsed() < Duration::from_secs(10),
+            "rolling fixture stopped advancing"
+        );
         let mut world = physics.lock();
         let ball = world.balls[0];
         let joint = world
@@ -428,6 +573,7 @@ fn validate_filtering(
         "{:?}: rolling ball velocity error {velocity_error:.4} m/s",
         io.profile
     );
+    physics.lock().mode = SimulationMode::Running;
     let layer = io.parameters.snapshot().layers.last().unwrap().clone();
     io.parameters
         .set_json(
@@ -588,6 +734,19 @@ fn validate_body_state(runtime: &tokio::runtime::Runtime, io: &Robotics, physics
                 .unwrap(),
         )
     });
+    let start = Instant::now();
+    while odometry.get_latest().is_none()
+        || truth.get_latest().is_none()
+        || obstacles.get_latest().is_none()
+        || reference_obstacles.get_latest().is_none()
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "body-state probes did not receive data"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    physics.lock().mode = SimulationMode::Paused;
     thread::sleep(Duration::from_millis(100));
     let beginning = *odometry.get_latest().unwrap();
     thread::sleep(Duration::from_millis(500));
@@ -608,12 +767,21 @@ fn validate_body_state(runtime: &tokio::runtime::Runtime, io: &Robotics, physics
     };
     // Remote mode was enabled earlier and remains enabled across a disconnect.
     physics.lock().mode = SimulationMode::Running;
-    let start = Instant::now();
+    let start = io.now();
+    let deadline = Instant::now();
     let mut max_position_error = 0.0f32;
     let mut max_yaw_error = 0.0f32;
     let mut max_obstacle_error = 0.0f32;
-    while start.elapsed() < Duration::from_secs(3) {
-        runtime.block_on(controller.publish(&input)).unwrap();
+    while io.now().duration_since(start) < Duration::from_secs(3) {
+        assert!(
+            deadline.elapsed() < Duration::from_secs(15),
+            "walking fixture stopped advancing"
+        );
+        runtime
+            .block_on(
+                controller.publish_with_source_time(&input, ros_z::time::Clock::wallclock().now()),
+            )
+            .unwrap();
         let estimate = *odometry.get_latest().unwrap();
         let actual = *truth.get_nearest(odometry.latest_stamp().unwrap()).unwrap();
         max_position_error = max_position_error.max(
@@ -670,7 +838,7 @@ fn validate_body_state(runtime: &tokio::runtime::Runtime, io: &Robotics, physics
         "walking yaw error {max_yaw_error} rad"
     );
     eprintln!(
-        "BodyStateOdometry: 3 s walking maximum odometry error {max_position_error:.4} m, yaw {max_yaw_error:.4} rad"
+        "BodyStateOdometry: 3 s simulated walking maximum odometry error {max_position_error:.4} m, yaw {max_yaw_error:.4} rad"
     );
     // Compare arrival-time output against truth; this includes processing delay.
     eprintln!(
@@ -681,6 +849,7 @@ fn validate_body_state(runtime: &tokio::runtime::Runtime, io: &Robotics, physics
     let mut fallen = initial_pose(&io.field_dimensions);
     fallen.rotation *= Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     world.ground_object(robot, fallen).unwrap();
+    world.mode = SimulationMode::Running;
     drop(world);
     let start = Instant::now();
     while !posture
@@ -805,6 +974,11 @@ fn validate_localization(
     while !localized
         .get_latest()
         .is_some_and(|pose| pose.robot_to_field.is_some())
+        || !associations
+            .get_latest()
+            .is_some_and(|frame| frame.inner.associations.len() >= 5)
+        || pose.get_latest().is_none()
+        || truth.get_latest().is_none()
     {
         assert!(io.poll().is_none(), "{}", io.status());
         assert!(
@@ -872,19 +1046,32 @@ fn validate_localization(
         ..Default::default()
     };
     for _ in 0..5 {
-        runtime.block_on(controller.publish(&enable)).unwrap();
+        runtime
+            .block_on(
+                controller.publish_with_source_time(&enable, ros_z::time::Clock::wallclock().now()),
+            )
+            .unwrap();
         thread::sleep(Duration::from_millis(20));
     }
     let initial_position = actual.inner.translation.vector;
     physics.lock().mode = SimulationMode::Running;
-    let start = Instant::now();
+    let start = io.now();
+    let deadline = Instant::now();
     let mut max_error = error;
     let mut max_yaw_error = yaw_error;
-    while start.elapsed() < Duration::from_secs(3) {
-        if start.elapsed() > Duration::from_secs(1) {
+    while io.now().duration_since(start) < Duration::from_secs(3) {
+        assert!(
+            deadline.elapsed() < Duration::from_secs(15),
+            "localization fixture stopped advancing"
+        );
+        if io.now().duration_since(start) > Duration::from_secs(1) {
             input.buttons.clear();
         }
-        runtime.block_on(controller.publish(&input)).unwrap();
+        runtime
+            .block_on(
+                controller.publish_with_source_time(&input, ros_z::time::Clock::wallclock().now()),
+            )
+            .unwrap();
         assert!(io.poll().is_none(), "{}", io.status());
         assert!(!io.status().contains("Emergency stop"), "{}", io.status());
         if let Some(stamp) = pose.latest_stamp() {
@@ -929,7 +1116,7 @@ fn validate_localization(
     );
     assert!(diagnostics.failure.is_none(), "{diagnostics:?}");
     eprintln!(
-        "Localization: 3 s walking/head tracking max error {max_error:.4} m, yaw {max_yaw_error:.4} rad; measurements {}, solve {:?}",
+        "Localization: 3 s simulated walking/head tracking max error {max_error:.4} m, yaw {max_yaw_error:.4} rad; measurements {}, solve {:?}",
         diagnostics.measurement_count, diagnostics.duration
     );
 }

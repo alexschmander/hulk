@@ -84,24 +84,18 @@ impl PhysicsWorker {
             let mut generation = None;
             let mut binding = None;
             let mut controller = crate::simulated_sdk::Controller::default();
-            let mut last_world = Instant::now();
-            let mut snapshot: Option<crate::robot_io::Observation> = None;
+            let mut last_frame = None;
             let mut sequence = 0;
             let mut startup_complete = false;
             let startup_deadline = Instant::now();
             let mut period = Duration::from_millis(2);
             while !stopped.load(Ordering::Acquire) {
                 let started = Instant::now();
-                let frame_due = last_world.elapsed() >= Duration::from_millis(33);
                 let failed = io.poll().is_some();
-                let time = io.now();
+                let mut sample = None;
                 let mut frame = None;
-                if frame_due {
-                    sequence += 1;
-                    last_world = Instant::now();
-                }
-                // Scene recompilation freezes physics, but must not starve the real
-                // nodes' sensor deadlines. Keep publishing the frozen scene snapshot.
+                // Both physics and robotics time stop during a scene rebuild.
+                // Never restamp a frozen observation or catch up elapsed wall time.
                 if let Some(mut world) = physics.try_lock() {
                     if failed {
                         world.mode = SimulationMode::Paused;
@@ -132,53 +126,67 @@ impl PhysicsWorker {
                         {
                             world.mode = SimulationMode::Running;
                         }
-                        if world.mode == SimulationMode::Running {
-                            controller.apply(robot, world.data_mut(), &io.actuator_control());
-                            world.data_mut().step();
-                        }
-                        world.data_mut().forward();
-                        let mut observation = robot.observe(world.data());
-                        if world.mode == SimulationMode::Paused {
-                            observation.stationary();
-                        }
-                        if frame_due {
-                            let mut balls = crate::observations::balls(&world);
-                            if world.mode == SimulationMode::Paused {
-                                for ball in &mut balls {
-                                    ball.velocity = [0.0; 3];
-                                }
+                        // Startup must run the real button/mode pipeline and fill
+                        // sensor caches before exposing the initially paused scene.
+                        if !failed
+                            && (world.mode == SimulationMode::Running
+                                || !initialized.load(Ordering::Acquire))
+                        {
+                            let time = io.now() + period;
+                            if world.mode == SimulationMode::Running {
+                                controller.apply(robot, world.data_mut(), &io.actuator_control());
+                                world.data_mut().step();
                             }
-                            let field = io
-                                .field
-                                .get_latest()
-                                .map(|f| *f)
-                                .unwrap_or(io.field_dimensions);
-                            let detections = crate::observations::detect(
-                                world.data_mut(),
-                                &observation,
-                                &balls,
-                                &field,
-                            );
-                            frame = Some(crate::observations::Frame {
-                                time,
-                                sequence,
-                                epoch: world.motion_epoch,
-                                sample: observation.clone(),
-                                balls,
-                                detections,
-                                field,
-                            });
+                            world.data_mut().forward();
+                            let mut observation = robot.observe(world.data());
+                            if world.mode == SimulationMode::Paused {
+                                observation.stationary();
+                            }
+                            if last_frame.is_none_or(|last| {
+                                time.duration_since(last) >= Duration::from_millis(33)
+                            }) {
+                                sequence += 1;
+                                last_frame = Some(time);
+                                let mut balls = crate::observations::balls(&world);
+                                if world.mode == SimulationMode::Paused {
+                                    for ball in &mut balls {
+                                        ball.velocity = [0.0; 3];
+                                    }
+                                }
+                                let field = io
+                                    .field
+                                    .get_latest()
+                                    .map(|f| *f)
+                                    .unwrap_or(io.field_dimensions);
+                                let detections = crate::observations::detect(
+                                    world.data_mut(),
+                                    &observation,
+                                    &balls,
+                                    &field,
+                                );
+                                frame = Some(crate::observations::Frame {
+                                    time,
+                                    sequence,
+                                    epoch: world.motion_epoch,
+                                    sample: observation.clone(),
+                                    balls,
+                                    detections,
+                                    field,
+                                });
+                            }
+                            sample = Some((observation, time));
                         }
-                        snapshot = Some(observation);
                     }
-                } else if let Some(sample) = &mut snapshot {
-                    // Raw sensors remain live during a rebuild. Camera frames require
-                    // a coherent pose/visibility sample and are counted as skipped.
-                    sample.stationary();
                 }
-                if let Some(sample) = &snapshot {
-                    io.publish_observation(sample, time)
+                if let Some((sample, time)) = sample {
+                    // Make the sensors available before waking robotics timers.
+                    io.publish_observation(&sample, time)
                         .map_err(|error| format!("Simulator sensor publication: {error:#}"))?;
+                    io.advance_time(period)
+                        .map_err(|error| format!("Simulator clock: {error:#}"))?;
+                    if let Some(frame) = frame {
+                        io.publish_frame(frame);
+                    }
                     if !startup_complete && startup.advance(&io)? {
                         physics.lock().mode = SimulationMode::Paused;
                         startup_complete = true;
@@ -186,14 +194,11 @@ impl PhysicsWorker {
                     if startup_complete && io.ready() {
                         initialized.store(true, Ordering::Release);
                     }
-                    if !initialized.load(Ordering::Acquire)
-                        && startup_deadline.elapsed() > Duration::from_secs(20)
-                    {
-                        return Err(format!("Simulator startup timed out: {}", io.status()));
-                    }
-                    if let Some(frame) = frame {
-                        io.publish_frame(frame);
-                    }
+                }
+                if !initialized.load(Ordering::Acquire)
+                    && startup_deadline.elapsed() > Duration::from_secs(20)
+                {
+                    return Err(format!("Simulator startup timed out: {}", io.status()));
                 }
                 // No burst of stale catch-up samples after rendering or model recompilation.
                 thread::sleep(period.saturating_sub(started.elapsed()));
