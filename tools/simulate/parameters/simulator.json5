@@ -1,4 +1,5 @@
 {
+  goal_height: 1.6,
   observations: {pixel_noise_std_dev: 0.0, detection_dropout_probability: 0.0, seed: 0},
   ball: {
     mass: 0.450,

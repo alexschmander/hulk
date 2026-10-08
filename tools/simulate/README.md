@@ -1,6 +1,6 @@
 # Simulator in Twix
 
-The Simulator panel runs one K1 with the real motion, inference, fall detection, behavior and HSL message nodes.
+The Simulator panel runs one to five K1 robots with independent real motion, inference, fall detection, behavior and HSL message nodes.
 MuJoCo supplies physics and simulated sensor inputs.
 The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did.
 All simulator wiring and hardware substitutes live under `tools/simulate`; robotics crates need no simulator integration code.
@@ -13,7 +13,7 @@ The [profile plan](PROFILES.md) records topic ownership and validation contracts
 
 | Profile | Additional real nodes | Remaining ideal inputs |
 | --- | --- | --- |
-| Motion & behavior | Common 24-node stack, including raw sensor/button bridges, gamepad, LED handler, whistle filter and HSL communications | Body geometry, odometry, field pose, first ball and fixed goalposts |
+| Motion & behavior | Common 24-node stack, including raw sensor/button bridges, gamepad, LED handler, whistle filter and HSL communications | Body geometry, odometry, field pose, first ball, other robots and fixed goalposts |
 | Filtering | Ball filter, visual-kick selector, obstacle filter, search suggestor | Body geometry, odometry and field pose; synthetic camera detections |
 | Body state & odometry | Kinematics, support foot, ground provider, camera matrix and odometry | Field pose; synthetic camera detections and camera calibration |
 | Localization | Field-mark association and 3D/2D localization | Synthetic camera detections, calibration and coherent camera-motion measurements |
@@ -30,24 +30,31 @@ The simulator needs MuJoCo 3.9 and a compatible ONNX Runtime shared library.
 Set `ORT_DYLIB_PATH` to your ONNX Runtime library if it is not available in the loader's search path.
 
 ```sh
-./twix --simulator /simulator/robot
+./twix --simulator /1
 ```
 
 The launcher enables Twix's optional `simulator` Cargo feature and configures its MuJoCo library path.
-It also scopes Twix and the simulator to the global Zenoh prefix `hulk_simulator`, including raw Booster topics and discovery.
+Robot N uses global Zenoh prefix `hulk_simulator/N` and ROS namespace `/N`, including raw Booster topics, discovery, parameters and RPCs.
+The top-left namespace selector switches Twix and simulator body controls between `/1` through `/5`.
+Selecting an absent player disables its body controls.
 Without `--router`, simulator mode starts a private loopback router automatically.
 Ordinary Twix builds keep their existing dependencies.
 With Cargo directly, enable `--features simulator`, pass `--zenoh-namespace hulk_simulator`, and set the MuJoCo library path yourself.
 The current Nix Twix package builds ordinary Twix; it does not bundle the simulator.
 
 Open the **Simulator** preset or add a **Simulator** panel.
-Select a profile, then press **Start simulator**.
+Select a profile, initial robot count and location, then press **Start simulator**.
 Twix selects the robot's namespace automatically.
 Only one simulator can run per Twix process.
 Restoring a saved layout does not start robotics or bind UDP sockets.
 
-The robot starts upright and paused in **Initial**, at the established sideline placement: field coordinates `(-length/2, -width/2)`, facing `+90°` into the field.
-Reset pose returns it to that placement.
+Robots start upright and paused in **Initial**.
+Initial players alternate between both long touchlines in their own half, starting 0.5 m from the goal line and spaced 0.9 m toward midfield, facing inward.
+**Add robot** starts the next available player, at a vacant slot along the sideline, without moving existing robots.
+Placement follows the known GameController field side and defaults to Home before the first packet.
+A running match continues during startup; a paused match keeps the existing clock and poses frozen.
+Reset pose returns the selected robot to its original spawn placement.
+Floating player numbers use each robot's actual commanded LED color.
 Startup uses the real button bridge, handler and safe-pose check to pass through Prepare to Initial.
 Press **Run** to advance physics.
 If GameController is already running, its game state takes over.
@@ -70,17 +77,21 @@ Firmware-owned LED colors after release are not simulated.
 Inspect primary state, localization and Game Controller connection status in Twix or GameController; the simulator toolbar does not repeat them.
 
 The default **Local gamepad** source runs the real controller handler on the Twix host.
-Press the controller's Start button to toggle behavior's remote mode; walking axes, head controls and kicks use the existing robot mappings.
+It routes input only to the robot selected in Twix.
+Release and press Start after switching robots to enable routing; holding Start across a switch does not activate the new robot.
+Subsequent Start presses toggle behavior's remote mode; walking axes, head controls and kicks use the existing robot mappings.
+Inactive robots receive disconnected controller inputs.
+Inspect `inputs/controller_input` and `behavior/blackboard.remote_control_enabled` in Twix to check capture and activation.
 **External controller** disables only the local producer and accepts `ControllerInput` on `inputs/controller_input` in the same robot namespace and global Zenoh scope.
 Behavior stops using stale controller input after its existing 250 ms freshness window.
 No connected gamepad is required for startup.
 
-**Whistle** publishes a 750 ms detection pulse through the real whistle filter, with false samples between pulses.
+**Whistle** publishes a 750 ms detection pulse to every robot through the real whistle filter, with false samples between pulses.
 Repeated clicks extend the current pulse.
 The pulse spans the GameController's 500 ms update interval, because the state filter checks whistles when those updates arrive.
 Use the real GameController to enter Set before testing the whistle-to-Playing transition.
 
-Motion overrides use the Parameter panel: select `/simulator/robot/behavior_node`, path `control.injected_motion_command`.
+Motion overrides use the Parameter panel: select the relative node `behavior_node`, path `control.injected_motion_command`.
 Set it to `null` to let behavior choose motion.
 The preset opens this parameter; press **Refresh** once the simulator has started.
 
@@ -98,7 +109,7 @@ The physics worker advances a shared ROS-Z logical clock independently of the vi
 Each running physics step advances robotics time by the MuJoCo timestep, and every sensor view of that step shares its timestamp.
 Pause and scene recompilation freeze both clocks and sensor sampling.
 Resume continues from that time without catching up elapsed wall time; pose resets and scene edits never rewind the clock.
-Startup advances the clock while the real nodes initialize, then pauses in Initial.
+A new robot initializes from stationary sensor samples at the shared clock time, then joins the common physics scene in Initial.
 Camera frames use simulation time at approximately 30 Hz.
 `diagnostics/camera_frames` reports capture/publication times and cumulative overwritten queued snapshots.
 A whistle clicked while paused is retained for resume; its 750 ms pulse uses simulation time.
@@ -113,9 +124,11 @@ Neural policies and contacts still need validation against hardware.
 ## GameController
 
 Use [RoboCup-HumanoidSoccerLeague/GameController](https://github.com/RoboCup-HumanoidSoccerLeague/GameController).
-Start an actual game for team 24, default player 3.
-The default HULK team broadcast address is `10.0.255.255`.
-GameController state arrives on UDP 3838, HULK returns status to its sender on UDP 3939, and team communication uses UDP 10024.
+Start an actual game for team 24 with up to five players.
+A simulator-owned UDP relay receives state on UDP 3838 and forwards the original bytes to each production endpoint on a separate private port.
+Every robot parses the message, applies its own player number and emits a real return message, which the relay sends to the external sender on UDP 3939.
+Simulated teammates broadcast on an ephemeral shared port over loopback.
+The relay forwards a copy to GameController on UDP 10024 for accounting; ordinary robot broadcasts on 10024 do not enter the simulated team.
 
 The simulator runs `message_handler`, `message_filter`, `game_controller_filter`, `game_controller_state_filter`, `primary_state_filter`, `player_states_receiver` and `team_ball_filter`.
 Behavior sends the real return and team messages through that handler.
@@ -123,14 +136,13 @@ The simulator does not publish fabricated filtered game or primary states.
 Use GameController for game phases, penalties, scores, sides and restarts.
 
 GameController and Twix can run on the same machine, in either startup order.
-Both receivers share the team's UDP port and receive team broadcasts.
-Select a GameController network interface whose broadcast address matches HULK's configured address.
+Select a GameController network interface that can broadcast to the simulator host.
 When using separate machines, ensure UDP can cross the network.
 The automated roundtrip below runs both applications in one private network without changing the host's interfaces.
 
 ## Parameters and observations
 
-The parameter layers are the selected root's `base`, this tool's `parameters`, session calibration, then an empty writable session layer.
+The parameter layers are the selected root's `base`, this tool's `parameters`, the chosen `location`, private player/network/calibration overrides, then an empty writable session layer for each robot.
 Twix writes to the last layer, which is deleted when the simulator stops.
 Save an intentional tuning result separately if it should survive a restart.
 Repository robot parameters stay intact.
@@ -139,13 +151,19 @@ It defaults to the repository's `etc/neural_networks` and is resolved independen
 The tool calibrates safe-pose checks and the stand-up pose to its SDK preparation pose.
 These are simulated hardware calibration values, not changes to the checks.
 
-Use Twix's Parameter panel for behavior, motion, inference, fall detection, field and ball parameters.
-Field dimensions come from the real global parameter provider; there is no second simulator field configuration.
+Use Twix's Parameter panel for behavior, motion, inference, fall detection and ball parameters.
+The location selector discovers all directories under the chosen parameter root's `location` directory.
+Field dimensions load from layered `global.json5` files and are passed to every robot's real global parameter provider.
+Goal height loads from the location's `simulator.json5` file.
+The added `hsl_small`, `hsl_middle` and `hsl_large` locations contain the exemplary 2026 HSL v1.1.1 fields of 9×6 m, 14×9 m and 22×14 m.
+Add another location directory to make it available without changing simulator code.
+Field geometry is shared and selected before startup; edit the location files and restart to change it.
+Runtime goal-height edits are rejected, and changing a robot's global field dimensions stops the worker with an error to prevent divergent worlds.
 The simulator node owns ball contact and mass settings.
 Use Text, Plot, Map and Behavior tree panels for outputs.
 
 Every profile publishes independent references under `ground_truth/`, even when the corresponding real estimator runs.
-These include body/link/camera transforms, contact support, field pose, planar odometry, all scene balls with stable identities, scalar ball references, fixed goalpost obstacles, ideal visible detections and both camera-motion streams.
+These include body/link/camera transforms, contact support, field pose, planar odometry, all scene balls with stable identities, scalar ball references, other-robot and fixed goalpost obstacles, ideal visible detections and both camera-motion streams.
 Production nodes never consume this reference namespace.
 Profile 1 uses the first remaining ball in creation order for its scalar ball inputs; higher profiles observe all visible balls and let the real filter choose.
 
@@ -176,9 +194,11 @@ cargo test -p simulate --lib
 cargo test -p twix --features simulator --bin twix
 # With ONNX Runtime/models available and no simulator using the GameController ports:
 cargo test -p simulate startup_pause_resume_and_scene_edits_preserve_time -- --ignored
+SIMULATOR_TEST_PROFILE=localization cargo test -p simulate five_players_dynamic -- --ignored
+SIMULATOR_TEST_ADD_RUNNING=1 cargo test -p simulate five_players_dynamic -- --ignored
 
 git clone https://github.com/RoboCup-HumanoidSoccerLeague/GameController /tmp/hsl-game-controller
-tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
+HSL_PLAYERS=5 HSL_TEST_FILTER=five_players_dynamic tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
 ```
 
 The last test requires Linux user/network namespaces, `ip`, Python 3, and the upstream Rust build dependencies including libclang.
@@ -203,7 +223,7 @@ On the tested Linux environment, dynamically loading ONNX Runtime 1.22.1 caused 
 Preloading the same library made startup, rendering and shutdown succeed:
 
 ```sh
-LD_PRELOAD="$ORT_DYLIB_PATH${LD_PRELOAD:+:$LD_PRELOAD}" ./twix --simulator /simulator/robot
+LD_PRELOAD="$ORT_DYLIB_PATH${LD_PRELOAD:+:$LD_PRELOAD}" ./twix --simulator /1
 ```
 
 This is an environment-specific workaround, not a change to motion inference.

@@ -133,7 +133,7 @@ impl SharedPhysics {
 
 pub struct MujocoWorld {
     pub mode: SimulationMode,
-    pub robot: Option<Entity>,
+    pub robots: Vec<Entity>,
     pub balls: Vec<Entity>,
     spec: SyncCell<MjSpec>,
     data: Option<MjData<Box<MjModel>>>,
@@ -149,7 +149,7 @@ impl Default for MujocoWorld {
 
         Self {
             mode: SimulationMode::Paused,
-            robot: None,
+            robots: Vec::new(),
             balls: Vec::new(),
             spec: SyncCell::new(spec),
             data: Some(MjData::new(Box::new(model))),
@@ -180,7 +180,7 @@ impl MujocoWorld {
             &object.root_body,
         )?;
         if object.root_body == "Trunk" {
-            self.robot = Some(entity);
+            self.robots.push(entity);
         }
         if object.root_body == "ball" {
             self.balls.push(entity);
@@ -215,14 +215,12 @@ impl MujocoWorld {
         unsafe { spec.delete_element(element) }.map_err(|error| error.to_string())?;
         self.objects.remove(&entity);
         self.balls.retain(|ball| *ball != entity);
-        if self.robot == Some(entity) {
-            self.robot = None;
-        }
+        self.robots.retain(|robot| *robot != entity);
         Ok(true)
     }
 
     pub fn set_object_pose(&mut self, entity: Entity, transform: Transform) -> Result<(), String> {
-        if self.robot == Some(entity) {
+        if self.robots.contains(&entity) {
             self.motion_epoch += 1;
         }
         let binding = self
