@@ -169,7 +169,8 @@ The current defaults are six channels and 64 ms per frame.
 Use a 750 ms pulse, all channels true, then false.
 This covers the upstream GameController's 500 ms update interval; a 200 ms pulse passed whistle filtering but missed the Set-to-Playing check in the actual roundtrip.
 Repeated clicks during a pulse extend it; they do not enqueue unbounded whistles.
-Source metadata uses the common wall clock.
+Source metadata and pulse duration use the shared simulation clock.
+A click while paused remains pending until simulation time advances.
 The real filter supplies its own detection time and applies its own threshold, currently six detections in a 20-entry buffer.
 Do not override its output or force acceptance when parameters are changed.
 This corrects the earlier single-event suggestion.
@@ -348,15 +349,18 @@ The ground-truth references remain available for normal Twix inspection.
 
 ## Time, pause, editing and lifecycle
 
-Retain wall-clock ROS-Z time and the existing live external-network behavior.
-This is not deterministic stepped robotics time.
+Use one injected ROS-Z logical clock for robotics, advanced by the physics worker by one MuJoCo timestep per running step.
+Start from the wall-clock epoch for readable timestamps, but never catch up elapsed wall time after startup, pause or overload.
+Startup advances the clock until the real button/mode pipeline and required outputs are ready, then pauses.
+Keep that clock monotonic across scene recompilation, pose resets and robot edits.
+This remains an asynchronous pipeline rather than deterministic lockstep execution.
 Sample one timestamp per physics observation and propagate it into raw JointState headers, wrapped geometry, announcements, detections, VO and truth diagnostics.
 Do not call `now()` independently for different views of the same sample.
 
 Keep raw sensors at the physics-worker cadence, currently typically 2 ms.
-During scene rebuilds, skip camera frames that cannot obtain coherent scene geometry and continue stationary raw sensor publication.
+During scene rebuilds, stop physics, robotics time and sensor sampling until coherent scene geometry is available.
 Expose capture/publication times and cumulative skipped frames through `diagnostics/camera_frames`.
-Start synthetic detections and VO at 30 Hz, independent of repaint rate; use the same frame schedule for their shared camera observations.
+Start synthetic detections and VO at approximately 30 Hz in simulation time, independent of repaint rate; use the same frame schedule for their shared camera observations.
 Publish truth behavior inputs on the same 33 ms camera-frame cadence.
 These are simulator rates, not claims about hardware.
 Bound queues, skip missed timer ticks and report overruns.
@@ -369,11 +373,16 @@ Test the actual FutureMap timing contracts, including the ball filter's short od
 Keep sample time distinct from transport publication time.
 If a dependency times out, count the omission; do not invent a successful measurement.
 
-During Pause and scene recompilation, publish a consistent stationary sensor view with fresh timestamps and unchanged positions, zero joint/angular velocities and stationary gravity-specific acceleration.
-Do not repeatedly restamp a moving IMU sample while publishing identity camera motion.
-Preserve resumable physics state separately.
-Nodes, GC, whistles and controller input continue in wall time; filter timeouts continue too.
-This extends the existing frozen-snapshot behavior where necessary for inertial localization consistency.
+During Pause and scene recompilation, retain the last sensor values and timestamps and the resumable physics state.
+Do not publish duplicate observations or let filter ages, motion deadlines or behavior timers accumulate paused wall time.
+Whistle pulses also use simulation time and survive a pause.
+Scene edits become sensor observations on resume.
+The external HSL GameController continues its match clock and packets; their match-time payloads remain unchanged.
+Incoming network messages and UI actions can still update event-driven nodes at the frozen robotics timestamp.
+Behavior-generated return packets stop while behavior is paused, so a long pause can appear as a disconnected robot in the GameController.
+Do not synthesize replacement heartbeats.
+Local and external gamepads retain wall-clock source stamps because the unchanged behavior node checks their freshness against `SystemTime`.
+LED blinking, UI button holds and transport timeouts retain their existing wall-time behavior.
 
 Treat scene changes explicitly:
 
@@ -525,19 +534,22 @@ Runtime validation is required for these implementations.
 - Start at the established sideline placement.
   Additional arbitrary-placement, symmetry and GC side-change tests are excluded by the user's decision; do not make them implementation gates or introduce simulator workarounds for them.
 - Correct sensor publication during pauses and scene edits matters more once IMU integration runs.
-  Measuring queue delays and coherent stationary observations is a prerequisite, not a later performance polish.
+  Verify frozen timestamps and no catch-up jump on resume alongside coherent sensor observations.
 
 ## Validation record and retained limitations
 
 Profiles 1–4 have passed the same production launcher with real physics, motion models and ONNX Runtime.
-The latest profile-3 fixture measured 0.0432 m maximum walking odometry error over three seconds, less than 1 mm paused drift, and about 0.1 mm initial camera translation difference.
+The latest profile-3 fixture measured 0.0489 m maximum walking odometry error over three seconds of simulation time, less than 1 mm paused drift, and less than 0.1 mm initial camera translation difference.
 The filter fixtures cover rolling-ball velocity, seeded 2 px noise, total detection loss, reacquisition, multiple hypotheses, nearest kick-ball selection and deletion expiry.
 The robot-obstacle fixture exercises the actual filter through announcing publishers and verifies acquisition and timeout.
 Raw sensor pairing and source timestamps are tested through the unchanged low-state bridge.
-A 300 ms model-lock fixture verifies continuing raw sensors, omitted camera frames and resumed coherent publication.
+A pause fixture verifies that physics time, robotics time, raw sensor timestamps, camera capture times and behavior timers remain frozen.
+A 300 ms model-lock fixture verifies frozen robotics time, no stale-sensor emergency and resumed coherent publication without catching up elapsed wall time.
+The UDP fixture verifies that GameController countdown packets still arrive at the frozen robotics timestamp.
 Both raw SDK request/reply and ROS topics are isolated between global scopes `42` and `43`.
 
 The actual HSL runtime roundtrip passes Ready, pickup penalty, penalty removal, accepted return messages and whistle-in-Set with no fabricated GameController packets.
+Its match countdown advances at least two seconds while the robotics clock stays fixed, and connection status leaves Good before recovering on resume.
 Twix tests pass with the simulator feature enabled and disabled.
 Native Twix starts all four profiles and preserves the profile choice across application restart.
 The updated Bevy renderer displays the scene with orbit controls disabled, and the native check confirms that `M` captures the fly camera and `W` moves it.
@@ -545,7 +557,7 @@ The local controller node starts without a device and the external controller pa
 OS gamepad capture remains unverified because this environment exposes neither an input device nor `uinput`.
 
 The preferred obstacle filter computes observer-motion compensation from absolute odometry.
-Moving-observer goalpost outputs differed from arrival-time truth by up to 0.1084 m in the walking fixture; this comparison includes processing delay.
+Moving-observer goalpost outputs differed from arrival-time truth by up to 0.0611 m in the walking fixture; this comparison includes processing delay.
 The obsolete `current_odometry_to_last_odometry` topic remains unproduced.
 The obstacle filter's fixed map still offsets post centers by `(goal_post_diameter - line_width)/2` relative to the shared field helper, or 0.02 m with the default dimensions.
 These findings do not authorize further robotics changes.
@@ -553,13 +565,17 @@ These findings do not authorize further robotics changes.
 The user explicitly authorized the localization-improvements branch, preferred ball-filter branch and ball-search-behavior branch as three squashes below the simulator history.
 The localization branch replaces the old solver and its lookup-budget limitation; the previously declined one-line budget patch was not applied.
 The captured 13-landmark startup frame now passes the production global association solver and runs in the ordinary unit suite.
-Live localization acquired with 0.0002 m stationary position error and less than 0.0001 rad yaw error.
-The three-second walking and articulated-head fixture measured 0.0152 m maximum position error and 0.0091 rad maximum yaw error.
-Its last solve took 2.56 ms with 2,050 measurements.
+Live localization acquired with 0.0013 m stationary position error and 0.0001 rad yaw error.
+The three-second walking and articulated-head fixture uses simulation time and measured 0.0209 m maximum position error and 0.0072 rad maximum yaw error.
+Its last solve took 2.76 ms with 2,252 measurements.
 These are measurements from one simulator run, not guarantees for arbitrary trajectories, occlusion or sensor noise.
 Localization uses the new `localization/estimate`, `localization/status` and `field_mark_association/visual_localization_local` contracts.
 VO deltas are carried by `VisualOdometer`, and body-relative camera geometry remains available under `ground_truth/camera_geometry` in every profile.
-All simulator adaptations remain in tooling; the only new robotics changes are the authorized upstream branch contents and their compatibility conflict resolutions.
+Simulator wiring remains in tooling.
+Besides the authorized upstream branches and compatibility resolutions, the user explicitly approved a two-file ROS-Z cache/clock fix.
+Logical-clock caches use source timestamps instead of transport wall time; normal wall-clock cache behavior remains unchanged.
+All 219 ROS-Z library tests and 35 simulator unit tests pass.
+The four live profiles and the separate localization tracking fixture pass; both verify that a whistle clicked while paused survives until resume.
 
 ## Source references
 

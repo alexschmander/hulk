@@ -1,14 +1,14 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use color_eyre::{Result, eyre::ensure};
-use ros_z::{context::Context, parameter::NodeParametersExt};
+use ros_z::{context::Context, parameter::NodeParametersExt, time::Time};
 use tokio::sync::watch;
 use types::{parameters::WhistleDetectionParameters, whistle::Whistle};
 
 // Cover the upstream GameController's normal 500 ms packet interval.
 pub(crate) const PULSE_DURATION: Duration = Duration::from_millis(750);
 
-pub(crate) async fn run(context: &Context, pulse: watch::Receiver<Option<Instant>>) -> Result<()> {
+pub(crate) async fn run(context: &Context, pulse: watch::Receiver<Option<Time>>) -> Result<()> {
     let node = context.create_node("simulator_whistle").build().await?;
     let parameters = node.bind_parameter_as::<WhistleDetectionParameters>("whistle_detection")?;
     let publisher = node
@@ -33,13 +33,15 @@ pub(crate) async fn run(context: &Context, pulse: watch::Receiver<Option<Instant
             period >= Duration::from_millis(1) && period <= Duration::from_secs(1),
             "whistle logical frame period must be between 1 ms and 1 s"
         );
-        let active = pulse.borrow().is_some_and(|until| Instant::now() < until);
+        let active = pulse
+            .borrow()
+            .is_some_and(|until| node.clock().now() < until);
         publisher
             .publish(&Whistle {
                 is_detected: vec![active; config.number_audio_channels],
             })
             .await?;
-        tokio::time::sleep(period).await;
+        node.clock().sleep(period).await;
     }
 }
 
@@ -48,6 +50,7 @@ mod tests {
     use super::*;
     use ros_z::prelude::*;
     use std::sync::Arc;
+    use std::time::Instant;
     use types::filtered_whistle::FilteredWhistle;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -100,13 +103,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(raw.get_latest().unwrap().is_detected.len(), 1);
-        pulse.send_replace(Some(Instant::now() + Duration::from_millis(100)));
+        pulse.send_replace(Some(context.clock().now() + Duration::from_millis(100)));
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert!(
             filtered.get_latest().unwrap().last_detection.is_none(),
             "below-threshold pulse was accepted"
         );
-        pulse.send_replace(Some(Instant::now() + PULSE_DURATION));
+        pulse.send_replace(Some(context.clock().now() + PULSE_DURATION));
         let start = Instant::now();
         while !filtered.get_latest().unwrap().is_detected {
             assert!(start.elapsed() < Duration::from_secs(1));
