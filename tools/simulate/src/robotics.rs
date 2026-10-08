@@ -311,6 +311,10 @@ impl RobotStack {
         self.commands.borrow().clone()
     }
 
+    pub fn led_color(&self) -> Option<booster::LedColor> {
+        self.commands.borrow().led
+    }
+
     pub fn active_motion(&self) -> MotionCommand {
         self.motion
             .get_latest()
