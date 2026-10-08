@@ -27,7 +27,7 @@ tokio = { version = "1", features = ["full"] }
 ''' + '\n'.join(f'{name} = {{path = {json.dumps(str(gc / name))}}}' for name in ['game_controller_core', 'game_controller_runtime']))
 PY
 cargo build --manifest-path "$HSL_EXCHANGE/Cargo.toml" --target-dir "$root/target/hsl-roundtrip"
-cargo test --manifest-path "$root/Cargo.toml" -p simulate --lib --no-run --message-format=json > "$HSL_EXCHANGE/build.json"
+cargo test --manifest-path "$root/Cargo.toml" -p simulate --lib --no-run --message-format=json-render-diagnostics > "$HSL_EXCHANGE/build.json"
 robot=$(python3 - "$HSL_EXCHANGE/build.json" <<'PY'
 import json, sys
 for line in open(sys.argv[1]):

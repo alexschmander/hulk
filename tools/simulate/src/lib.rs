@@ -13,15 +13,22 @@ use tokio::runtime::Handle;
 mod behavior_inputs;
 mod bevy_mujoco;
 mod buttons;
+mod observations;
 mod parameters;
+mod profiles;
+mod readiness;
+mod reference;
 mod robot_io;
 mod robotics;
 mod scene;
+mod sensors;
 mod simulated_sdk;
 mod simulation;
 mod viewport;
+mod whistle;
 
 use bevy_mujoco::{SharedPhysics, SimulationMode};
+pub use profiles::{ControllerSource, Profile};
 pub use robotics::Configuration;
 
 /// Global transport scope, including the otherwise unnamespaced Booster SDK.
@@ -164,6 +171,13 @@ impl Simulator {
                     self.error = Some(format!("{error:#}"));
                 }
             });
+            if ui
+                .button("Whistle")
+                .on_hover_text("Inject a whistle detection pulse")
+                .clicked()
+            {
+                world.resource::<robotics::Robotics>().whistle();
+            }
             self.viewport.toolbar(ui);
             if ui
                 .add_enabled(self.physics.ready(), egui::Button::new("Add ball"))
@@ -186,6 +200,7 @@ impl Simulator {
             } else {
                 ui.spinner();
                 ui.label("Initializing robot…");
+                ui.label(world.resource::<robotics::Robotics>().status());
             }
         });
         if let Some(error) = &self.error {

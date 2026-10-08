@@ -6,6 +6,27 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+rand = { workspace = true }
+rand_distr = { workspace = true }
+ball_filter = { workspace = true }
+camera_matrix_calculator = { workspace = true }
+controller_handler = { workspace = true }
+field_mark_association = { workspace = true }
+geometry = { workspace = true }
+ground_provider = { workspace = true }
+kinematics_provider = { workspace = true }
+localization-2d = { workspace = true }
+localization-3d = { workspace = true }
+low_state_bridge = { workspace = true }
+obstacle_filter = { workspace = true }
+odometry = { workspace = true }
+ros2 = { workspace = true }
+ros-z-streams = { workspace = true }
+search_suggestor = { workspace = true }
+support_foot_estimator = { workspace = true }
+visual_kick_ball_selector = { workspace = true }
+whistle_filter = { workspace = true }
+world_to_field_provider = { workspace = true }
 ball_state_composer = { workspace = true }
 behavior_node = { workspace = true }
 bevy = { workspace = true, features = ["3d_bevy_render", "png", "mesh_picking"] }
@@ -49,4 +70,5 @@ types = { workspace = true }
 zenoh = { workspace = true }
 
 [dev-dependencies]
+json5 = { workspace = true }
 bincode = { workspace = true }

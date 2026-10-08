@@ -5,19 +5,21 @@ use std::{
 };
 
 use bevy::prelude::Resource;
-use booster::LowState;
 use color_eyre::Result;
-use coordinate_systems::{Ground, Robot};
-use linear_algebra::Isometry3;
-use projection::camera_matrix::CameraMatrix;
 use ros_z::{parameter::NodeParameters, prelude::*, time::Time};
 use tokio::{runtime::Handle, sync::watch, task::JoinSet};
 use types::{
     filtered_game_controller_state::FilteredGameControllerState, motion_command::MotionCommand,
-    time_wrapper::TimeWrapper,
 };
 
-use crate::{parameters::SimulatorParameters, robot_io::Observation};
+use crate::{
+    observations::Frame,
+    parameters::SimulatorParameters,
+    profiles::{ControllerSource, Profile},
+    robot_io::Observation,
+};
+#[cfg(test)]
+use types::time_wrapper::TimeWrapper;
 
 #[derive(Clone)]
 pub struct Configuration {
@@ -25,6 +27,8 @@ pub struct Configuration {
     pub model_directory: PathBuf,
     pub router: Option<String>,
     pub namespace: String,
+    pub profile: Profile,
+    pub controller: ControllerSource,
 }
 
 #[derive(Resource, Clone)]
@@ -48,20 +52,20 @@ pub struct RobotStack {
     context: Arc<Context>,
     _node: Arc<Node>,
     // The set owns every task, including the SDK receiver, through shutdown and failed startup.
-    tasks: Mutex<JoinSet<Result<()>>>,
+    tasks: Mutex<JoinSet<(&'static str, Result<()>)>>,
     _overrides: tempfile::TempDir,
     pub parameters: NodeParameters<SimulatorParameters>,
     pub field_dimensions: types::field_dimensions::FieldDimensions,
-    low_state: Publisher<LowState>,
-    imu: Publisher<booster::ImuState>,
+    pub profile: Profile,
+    controller_unavailable: Mutex<bool>,
+    whistle: watch::Sender<Option<std::time::Instant>>,
+    frames: watch::Sender<Option<Frame>>,
+    body: crate::reference::BodyReferences,
+    readiness: crate::readiness::Readiness,
     pub primary: ros_z::cache::Cache<types::primary_state::PrimaryState>,
     pub safe_pose: ros_z::cache::Cache<bool>,
     pub field: ros_z::cache::Cache<types::field_dimensions::FieldDimensions>,
-    serial: Publisher<kinematics::joints::Joints<booster::MotorState>>,
-    camera: Publisher<TimeWrapper<CameraMatrix>>,
-    ground: Publisher<TimeWrapper<Option<Isometry3<Ground, Robot>>>>,
-    behavior: crate::behavior_inputs::BehaviorInputs,
-    game: ros_z::cache::Cache<FilteredGameControllerState>,
+    game: Arc<ros_z::cache::Cache<FilteredGameControllerState>>,
     motion: ros_z::cache::Cache<MotionCommand>,
     emergency: ros_z::cache::Cache<()>,
     commands: watch::Receiver<crate::simulated_sdk::Control>,
@@ -113,16 +117,6 @@ impl RobotStack {
         let node = Arc::new(context.create_node("simulator").build().await?);
         let parameters = node.bind_parameter_as::<SimulatorParameters>("simulator")?;
         parameters.add_validation_hook(SimulatorParameters::validate)?;
-        let latest = QosProfile {
-            history: ros_z::qos::QosHistory::from_depth(1),
-            ..Default::default()
-        };
-        let low_state = node
-            .publisher("inputs/low_state")
-            .qos(latest)
-            .build()
-            .await?;
-        let imu = node.publisher("inputs/imu_state").build().await?;
         let primary = node
             .subscriber("primary_state")
             .qos(QosProfile {
@@ -150,23 +144,22 @@ impl RobotStack {
             .cache(1)
             .build()
             .await?;
-        let serial = node
-            .publisher("inputs/serial_motor_states")
-            .qos(latest)
-            .build()
-            .await?;
-        let camera = node.publisher("camera_matrix").qos(latest).build().await?;
-        let ground = node
-            .publisher("ground_to_robot")
-            .qos(latest)
-            .build()
-            .await?;
-        let behavior = crate::behavior_inputs::BehaviorInputs::new(&node).await?;
-        let game = node
-            .subscriber("filtered_game_controller_state")
-            .cache(1)
-            .build()
-            .await?;
+        let body = crate::reference::BodyReferences::new(&node, configuration.profile).await?;
+        let behavior =
+            crate::behavior_inputs::BehaviorInputs::new(&node, configuration.profile).await?;
+        let camera_inputs = crate::observations::CameraInputs::new(
+            &node,
+            configuration.profile,
+            parameters.clone(),
+        )
+        .await?;
+        let readiness = crate::readiness::Readiness::new(&node, configuration.profile).await?;
+        let game = Arc::new(
+            node.subscriber::<FilteredGameControllerState>("filtered_game_controller_state")
+                .cache(1)
+                .build()
+                .await?,
+        );
         let motion = node
             .subscriber("behavior/motion_command")
             .cache(1)
@@ -182,25 +175,60 @@ impl RobotStack {
         // Abort the receiver if startup fails or the panel is closed.
         let sdk_task = tokio_util::task::AbortOnDropHandle::new(sdk_task);
         tasks.spawn(async move {
-            sdk_task.await?;
-            Ok(())
+            (
+                "booster_sdk",
+                async {
+                    sdk_task.await?;
+                    Ok(())
+                }
+                .await,
+            )
         });
-        macro_rules! run { ($($node:path),* $(,)?) => { $(tasks.spawn($node(context.clone()));)* }; }
-        run!(
-            behavior_node::run_boxed,
-            ball_state_composer::run_boxed,
-            rule_obstacle_composer::run_boxed,
-            motion::run_boxed,
-            global_parameter_provider::run_boxed,
-            head_motion::node::run_boxed,
-            motion_inference::run_boxed,
-            hardware_interface::run_boxed,
-            fall_detection::run_boxed,
-            safe_pose_checker::run_boxed,
-            button_event_bridge::run_boxed,
-            button_event_handler::run_boxed,
-        );
-        spawn_network(&context, &mut tasks);
+        for spec in configuration.profile.nodes(configuration.controller) {
+            let future = (spec.run)(context.clone());
+            tasks.spawn(async move { (spec.name, future.await) });
+        }
+        let (whistle, pulse) = watch::channel(None);
+        let whistle_context = context.clone();
+        tasks.spawn(async move {
+            (
+                "simulator_whistle",
+                crate::whistle::run(&whistle_context, pulse).await,
+            )
+        });
+        let (frames, mut receiver) = watch::channel::<Option<Frame>>(None);
+        let game_cache = game.clone();
+        tasks.spawn(async move {
+            let result = async {
+                let mut camera_inputs = camera_inputs;
+                loop {
+                    receiver.changed().await?;
+                    let frame = receiver.borrow_and_update().clone();
+                    let Some(frame) = frame else {
+                        continue;
+                    };
+                    let side = game_cache
+                        .get_latest()
+                        .map(|game| game.global_field_side)
+                        .unwrap_or(types::field_dimensions::GlobalFieldSide::Home);
+                    behavior
+                        .publish(
+                            frame.sample.ground_to_world,
+                            frame
+                                .balls
+                                .first()
+                                .map(|ball| (ball.position, ball.velocity)),
+                            &frame.field,
+                            side,
+                            frame.time,
+                        )
+                        .await?;
+                    camera_inputs.publish(&frame).await?;
+                }
+            }
+            .await;
+            ("simulator_observations", result)
+        });
         let field_dimensions =
             tokio::time::timeout(std::time::Duration::from_secs(3), initial_field.recv()).await??;
         crate::parameters::validate_field_dimensions(&field_dimensions)
@@ -213,15 +241,15 @@ impl RobotStack {
             _overrides: overrides,
             parameters,
             field_dimensions,
-            low_state,
-            imu,
+            profile: configuration.profile,
+            controller_unavailable: Mutex::new(false),
+            whistle,
+            frames,
+            body,
+            readiness,
             primary,
             safe_pose,
             field,
-            serial,
-            camera,
-            ground,
-            behavior,
             game,
             motion,
             emergency,
@@ -236,13 +264,18 @@ impl RobotStack {
         if failure.is_some() {
             return failure.clone();
         }
-        if let Some(result) = tasks.try_join_next() {
+        while let Some(result) = tasks.try_join_next() {
+            if matches!(&result, Ok(("controller_handler", Ok(())))) {
+                *self.controller_unavailable.lock().unwrap() = true;
+                continue;
+            }
             *failure = Some(match result {
-                Ok(Ok(())) => "A simulator node exited".into(),
-                Ok(Err(error)) => format!("Simulator node failed: {error:#}"),
+                Ok((name, Ok(()))) => format!("Simulator node {name} exited"),
+                Ok((name, Err(error))) => format!("Simulator node {name} failed: {error:#}"),
                 Err(error) => format!("Simulator task failed: {error}"),
             });
             tasks.abort_all();
+            break;
         }
         failure.clone()
     }
@@ -254,14 +287,24 @@ impl RobotStack {
         if self.emergency.get_latest().is_some() {
             return "Emergency stop. Restart the simulator to clear it.".into();
         }
-        match self.game.latest_stamp() {
+        let game = match self.game.latest_stamp() {
             None => "Waiting for HSL Game Controller",
             Some(stamp) if self.now().duration_since(stamp) > std::time::Duration::from_secs(3) => {
                 "HSL Game Controller state is stale"
             }
             Some(_) => "HSL Game Controller connected",
-        }
-        .into()
+        };
+        format!(
+            "{} · {} · {}{}",
+            self.profile.label(),
+            self.readiness.status(self.now()),
+            game,
+            if *self.controller_unavailable.lock().unwrap() {
+                " · Local gamepad unavailable"
+            } else {
+                ""
+            }
+        )
     }
 
     pub fn actuator_control(&self) -> crate::simulated_sdk::Control {
@@ -283,48 +326,34 @@ impl RobotStack {
         ))
     }
 
+    #[cfg(test)]
+    pub(crate) fn node(&self) -> &Node {
+        &self._node
+    }
+
     pub fn now(&self) -> Time {
         self.context.clock().now()
     }
 
-    pub fn publish_observation(&self, observation: &Observation) -> Result<()> {
-        let time = self.now();
+    pub fn whistle(&self) {
+        self.whistle.send_replace(Some(
+            std::time::Instant::now() + crate::whistle::PULSE_DURATION,
+        ));
+    }
+
+    pub fn ready(&self) -> bool {
+        self.readiness.ready(self.now())
+    }
+
+    pub fn publish_observation(&self, observation: &Observation, time: Time) -> Result<()> {
         self.runtime.block_on(async {
-            self.serial
-                .publish(&observation.low_state.serial_motor_states()?)
-                .await?;
-            self.imu.publish(&observation.low_state.imu_state).await?;
-            self.low_state.publish(&observation.low_state).await?;
-            self.camera
-                .publish(&TimeWrapper {
-                    time,
-                    inner: observation.camera_matrix.clone(),
-                })
-                .await?;
-            self.ground
-                .publish(&TimeWrapper {
-                    time,
-                    inner: Some(observation.ground_to_robot),
-                })
-                .await?;
-            Ok(())
+            self.body.publish(observation, time).await?;
+            crate::sensors::publish(self.context.session(), &observation.low_state, time).await
         })
     }
 
-    pub fn publish_world(
-        &self,
-        ground: nalgebra::Isometry3<f32>,
-        ball: Option<([f64; 3], [f64; 3])>,
-    ) -> Result<()> {
-        let side = self
-            .game
-            .get_latest()
-            .map(|game| game.global_field_side)
-            .unwrap_or(types::field_dimensions::GlobalFieldSide::Home);
-        self.runtime.block_on(
-            self.behavior
-                .publish(ground, ball, Vec::new(), side, self.now()),
-        )
+    pub fn publish_frame(&self, frame: Frame) {
+        self.frames.send_replace(Some(frame));
     }
 }
 
@@ -340,15 +369,11 @@ impl Drop for RobotStack {
     }
 }
 
-// Keep this list shared by production and the UDP integration test.
+#[cfg(test)]
 fn spawn_network(context: &Arc<Context>, tasks: &mut JoinSet<Result<()>>) {
-    tasks.spawn(message_handler::run_boxed(context.clone()));
-    tasks.spawn(message_filter::run_boxed(context.clone()));
-    tasks.spawn(game_controller_filter::run_boxed(context.clone()));
-    tasks.spawn(game_controller_state_filter::run_boxed(context.clone()));
-    tasks.spawn(primary_state_filter::run_boxed(context.clone()));
-    tasks.spawn(player_states_receiver::run_boxed(context.clone()));
-    tasks.spawn(team_ball_filter::run_boxed(context.clone()));
+    for spec in crate::profiles::NETWORK {
+        tasks.spawn((spec.run)(context.clone()));
+    }
 }
 
 #[cfg(test)]

@@ -166,6 +166,18 @@ async fn upstream_hsl_game_controller_roundtrip() {
     tasks.spawn(global_parameter_provider::run_boxed(context.clone()));
     tasks.spawn(behavior_node::run_boxed(context.clone()));
     spawn_network(&context, &mut tasks);
+    tasks.spawn(whistle_filter::run_boxed(context.clone()));
+    let (pulse, receiver) = tokio::sync::watch::channel(None);
+    let whistle_context = context.clone();
+    tasks.spawn(async move { crate::whistle::run(&whistle_context, receiver).await });
+    let raw_game = node
+        .subscriber::<Option<types::game_controller_state::GameControllerState>>(
+            "game_controller_state",
+        )
+        .cache(1)
+        .build()
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(60), async {
         for (stage, penalized) in [("ready", false), ("penalized", true), ("unpenalized", false)] {
             loop {
@@ -174,6 +186,7 @@ async fn upstream_hsl_game_controller_roundtrip() {
                         let state = state.unwrap();
                         if state.game_state == FilteredGameState::Ready && state.penalties[PlayerNumber::Three].is_some() == penalized {
                             std::fs::write(exchange.join(stage), b"observed").unwrap();
+                            eprintln!("Observed upstream {stage}");
                             break;
                         }
                     }
@@ -181,6 +194,17 @@ async fn upstream_hsl_game_controller_roundtrip() {
                 }
             }
         }
+        loop {
+            let state = game.recv().await.unwrap();
+            if state.game_state == FilteredGameState::Set { eprintln!("Received upstream Set; injecting whistle"); break; }
+        }
+        pulse.send_replace(Some(std::time::Instant::now()+crate::whistle::PULSE_DURATION));
+        loop {
+            let state = game.recv().await.unwrap();
+            if matches!(state.game_state, FilteredGameState::Playing {..}) { break; }
+        }
+        assert!(raw_game.get_latest().is_some_and(|game| game.as_ref().as_ref().is_some_and(|game| game.game_state == hsl_network_messages::GameState::Set)));
+        std::fs::write(exchange.join("whistle_in_set"), b"observed").unwrap();
         // Let the upstream controller check that returns remain live after removal.
         tokio::time::sleep(Duration::from_secs(1)).await;
     }).await.expect("upstream GameController roundtrip");

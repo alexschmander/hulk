@@ -85,11 +85,21 @@ impl PhysicsWorker {
             let mut binding = None;
             let mut controller = crate::simulated_sdk::Controller::default();
             let mut last_world = Instant::now();
-            let mut snapshot = None;
+            let mut snapshot: Option<crate::robot_io::Observation> = None;
+            let mut sequence = 0;
+            let mut startup_complete = false;
+            let startup_deadline = Instant::now();
             let mut period = Duration::from_millis(2);
             while !stopped.load(Ordering::Acquire) {
                 let started = Instant::now();
+                let frame_due = last_world.elapsed() >= Duration::from_millis(33);
                 let failed = io.poll().is_some();
+                let time = io.now();
+                let mut frame = None;
+                if frame_due {
+                    sequence += 1;
+                    last_world = Instant::now();
+                }
                 // Scene recompilation freezes physics, but must not starve the real
                 // nodes' sensor deadlines. Keep publishing the frozen scene snapshot.
                 if let Some(mut world) = physics.try_lock() {
@@ -117,7 +127,7 @@ impl PhysicsWorker {
                             world.ground_object(entity, initial_pose(&io.field_dimensions))?;
                             placed = true;
                         }
-                        if !initialized.load(Ordering::Acquire)
+                        if !startup_complete
                             && io.actuator_control().mode == booster::RobotMode::Prepare
                         {
                             world.mode = SimulationMode::Running;
@@ -127,26 +137,62 @@ impl PhysicsWorker {
                             world.data_mut().step();
                         }
                         world.data_mut().forward();
-                        let observation = robot.observe(world.data());
-                        let ground = robot.ground_to_world(world.data());
-                        let balls = crate::scene::ball::SpawnedBalls(world.balls.clone());
-                        let ball = crate::scene::ball::first_position(&world, &balls)
-                            .ok()
-                            .zip(crate::scene::ball::first_velocity(&world, &balls).ok());
-                        snapshot = Some((observation, ground, ball));
+                        let mut observation = robot.observe(world.data());
+                        if world.mode == SimulationMode::Paused {
+                            observation.stationary();
+                        }
+                        if frame_due {
+                            let mut balls = crate::observations::balls(&world);
+                            if world.mode == SimulationMode::Paused {
+                                for ball in &mut balls {
+                                    ball.velocity = [0.0; 3];
+                                }
+                            }
+                            let field = io
+                                .field
+                                .get_latest()
+                                .map(|f| *f)
+                                .unwrap_or(io.field_dimensions);
+                            let detections = crate::observations::detect(
+                                world.data_mut(),
+                                &observation,
+                                &balls,
+                                &field,
+                            );
+                            frame = Some(crate::observations::Frame {
+                                time,
+                                sequence,
+                                epoch: world.motion_epoch,
+                                sample: observation.clone(),
+                                balls,
+                                detections,
+                                field,
+                            });
+                        }
+                        snapshot = Some(observation);
                     }
+                } else if let Some(sample) = &mut snapshot {
+                    // Raw sensors remain live during a rebuild. Camera frames require
+                    // a coherent pose/visibility sample and are counted as skipped.
+                    sample.stationary();
                 }
-                if let Some((observation, ground, ball)) = &snapshot {
-                    io.publish_observation(observation)
+                if let Some(sample) = &snapshot {
+                    io.publish_observation(sample, time)
                         .map_err(|error| format!("Simulator sensor publication: {error:#}"))?;
-                    if !initialized.load(Ordering::Acquire) && startup.advance(&io)? {
+                    if !startup_complete && startup.advance(&io)? {
                         physics.lock().mode = SimulationMode::Paused;
+                        startup_complete = true;
+                    }
+                    if startup_complete && io.ready() {
                         initialized.store(true, Ordering::Release);
                     }
-                    if last_world.elapsed() >= Duration::from_millis(20) {
-                        io.publish_world(*ground, *ball)
-                            .map_err(|error| format!("Simulator world publication: {error:#}"))?;
-                        last_world = Instant::now();
+                    if !initialized.load(Ordering::Acquire)
+                        && startup_deadline.elapsed() > Duration::from_secs(20)
+                    {
+                        return Err(format!("Simulator startup timed out: {}", io.status()));
+                    }
+                    if let Some(frame) = frame {
+                        io.publish_frame(frame);
                     }
                 }
                 // No burst of stale catch-up samples after rendering or model recompilation.
@@ -190,88 +236,5 @@ pub fn reset(world: &mut World) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        bevy_mujoco::{MjcfObject, MujocoWorldPlugin},
-        robotics::Configuration,
-    };
-    use ros_z::prelude::*;
-    use types::primary_state::PrimaryState;
-
-    #[test]
-    #[ignore = "requires ONNX Runtime, motion models, and free GameController UDP ports"]
-    fn startup_reaches_initial_and_scene_edits_keep_sensors_live() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let router = runtime
-            .block_on(
-                ContextBuilder::default()
-                    .with_mode("router")
-                    .disable_multicast_scouting()
-                    .with_connect_endpoints(std::iter::empty::<&str>())
-                    .with_listen_endpoints(["tcp/127.0.0.1:0"])
-                    .build(),
-            )
-            .unwrap();
-        let endpoint = runtime
-            .block_on(async { router.session().info().locators().await })
-            .first()
-            .unwrap()
-            .to_string();
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let io = runtime
-            .block_on(Robotics::new(
-                runtime.handle().clone(),
-                Configuration {
-                    parameter_root: root.join("../../etc/parameters"),
-                    model_directory: root.join("../../etc/neural_networks"),
-                    router: Some(endpoint),
-                    namespace: "/simulator/startup_test".into(),
-                },
-            ))
-            .unwrap();
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
-        let robot = app
-            .world_mut()
-            .spawn((
-                MjcfObject::new(root.join("assets/k1_robot.xml"), "Trunk")
-                    .with_free_joint("world_joint")
-                    .grounded(),
-                Transform::default(),
-            ))
-            .id();
-        app.update();
-        let physics = app.world().resource::<SharedPhysics>().clone();
-        let mut worker = PhysicsWorker::start(physics.clone(), io.clone());
-        let started = Instant::now();
-        while !worker.ready() {
-            assert!(worker.poll().is_none());
-            assert!(started.elapsed() < Duration::from_secs(12));
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(*io.primary.get_latest().unwrap(), PrimaryState::Initial);
-        assert_eq!(physics.lock().mode, SimulationMode::Paused);
-        let pose = physics.lock().object_pose(robot).unwrap();
-        assert!(pose.translation.y > 0.4);
-        assert!((pose.translation.x + io.field_dimensions.length / 2.0).abs() < 0.1);
-        assert!((pose.translation.z - io.field_dimensions.width / 2.0).abs() < 0.1);
-        assert!((pose.rotation * Vec3::X).distance(Vec3::NEG_Z) < 0.1);
-        // Deliberately hold the same mutex as model recompilation, beyond the real
-        // 40/50 ms inference/sensor deadlines. Physics freezes, publications continue.
-        let scene_edit = physics.lock();
-        thread::sleep(Duration::from_millis(300));
-        assert!(
-            io.safe_pose
-                .latest_stamp()
-                .is_some_and(|stamp| io.now().duration_since(stamp) < Duration::from_millis(50))
-        );
-        assert_eq!(*io.primary.get_latest().unwrap(), PrimaryState::Initial);
-        assert!(!io.status().contains("Emergency stop"));
-        drop(scene_edit);
-        assert!(worker.poll().is_none());
-        drop(worker);
-        drop(io);
-        router.shutdown().unwrap();
-    }
-}
+#[path = "profile_tests.rs"]
+mod tests;

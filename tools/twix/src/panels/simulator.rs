@@ -14,7 +14,7 @@ mod enabled {
     };
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
-    use simulate::{Configuration, PreparedSimulator, Simulator};
+    use simulate::{Configuration, ControllerSource, PreparedSimulator, Profile, Simulator};
     use tokio_util::task::AbortOnDropHandle;
 
     use crate::panel::{Panel, PanelCreationContext, PanelUiContext};
@@ -25,6 +25,8 @@ mod enabled {
         parameter_root: PathBuf,
         model_directory: PathBuf,
         namespace: String,
+        profile: Profile,
+        controller: ControllerSource,
     }
     impl Default for Settings {
         fn default() -> Self {
@@ -34,6 +36,8 @@ mod enabled {
                 model_directory: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../../etc/neural_networks"),
                 namespace: "/simulator/robot".into(),
+                profile: Profile::default(),
+                controller: ControllerSource::default(),
             }
         }
     }
@@ -123,23 +127,45 @@ mod enabled {
             ui.label(
                 "Start the HSL Game Controller separately. Its UDP messages drive game state.",
             );
-            ui.horizontal(|ui| {
-                ui.label("Namespace");
-                ui.text_edit_singleline(&mut self.settings.namespace);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Robotics parameters");
-                let mut path = self.settings.parameter_root.to_string_lossy().into_owned();
-                if ui.text_edit_singleline(&mut path).changed() {
-                    self.settings.parameter_root = path.into();
+            ui.add_enabled_ui(self.pending.is_none(), |ui| {
+                egui::ComboBox::from_label("Profile")
+                    .selected_text(self.settings.profile.label())
+                    .show_ui(ui, |ui| {
+                        for profile in Profile::ALL {
+                            ui.selectable_value(&mut self.settings.profile, profile, profile.label());
+                        }
+                    });
+                ui.label(self.settings.profile.description());
+                egui::ComboBox::from_label("Gamepad source")
+                    .selected_text(match self.settings.controller {
+                        ControllerSource::Local => "Local gamepad",
+                        ControllerSource::External => "External controller",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.settings.controller, ControllerSource::Local, "Local gamepad");
+                        ui.selectable_value(&mut self.settings.controller, ControllerSource::External, "External controller");
+                    });
+                if self.settings.controller == ControllerSource::External {
+                    ui.label("Publish inputs/controller_input in this robot namespace and simulator transport scope.");
                 }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Motion models");
-                let mut path = self.settings.model_directory.to_string_lossy().into_owned();
-                if ui.text_edit_singleline(&mut path).changed() {
-                    self.settings.model_directory = path.into();
-                }
+                ui.horizontal(|ui| {
+                    ui.label("Namespace");
+                    ui.text_edit_singleline(&mut self.settings.namespace);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Robotics parameters");
+                    let mut path = self.settings.parameter_root.to_string_lossy().into_owned();
+                    if ui.text_edit_singleline(&mut path).changed() {
+                        self.settings.parameter_root = path.into();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Motion models");
+                    let mut path = self.settings.model_directory.to_string_lossy().into_owned();
+                    if ui.text_edit_singleline(&mut path).changed() {
+                        self.settings.model_directory = path.into();
+                    }
+                });
             });
             if let Some(error) = &self.error {
                 ui.colored_label(egui::Color32::RED, error);
@@ -156,6 +182,8 @@ mod enabled {
                     model_directory: self.settings.model_directory.clone(),
                     namespace: self.settings.namespace.clone(),
                     router: context.backend.router().map(str::to_owned),
+                    profile: self.settings.profile,
+                    controller: self.settings.controller,
                 };
                 let runtime = context.backend.runtime_handle().clone();
                 let (sender, receiver) = mpsc::channel();
@@ -175,6 +203,29 @@ mod enabled {
 
         fn save(&self) -> Value {
             serde_json::to_value(&self.settings).unwrap()
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn legacy_layout_defaults_and_profile_choices_survive_serialization() {
+            let legacy: Settings =
+                serde_json::from_value(serde_json::json!({"namespace":"/saved/robot"})).unwrap();
+            assert_eq!(legacy.profile, Profile::MotionBehavior);
+            assert_eq!(legacy.controller, ControllerSource::Local);
+            for profile in Profile::ALL {
+                let settings = Settings {
+                    profile,
+                    controller: ControllerSource::External,
+                    ..Settings::default()
+                };
+                let saved: Settings =
+                    serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+                assert_eq!(saved.profile, profile);
+                assert_eq!(saved.controller, ControllerSource::External);
+            }
         }
     }
 }
