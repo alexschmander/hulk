@@ -3,10 +3,7 @@ use bevy::{light::NotShadowCaster, prelude::*, transform::TransformSystems};
 use types::motion_command::MotionCommand;
 
 use super::ball::{self, SpawnedBalls};
-use crate::{
-    bevy_mujoco::SharedPhysics, robot_io::RobotBinding, robotics::Robotics,
-    simulation::ControlledRobot,
-};
+use crate::{bevy_mujoco::SharedPhysics, robot_io::RobotBinding};
 
 pub struct CommandVectorsPlugin;
 
@@ -159,11 +156,17 @@ fn part_transform(arrow: Arrow, tip: bool) -> Option<Transform> {
 
 fn update(
     physics: Res<SharedPhysics>,
-    io: Res<Robotics>,
+    team: Res<crate::team::Team>,
     balls: Res<SpawnedBalls>,
-    robot: Single<Entity, With<ControlledRobot>>,
     mut parts: Query<(&ArrowPart, &mut Transform, &mut Visibility)>,
 ) {
+    let Some(member) = team.selected() else {
+        return;
+    };
+    let Some(robot) = member.entity else {
+        return;
+    };
+    let io = &member.io;
     let world = physics.lock();
     let data = world.data();
     let prefix = format!("object_{}_", robot.to_bits());

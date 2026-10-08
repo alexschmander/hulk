@@ -44,6 +44,8 @@ async fn main() -> Result<()> {
     )
     .await?;
     runtime.ui_notify.notify_one();
+    let players: Vec<usize> = if std::env::var("HSL_PLAYERS").as_deref() == Ok("5") { (0..5).collect() } else { vec![2] };
+    let all_good = |state: &serde_json::Value| players.iter().all(|&player| state["connectionStatus"]["home"][player] == 2);
     let result: Result<()> = async {
         runtime
             .action_sender
@@ -54,14 +56,14 @@ async fn main() -> Result<()> {
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 receiver.changed().await?;
-                if receiver.borrow()["connectionStatus"]["home"][2] == 2 {
+                if all_good(&receiver.borrow()) {
                     break;
                 }
             }
             Ok::<_, anyhow::Error>(())
         })
         .await??;
-        println!("GameController accepted HULKs player 3 return messages (connection=Good)");
+        println!("GameController accepted all configured HULKs return messages (connection=Good)");
         for stage in ["ready", "penalized", "unpenalized", "whistle_in_set", "paused_clock"] {
             tokio::time::timeout(Duration::from_secs(20), async {
                 while !exchange.join(stage).exists() {
@@ -88,7 +90,7 @@ async fn main() -> Result<()> {
         // Require loss and recovery of Good status, rather than accepting a
         // still-fresh return packet from before the pause.
         tokio::time::timeout(Duration::from_secs(10), async {
-            while receiver.borrow()["connectionStatus"]["home"][2] == 2 {
+            while all_good(&receiver.borrow()) {
                 receiver.changed().await?;
             }
             Ok::<_, anyhow::Error>(())
@@ -97,7 +99,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 receiver.changed().await?;
-                if receiver.borrow()["connectionStatus"]["home"][2] == 2 {
+                if all_good(&receiver.borrow()) {
                     break;
                 }
             }
@@ -105,7 +107,7 @@ async fn main() -> Result<()> {
         }).await??;
         std::fs::write(exchange.join("returns_resumed"), b"accepted")?;
         ensure!(
-            receiver.borrow()["connectionStatus"]["home"][2] == 2,
+            all_good(&receiver.borrow()),
             "robot stopped returning status"
         );
         println!("Upstream HSL runtime roundtrip passed: Ready, penalty, removal, whistle in Set, independent match clock while robotics paused, resumed returns");

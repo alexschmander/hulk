@@ -46,6 +46,6 @@ ip addr add 10.0.0.2/16 brd + dev gc
 ip link set gc up
 "$2" &
 gc_pid=$!
-"$1" upstream_hsl_game_controller_roundtrip --ignored --nocapture
+"$1" "${HSL_TEST_FILTER:-upstream_hsl_game_controller_roundtrip}" --ignored --nocapture
 wait "$gc_pid"
 SH

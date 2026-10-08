@@ -24,7 +24,8 @@ mod enabled {
     struct Settings {
         parameter_root: PathBuf,
         model_directory: PathBuf,
-        namespace: String,
+        robot_count: u8,
+        location: String,
         profile: Profile,
         controller: ControllerSource,
     }
@@ -35,7 +36,8 @@ mod enabled {
                     .join("../../etc/parameters"),
                 model_directory: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../../etc/neural_networks"),
-                namespace: "/simulator/robot".into(),
+                robot_count: 1,
+                location: "incheon_small".into(),
                 profile: Profile::default(),
                 controller: ControllerSource::default(),
             }
@@ -44,12 +46,26 @@ mod enabled {
 
     pub struct SimulatorPanel {
         settings: Settings,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
         simulator: Option<Simulator>,
         pending: Option<mpsc::Receiver<Result<PreparedSimulator, String>>>,
         task: Option<AbortOnDropHandle<()>>,
         error: Option<String>,
     }
 
+    impl Drop for SimulatorPanel {
+        fn drop(&mut self) {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    impl SimulatorPanel {
+        pub fn select_robot(&mut self, number: u8) {
+            if let Some(simulator) = &mut self.simulator {
+                simulator.select_robot(number);
+            }
+        }
+    }
     impl Panel for SimulatorPanel {
         const STORAGE_ID: &'static str = "motion_simulator";
         const DISPLAY_NAME: &'static str = "Simulator";
@@ -57,6 +73,7 @@ mod enabled {
 
         fn new(context: PanelCreationContext<'_>) -> Self {
             Self {
+                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 settings: context
                     .value
                     .and_then(|value| serde_json::from_value(value.clone()).ok())
@@ -72,7 +89,6 @@ mod enabled {
             if self.simulator.is_some() && ui.button("Stop simulator").clicked() {
                 self.simulator = None;
             }
-            ui.label(&self.settings.namespace);
         }
 
         fn toggle_pause(&mut self) {
@@ -82,7 +98,10 @@ mod enabled {
         }
 
         fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
-            if context.backend.transport_scope() != Some(simulate::ZENOH_NAMESPACE) {
+            if !context.backend.transport_scope().is_some_and(|scope| {
+                scope == simulate::ZENOH_NAMESPACE
+                    || scope.starts_with(&format!("{}/", simulate::ZENOH_NAMESPACE))
+            }) {
                 ui.label("Launch ./twix --simulator to use the simulator's isolated transport.");
                 return;
             }
@@ -103,10 +122,7 @@ mod enabled {
                                 data.get_temp::<RenderState>(egui::Id::new(RENDER_STATE_ID))
                             });
                             if let Some(renderer) = renderer {
-                                if let Err(error) = context
-                                    .backend
-                                    .set_namespace(self.settings.namespace.clone())
-                                {
+                                if let Err(error) = context.backend.set_namespace("/1".into()) {
                                     self.error = Some(format!("{error:#}"));
                                 }
                                 self.simulator = Some(Simulator::new(prepared, renderer));
@@ -120,10 +136,18 @@ mod enabled {
                 }
             }
             if let Some(simulator) = &mut self.simulator {
+                if let Ok(number) = context
+                    .backend
+                    .namespace()
+                    .trim_start_matches('/')
+                    .parse::<u8>()
+                {
+                    simulator.select_robot(number);
+                }
                 simulator.ui(ui);
                 return;
             }
-            ui.label("Run one simulated K1 with the real behavior, motion, and HSL message nodes.");
+            ui.label("Simulate a HULKs team with the real robotics nodes.");
             ui.label(
                 "Start the HSL Game Controller separately. Its UDP messages drive game state.",
             );
@@ -149,9 +173,15 @@ mod enabled {
                     ui.label("Publish inputs/controller_input in this robot namespace and simulator transport scope.");
                 }
                 ui.horizontal(|ui| {
-                    ui.label("Namespace");
-                    ui.text_edit_singleline(&mut self.settings.namespace);
+                    ui.label("Robots");
+                    ui.add(egui::DragValue::new(&mut self.settings.robot_count).range(1..=5));
                 });
+                match simulate::FieldConfiguration::locations(&self.settings.parameter_root) {
+                    Ok(locations) => { egui::ComboBox::from_label("Location").selected_text(&self.settings.location).show_ui(ui, |ui| {
+                        for location in locations { ui.selectable_value(&mut self.settings.location, location.clone(), &location); }
+                    }); },
+                    Err(error) => { ui.colored_label(egui::Color32::RED, format!("Locations: {error:#}")); }
+                }
                 ui.horizontal(|ui| {
                     ui.label("Robotics parameters");
                     let mut path = self.settings.parameter_root.to_string_lossy().into_owned();
@@ -176,11 +206,26 @@ mod enabled {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(50));
             } else if ui.button("Start simulator").clicked() {
+                self.cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancelled = self.cancelled.clone();
                 self.error = None;
+                let field = match simulate::FieldConfiguration::load(
+                    &self.settings.parameter_root,
+                    &self.settings.location,
+                ) {
+                    Ok(field) => field,
+                    Err(error) => {
+                        self.error = Some(format!("{error:#}"));
+                        return;
+                    }
+                };
                 let configuration = Configuration {
                     parameter_root: self.settings.parameter_root.clone(),
                     model_directory: self.settings.model_directory.clone(),
-                    namespace: self.settings.namespace.clone(),
+                    namespace: "/1".into(),
+                    robot_count: self.settings.robot_count,
+                    location: Some(self.settings.location.clone()),
+                    field_configuration: Some(field),
                     router: context.backend.router().map(str::to_owned),
                     profile: self.settings.profile,
                     controller: self.settings.controller,
@@ -192,7 +237,11 @@ mod enabled {
                 self.task = Some(AbortOnDropHandle::new(runtime.clone().spawn_blocking(
                     move || {
                         let result = runtime
-                            .block_on(PreparedSimulator::new(runtime.clone(), configuration))
+                            .block_on(PreparedSimulator::new(
+                                runtime.clone(),
+                                configuration,
+                                cancelled,
+                            ))
                             .map_err(|error| format!("{error:#}"));
                         let _ = sender.send(result);
                         repaint.request_repaint();

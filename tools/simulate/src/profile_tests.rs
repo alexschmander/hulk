@@ -46,6 +46,9 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
                 model_directory: root.join("../../etc/neural_networks"),
                 router: Some(endpoint),
                 namespace: "/simulator/startup_test".into(),
+                location: None,
+                robot_count: 1,
+                field_configuration: None,
                 profile,
                 controller: crate::ControllerSource::External,
             },
@@ -845,7 +848,7 @@ fn validate_body_state(runtime: &tokio::runtime::Runtime, io: &Robotics, physics
         "BodyStateOdometry: moving-observer goalpost maximum arrival-time discrepancy {max_obstacle_error:.4} m; production filter uses absolute odometry"
     );
     let mut world = physics.lock();
-    let robot = world.robot.unwrap();
+    let robot = world.robots[0];
     let mut fallen = initial_pose(&io.field_dimensions);
     fallen.rotation *= Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     world.ground_object(robot, fallen).unwrap();

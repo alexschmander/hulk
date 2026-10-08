@@ -120,15 +120,35 @@ pub(crate) struct Frame {
     pub epoch: u64,
     pub sample: Observation,
     pub balls: Vec<Ball>,
+    pub robots: Vec<[f32; 3]>,
     pub detections: Vec<Object<Label>>,
     pub field: FieldDimensions,
 }
 
+#[cfg(test)]
 pub(crate) fn detect(
     data: &mut Data,
     sample: &Observation,
     balls: &[Ball],
     field: &FieldDimensions,
+) -> Vec<Object<Label>> {
+    detect_scene(
+        data,
+        sample,
+        balls,
+        field,
+        &[],
+        crate::scene::goal::GOAL_HEIGHT as f32,
+    )
+}
+
+pub(crate) fn detect_scene(
+    data: &mut Data,
+    sample: &Observation,
+    balls: &[Ball],
+    field: &FieldDimensions,
+    robots: &[[f32; 3]],
+    goal_height: f32,
 ) -> Vec<Object<Label>> {
     let mut output = Vec::new();
     let world_to_camera = sample.camera_to_world.inverse();
@@ -188,6 +208,30 @@ pub(crate) fn detect(
             ));
         }
     }
+    for position in robots {
+        let foot = Point3::from(*position);
+        let center = foot + nalgebra::vector![0.0, 0.0, 0.45];
+        if !visible(center, 0.25) {
+            continue;
+        }
+        let Some((bottom, depth)) = project(foot) else {
+            continue;
+        };
+        let top = world_to_camera * (foot + nalgebra::vector![0.0, 0.0, 0.95]);
+        if top.z <= 0.01 {
+            continue;
+        }
+        let top = sample
+            .camera_matrix
+            .intrinsics
+            .project(linear_algebra::Vector3::wrap(top.coords));
+        let radius = sample.camera_matrix.intrinsics.focals.x * 0.22 / depth;
+        output.push(bbox(
+            Label::Robot,
+            point![bottom.x() - radius, top.y()],
+            point![bottom.x() + radius, bottom.y()],
+        ));
+    }
     for (label, point) in landmarks(field) {
         let position = nalgebra::point![point.x(), point.y(), 0.0];
         let Some((pixel, depth)) = project(position) else {
@@ -204,8 +248,7 @@ pub(crate) fn detect(
             continue;
         }
         if label == Label::GoalPost {
-            let top = world_to_camera
-                * nalgebra::point![point.x(), point.y(), crate::scene::goal::GOAL_HEIGHT as f32];
+            let top = world_to_camera * nalgebra::point![point.x(), point.y(), goal_height];
             if top.z <= 0.01 {
                 continue;
             }
