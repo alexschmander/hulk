@@ -1,63 +1,49 @@
-use std::time::Duration;
-
 use color_eyre::Report;
 use coordinate_systems::Pixel;
 use eframe::egui::{Color32, Pos2, Stroke};
 use linear_algebra::point;
 use projection::camera_matrix::CameraMatrix;
 use ros_z::time::Time;
-use ros_z_debug::query::plan::Selection;
-use twix_visualization::twix_painter::TwixPainter;
 use types::time_wrapper::TimeWrapper;
 
-use super::{
-    super::{
-        image_overlay::ImageOverlay,
-        inputs::{OverlayInput, OverlayInputs},
-    },
-    camera::{CameraSample, projected_camera_at},
-};
+use crate::repaint::ObservationContext;
+use twix_visualization::twix_painter::TwixPainter;
 
-#[derive(Default)]
+use super::super::image_overlay::{ImageOverlay, OverlayObservation};
+
 pub(in crate::panels::image) struct HorizonOverlay {
-    sample: Option<CameraSample>,
+    camera_matrix: OverlayObservation<TimeWrapper<CameraMatrix>>,
 }
 
 impl ImageOverlay for HorizonOverlay {
-    fn inputs(&self) -> Vec<OverlayInput> {
-        vec![OverlayInput::new::<TimeWrapper<CameraMatrix>>(
-            "camera_matrix",
-            Selection::Bracket {
-                max_gap: Duration::from_millis(100),
-            },
-        )]
+    type Sample = super::super::image_overlay::CameraSample;
+    const NAME: &'static str = "Horizon";
+    const STORAGE_KEY: &'static str = "horizon";
+
+    fn new<C>(context: &C) -> Result<Self, Report>
+    where
+        C: ObservationContext,
+    {
+        Ok(Self {
+            camera_matrix: OverlayObservation::new(context, "camera_matrix")?,
+        })
     }
 
-    fn prepare(&mut self, time: Time, inputs: &mut OverlayInputs) -> Result<(), Report> {
-        self.sample = None;
-        self.sample = inputs
-            .decode(0, time)?
-            .and_then(|records| projected_camera_at(&records, time));
-        Ok(())
+    fn prepare(&self, image_time: Time) -> Option<Self::Sample> {
+        self.camera_matrix.camera_at(image_time)
     }
 
-    fn paint(&self, painter: &TwixPainter<Pixel>) {
-        let Some(camera_matrix) = &self.sample else {
-            return;
-        };
+    fn paint(painter: &TwixPainter<Pixel>, camera_matrix: &Self::Sample) {
         let Some(horizon) = camera_matrix.horizon else {
             return;
         };
 
-        let painter_rect = painter.pixel_rect();
-        let left = painter.transform_pixel_to_world(Pos2::new(painter_rect.left(), 0.0));
-        let left_horizon_height = horizon.y_at_x(left.x());
-        let right = painter.transform_pixel_to_world(Pos2::new(painter_rect.right(), 0.0));
-        let right_horizon_height = horizon.y_at_x(right.x());
-
+        let rect = painter.pixel_rect();
+        let left = painter.transform_pixel_to_world(Pos2::new(rect.left(), 0.0));
+        let right = painter.transform_pixel_to_world(Pos2::new(rect.right(), 0.0));
         painter.line_segment(
-            point![left.x(), left_horizon_height],
-            point![right.x(), right_horizon_height],
+            point![left.x(), horizon.y_at_x(left.x())],
+            point![right.x(), horizon.y_at_x(right.x())],
             Stroke::new(3.0, Color32::GREEN),
         );
         painter.circle_stroke(

@@ -240,6 +240,12 @@ It also refetches the full snapshot every two seconds, because a restarted node 
 Each threshold follows its node separately, so several thresholds on one node multiply these requests.
 Path changes reuse that snapshot, and changing the node or namespace restarts the subscription.
 
+Twix includes Audio, Text, Image, Map (2D), 3D Map, Parameter, and Timeline panels.
+Panels follow the selected namespace.
+Topic views use the shared `ros-z-debug` topic observer.
+The Text panel renders the latest dynamic payload as JSON.
+The Parameter panel discovers ROS-Z nodes with remote parameter services, shows full snapshots or selected paths as JSON, and writes selected paths to active layers with revision checks.
+
 ## MCAP Timeline
 
 Start a recording with `cargo run -p mcap-replay -- recovered.mcap`. The tool starts
@@ -268,28 +274,53 @@ These shortcuts are [rebindable](#keybindings); toolbar tooltips show the config
 
 See [MCAP replay](https://github.com/HULKs/hulk/blob/main/tools/mcap-replay/README.md) for server setup and command-line options.
 
+## 3D Map
+
+Select **3D Map** in the panel selector.
+Its **Layers** menu independently toggles the field, articulated K1 robot, camera frustum/image plane, and field-mark associations.
+Drag with the left mouse button to orbit, drag with the right button to pan, and scroll to zoom.
+Layer settings and the selected pose source are saved with the layout.
+
+Robot and camera placement can use localization or visual odometry.
+Visual odometry has its own coordinate frame, so it is not aligned with the displayed field; field-mark associations are only drawn with localization selected.
+Localization uses the latest pose.
+Camera matrices and kinematics are matched to the displayed frame within 100 ms using payload timestamps.
+Associations require the current localization epoch and, when images are available, an exact image timestamp.
+Frame timestamps never move backward within a namespace and epoch.
+Without camera or association frames, the robot uses the latest kinematics.
+
+K1 meshes are compiled into Twix; no mesh files or source checkout are needed at runtime.
+The panel requires a WGPU-capable graphics adapter.
+
 ## Image Overlays
 
 The Image panel defaults to `inputs/left_image`.
-If that topic is absent, it automatically observes `inputs/stereo_image_pair` and extracts its left image.
-The primary topic wins whenever it is present, regardless of whether data has arrived yet.
-Live discovery updates reselect the source; unrelated topics do not recreate its observation.
-The stereo fallback projects `.left.header.stamp` instead of `.header.stamp`.
-In Live mode, enabled object and pose detections contribute their latest available acquisition timestamps. The minimum available timestamp selects an exact image from retained history; if that image is absent, the panel selects the latest image. There is no fixed delay. A stalled detector can keep an older image selected while that image remains retained.
-The panel observes one query plan: select the exact preferred image or latest image, then attach independent overlay inputs. Live evaluates these operations against the same retained source views; there are no asynchronous per-frame lookups chasing the selected image. Only the selected image is decoded, and its texture is reused across unchanged results.
-Replay selects the newest image at or before the timeline cursor, independently of overlay availability. The same plan attaches inputs against that image's acquisition time, including results published or logged later than the cursor. Partial responses can display the image while optional overlay indexes are still building.
-Each overlay prepares and draws independently. Empty detections are valid data; missing, invalid, or failed inputs suppress only the affected overlay. Late results can populate a still-displayed frame, but cannot paint on another frame.
-Image-topic, namespace, backend, or overlay-selection changes rebuild the plan observation. Compatible Live feeds remain shared, and overlay-only changes retain the image render cache.
-The Horizon overlay interpolates compatible camera matrices over brackets spanning at most 100 ms.
+It presents the newest complete image and enabled detection results together, using their exact acquisition timestamps.
+Empty detection results count as complete.
+Frames advance monotonically, skipping intermediate complete frames.
+If inputs are missing, the previous complete image and overlays remain visible unchanged: no timeout, partial-frame fallback, or waiting message replaces them.
+Image-topic, namespace, and publisher changes clear retained presentation state.
 
-Live ingestion is independent of the UI frame rate. Shared histories are bounded by sample count and bytes; observations report when retention limits their coverage. Replay uses server-side indexes instead of accumulating panel histories. Image and overlay timestamp projections are developer-owned query declarations; legacy saved projection overrides are ignored. The Text panel always uses source time, as do other observations unless explicitly configured by code.
+Histories are bounded by record count rather than age, so delayed transport does not automatically reject matching data.
+**Image history samples** controls the persisted image capacity (256 by default); each overlay observation retains up to 4,096 records.
+Two seconds of differential delay at 60 camera frames per second requires more than 120 image records plus margin.
+Increase image capacity for larger delays or rates, accounting for image memory usage.
+Matching requires all inputs to remain within their respective capacities; the displayed snapshot stays pinned even after history eviction.
 
-### Adding an image overlay
-
-Implement `ImageOverlay` in `tools/twix/src/panels/image/overlays/` and register an instance in `ImageOverlays::new`. `inputs()` declares relative topics, projections, query selections, subscription policy, and optional frame preferences. The image panel compiles these declarations into a single query plan. `prepare(time, &mut inputs)` clears old prepared state, decodes its already-matched slots through `OverlayInputs::decode` in `image/inputs.rs`, and computes drawing data. Decoding retains diagnostics even when optional-input failures use fallback geometry; errors appear in the overlay menu. `paint()` draws that state when available. The registry owns enablement, persistence, input ranges, and preparation caching; concrete overlays do not access the backend. Shared camera/interpolation helpers live in `overlays/camera.rs`. The texture cache retains sample identity and pixels, not successful or failed wire payloads. Clearing the image topic releases the plan observation. Both Live and replay use the same overlay declarations and preparation code.
+Enable **Overlays > Projected Field Lines** to project the field using `localization/pose_3d` and camera transforms evaluated at the displayed image time.
+Geometry requires valid bracketing samples, compatible localization epochs and camera calibration, and never extrapolates.
+Invalid localization or a localization epoch change immediately removes the old projection.
+Explicitly unavailable localization permits new image/detection frames without a field projection; missing geometry remains pending.
+Valid calibrated intrinsics override camera intrinsics as configuration captured with the frame, not as a continuously changing paint input.
+Field associations never control image timing; matching-epoch, exact-frame associations add optional magenta residuals, including when they arrive after the image is displayed.
+Curves use at most 256 segments and skip pieces behind the camera.
 
 Use the object-detection overlay for bounding boxes, class labels, and confidence values, and pose detection for human skeletons.
 Overlays are supported for the selected namespace's `inputs/left_image`, their producer's camera.
+Untimestamped legacy line/ball debug pixels and field-border candidate points are omitted because they cannot be aligned safely; the overlay menu explains unavailable layers.
+Timestamped field-border lines remain available.
+Zero image timestamps are reported as unsupported.
+Image and 3D Map panels select their frames independently.
 
 ## Keybindings
 

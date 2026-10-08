@@ -1,22 +1,18 @@
-use std::sync::Arc;
-
 use color_eyre::Report;
 use coordinate_systems::Pixel;
 use eframe::egui::{Align2, Color32, Stroke};
 use linear_algebra::point;
 use ros_z::time::Time;
-use ros_z_debug::{SampleRecord, query::plan::Selection};
-use twix_visualization::twix_painter::TwixPainter;
 use types::{
     object_detection::YOLOObjectLabel,
     pose_detection::{Keypoint, Pose},
     time_wrapper::TimeWrapper,
 };
 
-use super::super::{
-    image_overlay::ImageOverlay,
-    inputs::{OverlayInput, OverlayInputs},
-};
+use crate::repaint::ObservationContext;
+use twix_visualization::twix_painter::TwixPainter;
+
+use super::super::image_overlay::{ImageOverlay, OverlayObservation};
 
 const POSE_SKELETON_KEYPOINT_LINE_MAPPING: [(usize, usize); 16] = [
     (0, 1),
@@ -38,30 +34,30 @@ const POSE_SKELETON_KEYPOINT_LINE_MAPPING: [(usize, usize); 16] = [
 ];
 const KEYPOINT_CONFIDENCE_THRESHOLD: f32 = 0.8;
 
-#[derive(Default)]
 pub(in crate::panels::image) struct PoseDetectionOverlay {
-    sample: Option<Arc<SampleRecord<Detections>>>,
+    pub(in crate::panels::image) poses: OverlayObservation<TimeWrapper<Vec<Pose<YOLOObjectLabel>>>>,
 }
 
-type Detections = TimeWrapper<Vec<Pose<YOLOObjectLabel>>>;
-
 impl ImageOverlay for PoseDetectionOverlay {
-    fn inputs(&self) -> Vec<OverlayInput> {
-        vec![OverlayInput::new::<Detections>("detected_poses", Selection::Exact).prefer_frame()]
+    type Sample =
+        std::sync::Arc<ros_z_debug::SampleRecord<TimeWrapper<Vec<Pose<YOLOObjectLabel>>>>>;
+    const NAME: &'static str = "Pose Detection";
+    const STORAGE_KEY: &'static str = "pose_detection";
+
+    fn new<C>(context: &C) -> Result<Self, Report>
+    where
+        C: ObservationContext,
+    {
+        Ok(Self {
+            poses: OverlayObservation::new(context, "detected_poses")?,
+        })
     }
 
-    fn prepare(&mut self, time: Time, inputs: &mut OverlayInputs) -> Result<(), Report> {
-        self.sample = None;
-        self.sample = inputs
-            .decode(0, time)?
-            .map(|records| Arc::clone(records.last()));
-        Ok(())
+    fn prepare(&self, image_time: Time) -> Option<Self::Sample> {
+        self.poses.at_time(image_time)
     }
 
-    fn paint(&self, painter: &TwixPainter<Pixel>) {
-        let Some(poses) = &self.sample else {
-            return;
-        };
+    fn paint(painter: &TwixPainter<Pixel>, poses: &Self::Sample) {
         paint_poses(painter, &poses.value.inner);
     }
 }

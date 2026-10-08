@@ -1,45 +1,42 @@
-use std::sync::Arc;
-
 use color_eyre::Report;
 use coordinate_systems::Pixel;
 use eframe::egui::{Align2, Color32, Stroke};
 use ros_z::time::Time;
-use ros_z_debug::{SampleRecord, query::plan::Selection};
-use twix_visualization::twix_painter::TwixPainter;
 use types::{
     object_detection::{Object, RobocupObjectLabel},
     time_wrapper::TimeWrapper,
 };
 
-use super::super::{
-    image_overlay::ImageOverlay,
-    inputs::{OverlayInput, OverlayInputs},
-};
+use crate::repaint::ObservationContext;
+use twix_visualization::twix_painter::TwixPainter;
 
-#[derive(Default)]
+use super::super::image_overlay::{ImageOverlay, OverlayObservation};
+
 pub(in crate::panels::image) struct ObjectDetectionOverlay {
-    sample: Option<Arc<SampleRecord<Detections>>>,
+    pub(in crate::panels::image) object_detections:
+        OverlayObservation<TimeWrapper<Vec<Object<RobocupObjectLabel>>>>,
 }
 
-type Detections = TimeWrapper<Vec<Object<RobocupObjectLabel>>>;
-
 impl ImageOverlay for ObjectDetectionOverlay {
-    fn inputs(&self) -> Vec<OverlayInput> {
-        vec![OverlayInput::new::<Detections>("detected_objects", Selection::Exact).prefer_frame()]
+    type Sample =
+        std::sync::Arc<ros_z_debug::SampleRecord<TimeWrapper<Vec<Object<RobocupObjectLabel>>>>>;
+    const NAME: &'static str = "Object Detection";
+    const STORAGE_KEY: &'static str = "object_detection";
+
+    fn new<C>(context: &C) -> Result<Self, Report>
+    where
+        C: ObservationContext,
+    {
+        Ok(Self {
+            object_detections: OverlayObservation::new(context, "detected_objects")?,
+        })
     }
 
-    fn prepare(&mut self, time: Time, inputs: &mut OverlayInputs) -> Result<(), Report> {
-        self.sample = None;
-        self.sample = inputs
-            .decode(0, time)?
-            .map(|records| Arc::clone(records.last()));
-        Ok(())
+    fn prepare(&self, image_time: Time) -> Option<Self::Sample> {
+        self.object_detections.at_time(image_time)
     }
 
-    fn paint(&self, painter: &TwixPainter<Pixel>) {
-        let Some(object_detections) = &self.sample else {
-            return;
-        };
+    fn paint(painter: &TwixPainter<Pixel>, object_detections: &Self::Sample) {
         paint_bounding_boxes(painter, &object_detections.value.inner, Color32::LIGHT_RED);
     }
 }
