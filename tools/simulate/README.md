@@ -8,7 +8,7 @@ All simulator wiring and hardware substitutes live under `tools/simulate`; robot
 Select a cumulative profile before starting.
 The simulator sits on three explicitly requested upstream squashes: `oleflb/feat/localization-improvements`, `schluis/dev/ball-filter-preferred-20261004` and `BenSampaolo/ball-search-behavior`.
 The new localization solver acquires at the default spawn; the former lookup-budget limitation no longer applies.
-The walking/head-motion fixture measured 0.0152 m maximum position error and 0.0091 rad maximum yaw error over three seconds, using production parameters and no truth pose injection.
+The walking/head-motion fixture measured 0.0209 m maximum position error and 0.0072 rad maximum yaw error over three seconds of simulation time, using production parameters and no truth pose injection.
 The [profile plan](PROFILES.md) records topic ownership and validation contracts.
 
 | Profile | Additional real nodes | Remaining ideal inputs |
@@ -94,12 +94,20 @@ Reset pose pauses and returns the robot to its standing spawn pose.
 Stop and Start rebuild the node stack and clear a latched emergency stop.
 Blue arrows show commanded translation, green shows yaw rate, amber shows kicks.
 
-The physics worker publishes sensors independently of the visible panel and repaint rate.
-Scene recompilation freezes physics while the worker keeps publishing the last stationary raw sensor sample, so adding or deleting a ball does not interrupt sensor delivery.
-Camera frames are skipped during a scene rebuild rather than mixing old pixels with a newer pose.
-`diagnostics/camera_frames` reports capture/publication times and cumulative skipped frames, including overwritten queued snapshots.
-Pausing freezes physics while publishing stationary observations; the real nodes, network and wall clock continue running.
-This is not deterministic stepped robotics time.
+The physics worker advances a shared ROS-Z logical clock independently of the visible panel and repaint rate.
+Each running physics step advances robotics time by the MuJoCo timestep, and every sensor view of that step shares its timestamp.
+Pause and scene recompilation freeze both clocks and sensor sampling.
+Resume continues from that time without catching up elapsed wall time; pose resets and scene edits never rewind the clock.
+Startup advances the clock while the real nodes initialize, then pauses in Initial.
+Camera frames use simulation time at approximately 30 Hz.
+`diagnostics/camera_frames` reports capture/publication times and cumulative overwritten queued snapshots.
+A whistle clicked while paused is retained for resume; its 750 ms pulse uses simulation time.
+
+The external GameController keeps its own match clock, and incoming packets, Twix parameters and body buttons remain live while paused.
+Behavior-generated return messages pause with behavior, so the GameController may mark the robot disconnected during a long pause.
+Local gamepad capture and its source timestamps use wall time, matching external gamepads and the existing behavior freshness check.
+LED blinking, transport deadlines and UI button holds also retain their existing wall-time behavior.
+This freezes robotics clock-driven processing; it does not suspend every asynchronous callback or promise deterministic execution.
 Neural policies and contacts still need validation against hardware.
 
 ## GameController
@@ -150,8 +158,8 @@ Ball edits preserve the epoch.
 Set `simulator.observations.pixel_noise_std_dev`, `detection_dropout_probability` and `seed` through the Parameter panel for repeatable detection faults.
 Defaults are exact observations with no loss.
 Noise never changes ground truth.
-No producer is added for `current_odometry_to_last_odometry`, matching production; the obstacle filter therefore retains its existing identity fallback for that input.
-During a three-second walking fixture, goalpost outputs differed from current truth by up to 44 cm.
+No producer is added for the obsolete `current_odometry_to_last_odometry` topic; the preferred obstacle filter uses absolute odometry.
+During a three-second simulated walking fixture, goalpost outputs differed from current truth by up to 6.11 cm.
 These outputs lack a measurement timestamp, so that diagnostic includes processing delay as well as hypothesis lag.
 The obstacle filter also places mapped posts 2 cm beyond the shared field helper's goal-line centers with the default field parameters.
 
@@ -167,7 +175,7 @@ export LD_LIBRARY_PATH="$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+
 cargo test -p simulate --lib
 cargo test -p twix --features simulator --bin twix
 # With ONNX Runtime/models available and no simulator using the GameController ports:
-cargo test -p simulate startup_reaches_initial_and_scene_edits_keep_sensors_live -- --ignored
+cargo test -p simulate startup_pause_resume_and_scene_edits_preserve_time -- --ignored
 
 git clone https://github.com/RoboCup-HumanoidSoccerLeague/GameController /tmp/hsl-game-controller
 tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
@@ -176,6 +184,7 @@ tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
 The last test requires Linux user/network namespaces, `ip`, Python 3, and the upstream Rust build dependencies including libclang.
 It compiles the upstream `game_controller_runtime` used by the GUI, drives its normal action API, and connects it to HULK's production message nodes in the same private network.
 It checks Ready, a pickup penalty, penalty removal, accepted return messages, and a whistle-in-Set transition through the real state filters while upstream still reports Set.
+It then verifies that the upstream match countdown advances while robotics time is frozen, return messages stop, and connection status recovers after resume.
 No synthetic GameController packets are used in this test.
 The GUI itself is not driven.
 Tested against upstream commit `af7d12962c671b631dee7b293df70e6f7b8bb491`, protocol 20, return protocol 4.
@@ -183,7 +192,8 @@ Tested against upstream commit `af7d12962c671b631dee7b293df70e6f7b8bb491`, proto
 The ordinary unit suite also checks UDP team-message reception, SDK request/reply isolation for global Zenoh prefixes `42` and `43`, physics model recompilation, sensor transforms, command vectors, fall-detection poses, gizmo geometry, and raw body-button delivery through the real bridge, handler and primary-state filter.
 The optional startup test launches profiles sequentially and checks producer ownership, independent truth, whistles, external gamepad/disconnect, filtering and body estimation.
 Set `SIMULATOR_TEST_PROFILE` to `motion_behavior`, `filtering`, `body_state_odometry` or `localization` to select one.
-It also holds the scene-edit lock for 300 ms and checks that raw sensors remain fresh while camera frames are skipped and resume coherently.
+It pauses longer than a whistle pulse and verifies frozen physics, robotics time, sensor timestamps and behavior timers, followed by resume without a catch-up jump.
+It also holds the scene-edit lock for 300 ms and checks that the shared clock freezes, caches remain fresh in simulation time and camera frames resume coherently.
 For profile 4 it checks the live input chain, VO ingestion and acquisition status.
 The captured-frame regression `localization_startup_frame_acquires_with_production_parameters` now runs in the ordinary unit suite and passes with the new production association solver.
 Run `localization_acquisition_and_tracking` explicitly with `--ignored` to exercise live acquisition and walking with ONNX Runtime and motion models.

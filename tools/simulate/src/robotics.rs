@@ -6,7 +6,11 @@ use std::{
 
 use bevy::prelude::Resource;
 use color_eyre::Result;
-use ros_z::{parameter::NodeParameters, prelude::*, time::Time};
+use ros_z::{
+    parameter::NodeParameters,
+    prelude::*,
+    time::{Clock, Time},
+};
 use tokio::{runtime::Handle, sync::watch, task::JoinSet};
 use types::{
     filtered_game_controller_state::FilteredGameControllerState, motion_command::MotionCommand,
@@ -51,6 +55,7 @@ pub struct RobotStack {
     runtime: Handle,
     context: Arc<Context>,
     _node: Arc<Node>,
+    controller_context: Option<Arc<Context>>,
     // The set owns every task, including the SDK receiver, through shutdown and failed startup.
     tasks: Mutex<JoinSet<(&'static str, Result<()>)>>,
     _overrides: tempfile::TempDir,
@@ -58,7 +63,7 @@ pub struct RobotStack {
     pub field_dimensions: types::field_dimensions::FieldDimensions,
     pub profile: Profile,
     controller_unavailable: Mutex<bool>,
-    whistle: watch::Sender<Option<std::time::Instant>>,
+    whistle: watch::Sender<Option<Time>>,
     frames: watch::Sender<Option<Frame>>,
     body: crate::reference::BodyReferences,
     readiness: crate::readiness::Readiness,
@@ -89,6 +94,7 @@ impl RobotStack {
             )?,
         )?;
         let mut builder = ContextBuilder::default()
+            .with_clock(Clock::logical(Clock::wallclock().now()))
             .with_namespace(&configuration.namespace)
             .with_parameter_layers([
                 configuration.parameter_root.join("base"),
@@ -99,7 +105,7 @@ impl RobotStack {
         if let Some(router) = &configuration.router {
             builder = builder.with_router_endpoint(router)?;
         }
-        // Wall time matches the unchanged cache timestamps and the external Game Controller.
+        // The physics worker advances this clock; the external GameController keeps wall time.
         let context = Arc::new(scoped_transport(builder).build().await?);
         // ROS-Z applies environment overrides after builder options. Reject a
         // conflicting override before starting any node that can send SDK traffic.
@@ -114,6 +120,18 @@ impl RobotStack {
                 ),
             "ZENOH_CONFIG_OVERRIDE conflicts with the simulator transport namespace"
         );
+        // The unchanged behavior node checks gamepad freshness against SystemTime.
+        // Host inputs therefore retain wall-clock source timestamps, just like an
+        // external controller, while the robotics context uses simulation time.
+        let controller_context = if configuration.controller == ControllerSource::Local {
+            let mut builder = ContextBuilder::default().with_namespace(&configuration.namespace);
+            if let Some(router) = &configuration.router {
+                builder = builder.with_router_endpoint(router)?;
+            }
+            Some(Arc::new(scoped_transport(builder).build().await?))
+        } else {
+            None
+        };
         let node = Arc::new(context.create_node("simulator").build().await?);
         let parameters = node.bind_parameter_as::<SimulatorParameters>("simulator")?;
         parameters.add_validation_hook(SimulatorParameters::validate)?;
@@ -185,7 +203,14 @@ impl RobotStack {
             )
         });
         for spec in configuration.profile.nodes(configuration.controller) {
-            let future = (spec.run)(context.clone());
+            let node_context = if spec.name == "controller_handler" {
+                controller_context
+                    .as_ref()
+                    .expect("local controller context")
+            } else {
+                &context
+            };
+            let future = (spec.run)(node_context.clone());
             tasks.spawn(async move { (spec.name, future.await) });
         }
         let (whistle, pulse) = watch::channel(None);
@@ -237,6 +262,7 @@ impl RobotStack {
             runtime,
             context,
             _node: node,
+            controller_context,
             tasks: Mutex::new(tasks),
             _overrides: overrides,
             parameters,
@@ -339,10 +365,14 @@ impl RobotStack {
         self.context.clock().now()
     }
 
+    pub fn advance_time(&self, period: std::time::Duration) -> Result<()> {
+        self.context.clock().advance(period)?;
+        Ok(())
+    }
+
     pub fn whistle(&self) {
-        self.whistle.send_replace(Some(
-            std::time::Instant::now() + crate::whistle::PULSE_DURATION,
-        ));
+        self.whistle
+            .send_replace(Some(self.now() + crate::whistle::PULSE_DURATION));
     }
 
     pub fn ready(&self) -> bool {
@@ -367,6 +397,11 @@ impl Drop for RobotStack {
         tasks.abort_all();
         self.runtime
             .block_on(async { while tasks.join_next().await.is_some() {} });
+        if let Some(context) = &self.controller_context
+            && let Err(error) = context.shutdown()
+        {
+            log::error!("Simulator gamepad shutdown: {error:#}");
+        }
         if let Err(error) = self.context.shutdown() {
             log::error!("Simulator shutdown: {error:#}");
         }
