@@ -1,0 +1,200 @@
+pub const RENDER_STATE_ID: &str = "twix_render_state";
+
+#[cfg(feature = "simulator")]
+pub use enabled::SimulatorPanel;
+
+#[cfg(feature = "simulator")]
+mod enabled {
+    use super::RENDER_STATE_ID;
+    use std::{path::PathBuf, sync::mpsc};
+
+    use eframe::{
+        egui::{self, Ui},
+        egui_wgpu::RenderState,
+    };
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+    use simulate::{Configuration, PreparedSimulator, Simulator};
+    use tokio_util::task::AbortOnDropHandle;
+
+    use crate::panel::{Panel, PanelCreationContext, PanelUiContext};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(default)]
+    struct Settings {
+        parameter_root: PathBuf,
+        model_directory: PathBuf,
+        namespace: String,
+    }
+    impl Default for Settings {
+        fn default() -> Self {
+            Self {
+                parameter_root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../etc/parameters"),
+                model_directory: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../etc/neural_networks"),
+                namespace: "/simulator/robot".into(),
+            }
+        }
+    }
+
+    pub struct SimulatorPanel {
+        settings: Settings,
+        simulator: Option<Simulator>,
+        pending: Option<mpsc::Receiver<Result<PreparedSimulator, String>>>,
+        task: Option<AbortOnDropHandle<()>>,
+        error: Option<String>,
+    }
+
+    impl Panel for SimulatorPanel {
+        const STORAGE_ID: &'static str = "motion_simulator";
+        const DISPLAY_NAME: &'static str = "Motion simulator";
+        const ICON: &'static str = egui_material_icons::icons::ICON_SPORTS_SOCCER.codepoint;
+
+        fn new(context: PanelCreationContext<'_>) -> Self {
+            Self {
+                settings: context
+                    .value
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_default(),
+                simulator: None,
+                pending: None,
+                task: None,
+                error: None,
+            }
+        }
+
+        fn toggle_pause(&mut self) {
+            if let Some(simulator) = &mut self.simulator {
+                simulator.toggle_pause();
+            }
+        }
+
+        fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
+            if context.backend.transport_scope() != Some(simulate::ZENOH_NAMESPACE) {
+                ui.label("Launch ./twix --simulator to use the simulator's isolated transport.");
+                return;
+            }
+            if let Some(pending) = &self.pending {
+                let result = match pending.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("Simulator startup stopped unexpectedly".into()))
+                    }
+                };
+                if let Some(result) = result {
+                    self.pending = None;
+                    self.task = None;
+                    match result {
+                        Ok(prepared) => {
+                            let renderer = ui.ctx().data(|data| {
+                                data.get_temp::<RenderState>(egui::Id::new(RENDER_STATE_ID))
+                            });
+                            if let Some(renderer) = renderer {
+                                self.simulator = Some(Simulator::new(prepared, renderer));
+                            } else {
+                                self.error =
+                                    Some("The simulator requires Twix's wgpu renderer.".into());
+                            }
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            }
+            if let Some(simulator) = &mut self.simulator {
+                let mut stop = false;
+                ui.horizontal(|ui| {
+                    stop = ui.button("Stop simulator").clicked();
+                    if ui.button("Inspect this robot in Twix").clicked()
+                        && let Err(error) = context
+                            .backend
+                            .set_namespace(self.settings.namespace.clone())
+                    {
+                        self.error = Some(format!("{error:#}"));
+                    }
+                    ui.label(&self.settings.namespace);
+                });
+                simulator.ui(ui);
+                if stop {
+                    self.simulator = None;
+                }
+                return;
+            }
+            ui.label("Run one simulated K1 with the real behavior, motion, and HSL message nodes.");
+            ui.label(
+                "Start the HSL Game Controller separately. Its UDP messages drive game state.",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Namespace");
+                ui.text_edit_singleline(&mut self.settings.namespace);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Robotics parameters");
+                let mut path = self.settings.parameter_root.to_string_lossy().into_owned();
+                if ui.text_edit_singleline(&mut path).changed() {
+                    self.settings.parameter_root = path.into();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Motion models");
+                let mut path = self.settings.model_directory.to_string_lossy().into_owned();
+                if ui.text_edit_singleline(&mut path).changed() {
+                    self.settings.model_directory = path.into();
+                }
+            });
+            if let Some(error) = &self.error {
+                ui.colored_label(egui::Color32::RED, error);
+            }
+            if self.pending.is_some() {
+                ui.spinner();
+                ui.label("Starting simulator…");
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
+            } else if ui.button("Start simulator").clicked() {
+                self.error = None;
+                let configuration = Configuration {
+                    parameter_root: self.settings.parameter_root.clone(),
+                    model_directory: self.settings.model_directory.clone(),
+                    namespace: self.settings.namespace.clone(),
+                    router: context.backend.router().map(str::to_owned),
+                };
+                let runtime = context.backend.runtime_handle().clone();
+                let (sender, receiver) = mpsc::channel();
+                self.pending = Some(receiver);
+                let repaint = ui.ctx().clone();
+                self.task = Some(AbortOnDropHandle::new(runtime.clone().spawn_blocking(
+                    move || {
+                        let result = runtime
+                            .block_on(PreparedSimulator::new(runtime.clone(), configuration))
+                            .map_err(|error| format!("{error:#}"));
+                        let _ = sender.send(result);
+                        repaint.request_repaint();
+                    },
+                )));
+            }
+        }
+
+        fn save(&self) -> Value {
+            serde_json::to_value(&self.settings).unwrap()
+        }
+    }
+}
+#[cfg(not(feature = "simulator"))]
+pub struct SimulatorPanel(serde_json::Value);
+
+#[cfg(not(feature = "simulator"))]
+impl crate::panel::Panel for SimulatorPanel {
+    const STORAGE_ID: &'static str = "motion_simulator";
+    const DISPLAY_NAME: &'static str = "Motion simulator";
+    const ICON: &'static str = egui_material_icons::icons::ICON_SPORTS_SOCCER.codepoint;
+    fn new(context: crate::panel::PanelCreationContext<'_>) -> Self {
+        Self(context.value.cloned().unwrap_or_default())
+    }
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _: crate::panel::PanelUiContext<'_>) {
+        ui.label("Launch ./twix --simulator to enable the motion simulator.");
+    }
+    fn save(&self) -> serde_json::Value {
+        self.0.clone()
+    }
+}

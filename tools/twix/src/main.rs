@@ -21,7 +21,7 @@ use layout::{FocusDirection, TwixLayout};
 use log::{error, warn};
 use panels::{
     AudioPanel, BehaviorTreePanel, ImagePanel, Map3DPanel, MapPanel, ParameterPanel, PlotPanel,
-    TextPanel, TimelinePanel,
+    SimulatorPanel, TextPanel, TimelinePanel,
 };
 use repository::{Repository, inspect_version::check_for_update};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -51,7 +51,8 @@ impl_selectable_panel!(
     AudioPanel,
     PlotPanel,
     BehaviorTreePanel,
-    TimelinePanel
+    TimelinePanel,
+    SimulatorPanel
 );
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -62,6 +63,10 @@ struct Arguments {
     /// Router endpoint passed to ROS-Z, for example tcp/127.0.0.1:7447.
     #[arg(long)]
     router: Option<String>,
+
+    /// Global Zenoh key prefix, including discovery and raw SDK traffic.
+    #[arg(long)]
+    zenoh_namespace: Option<String>,
 
     /// Alternative repository root for local Twix version checks.
     #[arg(long)]
@@ -88,11 +93,22 @@ impl TwixApp {
         backend: Arc<RobotBackend>,
         configuration: Configuration,
     ) -> Self {
+        if let Some(renderer) = &creation_context.wgpu_render_state {
+            creation_context.egui_ctx.data_mut(|data| {
+                data.insert_temp(
+                    eframe::egui::Id::new(panels::simulator::RENDER_STATE_ID),
+                    renderer.clone(),
+                )
+            });
+        }
         let namespace_editor = backend.namespace();
         if let Some(render_state) = &creation_context.wgpu_render_state {
             creation_context.egui_ctx.data_mut(|data| {
                 data.insert_temp(eframe::egui::Id::new("render_state"), render_state.clone());
             });
+        }
+        if let Some(scope) = backend.transport_scope() {
+            log::info!("Zenoh transport namespace: {scope}");
         }
 
         let layout = TwixLayout::load(
@@ -133,6 +149,9 @@ impl App for TwixApp {
         EguiPanel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    if !ui.memory(|memory| memory.focused().is_some()) {
+                        self.namespace_editor = self.backend.namespace();
+                    }
                     ui.label("Namespace:");
                     let namespace_response = ui.text_edit_singleline(&mut self.namespace_editor);
                     if shortcuts_enabled && context.keybind_pressed(KeybindAction::FocusNamespace) {
@@ -285,10 +304,16 @@ fn main() -> eframe::Result<()> {
 
     run_native(
         "Twix",
-        NativeOptions {
-            renderer: Renderer::Wgpu,
-            wgpu_options,
-            ..Default::default()
+        {
+            #[allow(unused_mut)]
+            let mut options = NativeOptions {
+                renderer: Renderer::Wgpu,
+                wgpu_options,
+                ..Default::default()
+            };
+            #[cfg(feature = "simulator")]
+            simulate::configure_renderer(&mut options);
+            options
         },
         Box::new(move |creation_context| {
             egui_extras::install_image_loaders(&creation_context.egui_ctx);
@@ -298,10 +323,11 @@ fn main() -> eframe::Result<()> {
                 .clone()
                 .or_else(|| creation_context.storage?.get_string("namespace"))
                 .unwrap_or_else(|| "/".to_string());
-            let backend = runtime.block_on(RobotBackend::new(
+            let backend = runtime.block_on(RobotBackend::new_scoped(
                 runtime_handle.clone(),
                 arguments.router.clone(),
                 namespace,
+                arguments.zenoh_namespace.clone(),
             ))?;
             Ok(Box::new(TwixApp::create(
                 creation_context,

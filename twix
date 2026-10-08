@@ -1,5 +1,15 @@
 #!/usr/bin/env -S bash -e
 
-THIS_DIRECTORY="$(dirname $(readlink -f $0))"
+THIS_DIRECTORY="$(dirname "$(readlink -f "$0")")"
 
-cargo run --manifest-path="${THIS_DIRECTORY}/tools/twix/Cargo.toml" -- "$@"
+features=()
+transport=()
+if [[ "${1:-}" == "--simulator" ]]; then
+  shift
+  features=(--features simulator)
+  transport=(--zenoh-namespace hulk_simulator)
+  export MUJOCO_DOWNLOAD_DIR="${MUJOCO_DOWNLOAD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/mujoco-rs}"
+  export LD_LIBRARY_PATH="$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+cargo run --manifest-path="${THIS_DIRECTORY}/tools/twix/Cargo.toml" "${features[@]}" -- "${transport[@]}" "$@"
