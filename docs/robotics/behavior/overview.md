@@ -108,9 +108,10 @@ time_left = remaining_time_in_half + (half_duration if first_half else 0)
 interval_seconds = time_left_seconds * unpenalized_players / usable_messages
 ```
 
+Behavior publishes the current calculated interval on `hsl_state_message_send_interval` when game state is available.
+The search suggestor uses the retained value for teammate freshness.
 Received teammate states provide the poses used for closest-to-ball selection and supporter positioning.
 Team communication can be absent or delayed, so the tree retains branches for simple operation, the last active robot, and missing ball information.
-
 ## Motion Output
 
 Behavior actions choose body and head motion independently.

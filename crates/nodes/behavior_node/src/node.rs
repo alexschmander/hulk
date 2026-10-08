@@ -1,5 +1,6 @@
 use std::{
     net::SocketAddr,
+    num::NonZeroUsize,
     pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -10,8 +11,13 @@ use types::fall_detection::FallDetection;
 
 use coordinate_systems::{Field, Ground};
 use hsl_network_messages::PlayerNumber;
+use kinematics::joints::head::HeadJoints;
 use linear_algebra::{Isometry2, Point2, Pose2, Vector2};
-use ros_z::{prelude::*, qos::QosDurability, time::Time};
+use ros_z::{
+    prelude::*,
+    qos::{QosDurability, QosHistory},
+    time::Time,
+};
 use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;
 use tracing::info;
@@ -32,7 +38,7 @@ use types::{
     rule_obstacles::RuleObstacle,
     time_wrapper::TimeWrapper,
     walking_velocity_limits::{WALKING_VELOCITY_LIMITS_TOPIC, WalkingVelocityLimits},
-    world_state::{BallState, PlayerState, RobotState, WorldState},
+    world_state::{BallSource, BallState, PlayerState, RobotState, WorldState},
 };
 use voronoi::VoronoiGrid;
 
@@ -44,12 +50,14 @@ pub struct LastBall {
     pub velocity: Vector2<Field>,
     pub age: Time,
     pub field_side: Side,
+    pub source: BallSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Message)]
 pub struct Blackboard {
     pub field_dimensions: FieldDimensions,
     pub player_number: PlayerNumber,
+    pub head_yaw: f32,
     pub parameters: BehaviorParameters,
     pub walking_velocity_limits: WalkingVelocityLimits,
     pub world_state: WorldState,
@@ -86,6 +94,13 @@ pub struct Blackboard {
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(run(ctx))
+}
+
+pub fn ball_timeout(parameters: &BehaviorParameters, source: BallSource) -> Duration {
+    match source {
+        BallSource::Own => parameters.ball.last_ball_timeout,
+        BallSource::Team => parameters.ball.team_ball_timeout,
+    }
 }
 
 fn validate_behavior_parameters(
@@ -214,6 +229,11 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .cache(1)
         .build()
         .await?;
+    let head_joints_command_cache = node
+        .subscriber::<HeadJoints<f32>>("head_joints_command")
+        .cache(1)
+        .build()
+        .await?;
     let hypothetical_ball_positions_cache = node
         .subscriber::<Vec<HypotheticalBallPosition<Ground>>>("hypothetical_ball_positions")
         .cache(1)
@@ -249,7 +269,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await?;
     let suggested_search_position_cache = node
-        .subscriber::<Point2<Field>>("suggested_search_position")
+        .subscriber::<Option<Point2<Field>>>("suggested_search_position")
         .cache(1)
         .build()
         .await?;
@@ -271,6 +291,15 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .await?;
     let outgoing_message_pub = node
         .publisher::<OutgoingMessage>("outputs/message")
+        .build()
+        .await?;
+    let hsl_state_message_send_interval_pub = node
+        .publisher::<Duration>("hsl_state_message_send_interval")
+        .qos(QosProfile {
+            durability: QosDurability::TransientLocal,
+            history: QosHistory::KeepLast(NonZeroUsize::MIN),
+            ..Default::default()
+        })
         .build()
         .await?;
     let motion_command_pub = node
@@ -298,6 +327,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let mut blackboard = Blackboard {
         field_dimensions,
         player_number,
+        head_yaw: 0.0,
         parameters: parameters.snapshot().typed().clone(),
         walking_velocity_limits: walking_velocity_limits_cache
             .get_latest()
@@ -334,6 +364,8 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         voronoi_map: None,
     };
 
+    let mut published_state_message_send_interval = None;
+
     loop {
         timer.tick().await;
 
@@ -356,11 +388,22 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         if let Some(player_number) = player_number_cache.get_latest() {
             blackboard.player_number = *player_number;
         }
+        blackboard.head_yaw = head_joints_command_cache
+            .get_latest()
+            .map(|head_joints| head_joints.yaw)
+            .unwrap_or_default();
         blackboard.parameters = parameters.snapshot().typed().clone();
         if let Some(limits) = walking_velocity_limits_cache.get_latest()
             && limits.validate().is_ok()
         {
             blackboard.walking_velocity_limits = *limits;
+        }
+        let state_message_send_interval = filtered_game_controller_state_cache.get_latest()
+            .and_then(|state| super::send_message::state_message_send_interval(&state, &blackboard.parameters.network));
+        if let Some(interval) = state_message_send_interval
+            && Some(interval) != published_state_message_send_interval {
+            hsl_state_message_send_interval_pub.publish(&interval).await?;
+            published_state_message_send_interval = Some(interval);
         }
 
         let was_start_pressed = blackboard
@@ -435,7 +478,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             .unwrap_or_default();
         blackboard.world_state.suggested_search_position = suggested_search_position_cache
             .get_latest()
-            .map(|position| *position);
+            .and_then(|position| *position);
 
         if let (Some(ball), Some(ground_to_field)) = (
             blackboard.world_state.ball,
@@ -446,11 +489,12 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 velocity: ground_to_field * ball.ball_in_ground_velocity,
                 age: blackboard.world_state.now,
                 field_side: ball.field_side,
+                source: ball.source,
             });
             blackboard.last_ball.clone_from(&blackboard.ball);
         } else if let Some(last_ball) = &blackboard.ball
             && blackboard.world_state.now.duration_since(last_ball.age)
-                >= blackboard.parameters.ball.last_ball_timeout
+                >= ball_timeout(&blackboard.parameters, last_ball.source)
         {
             blackboard.ball = None;
         }
