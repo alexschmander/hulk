@@ -191,16 +191,27 @@ impl Simulator {
                     );
                 });
             }
-            if self.physics.ready() {
-                let io = world.resource::<robotics::Robotics>();
-                if let Some(state) = io.primary.get_latest() {
-                    ui.label(format!("{state:?}"));
-                }
-                ui.label(io.status());
-            } else {
+            let led = world.resource::<robotics::Robotics>().led_color();
+            ui.label("LED");
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(28.0, 16.0), egui::Sense::hover());
+            let color = led.map_or(ui.visuals().faint_bg_color, |color| {
+                egui::Color32::from_rgb(color.r, color.g, color.b)
+            });
+            ui.painter().rect_filled(rect, 2.0, color);
+            ui.painter().rect_stroke(
+                rect,
+                2.0,
+                ui.visuals().widgets.noninteractive.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+            response.on_hover_text(led.map_or_else(
+                || "LED: no active command".to_owned(),
+                |color| format!("LED: RGB ({}, {}, {})", color.r, color.g, color.b),
+            ));
+            if !self.physics.ready() {
                 ui.spinner();
                 ui.label("Initializing robot…");
-                ui.label(world.resource::<robotics::Robotics>().status());
             }
         });
         if let Some(error) = &self.error {
