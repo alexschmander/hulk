@@ -6,6 +6,9 @@ The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did. All simul
 wiring and hardware substitutes live under `tools/simulate`; robotics crates need no
 simulator integration code.
 
+The [profile implementation plan](PROFILES.md) specifies four proposed levels of
+robotics coverage. Those profiles are planned work, not current functionality.
+
 ## Run
 
 Fetch Git LFS assets, including the K1 meshes and `etc/neural_networks/*.onnx`.
@@ -30,7 +33,9 @@ Open the **Simulator** preset or add a **Simulator** panel. Press **Start simula
 Twix selects the robot's namespace automatically. Only one simulator can run per
 Twix process. Restoring a saved layout does not start robotics or bind UDP sockets.
 
-The robot starts upright and paused in **Initial**. Startup uses the real button
+The robot starts upright and paused in **Initial**, at localization's expected
+sideline placement: field coordinates `(-length/2, -width/2)`, facing `+90°` into
+the field. Reset pose returns it to that placement. Startup uses the real button
 bridge, handler and safe-pose check to pass through Prepare to Initial. Press **Run**
 to advance physics. If GameController is already running, its game state takes over.
 
