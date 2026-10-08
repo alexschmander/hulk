@@ -156,8 +156,10 @@ impl RobotBinding {
     }
 
     pub fn reset_joints(&self, data: &mut Data) {
-        for &(q, v, actuator) in &self.joints {
-            data.qpos_mut()[q] = data.model().qpos0()[q];
+        for (&(q, v, actuator), position) in
+            self.joints.iter().zip(crate::simulated_sdk::PREPARE_POSE)
+        {
+            data.qpos_mut()[q] = f64::from(position);
             data.qvel_mut()[v] = 0.0;
             data.ctrl_mut()[actuator] = 0.0;
         }

@@ -118,6 +118,14 @@ struct ObjectBinding {
 #[derive(Resource, Clone, Default)]
 pub struct SharedPhysics(Arc<Mutex<MujocoWorld>>);
 impl SharedPhysics {
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, MujocoWorld>> {
+        match self.0.try_lock() {
+            Ok(world) => Some(world),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(error) => panic!("physics mutex poisoned: {error}"),
+        }
+    }
+
     pub fn lock(&self) -> MutexGuard<'_, MujocoWorld> {
         self.0.lock().unwrap()
     }
@@ -259,7 +267,6 @@ impl MujocoWorld {
         Ok(())
     }
 
-    #[cfg(test)]
     pub fn object_pose(&self, entity: Entity) -> Option<Transform> {
         let binding = self.objects.get(&entity)?;
         self.body_pose(&binding.root_body)
@@ -269,7 +276,11 @@ impl MujocoWorld {
         self.objects.contains_key(&entity)
     }
 
-    fn ground_object(&mut self, entity: Entity, mut transform: Transform) -> Result<(), String> {
+    pub fn ground_object(
+        &mut self,
+        entity: Entity,
+        mut transform: Transform,
+    ) -> Result<(), String> {
         self.set_object_pose(entity, transform)?;
         let minimum_z = self
             .minimum_object_z(entity)

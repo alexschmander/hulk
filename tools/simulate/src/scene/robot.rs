@@ -1,7 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
 use bevy::{asset::RenderAssetUsages, mesh::PrimitiveTopology, prelude::*};
-use mujoco_rs::prelude::{MjData, MjSpec, MjtObj};
 
 use super::object::ObjectPart;
 use crate::bevy_mujoco::{MjcfObject, MujocoBody};
@@ -153,16 +152,10 @@ pub struct RobotAssets {
     black: Handle<StandardMaterial>,
     metal: Handle<StandardMaterial>,
     logo: Handle<StandardMaterial>,
-    ground_offset: f32,
 }
 
 impl FromWorld for RobotAssets {
     fn from_world(world: &mut World) -> Self {
-        let mut spec = MjSpec::from_xml(ROBOT_MJCF).expect("robot MJCF should parse");
-        let model = spec.compile().expect("robot MJCF should compile");
-        let mut data = MjData::new(Box::new(model));
-        data.forward();
-        let ground_offset = robot_ground_offset(&data);
         let meshes = LINKS
             .iter()
             .map(|link| {
@@ -203,7 +196,6 @@ impl FromWorld for RobotAssets {
                 1.0,
                 &mut materials,
             ),
-            ground_offset,
         }
     }
 }
@@ -216,10 +208,6 @@ impl RobotAssets {
             RobotMaterial::Metal => self.metal.clone(),
             RobotMaterial::Logo => self.logo.clone(),
         }
-    }
-
-    pub fn ground_offset(&self) -> f32 {
-        self.ground_offset
     }
 }
 
@@ -246,39 +234,6 @@ pub fn spawn(commands: &mut Commands, assets: &RobotAssets, transform: Transform
     }
 
     owner
-}
-
-fn robot_ground_offset(data: &MjData<Box<mujoco_rs::prelude::MjModel>>) -> f32 {
-    let model = data.model();
-    let root = model
-        .name_to_id(MjtObj::mjOBJ_BODY, "Trunk")
-        .expect("robot root should exist");
-    let minimum = model
-        .geom_bodyid()
-        .iter()
-        .enumerate()
-        .filter_map(|(geom, &body)| {
-            let mut body = usize::try_from(body).ok()?;
-            while body != root {
-                let parent = usize::try_from(model.body_parentid()[body]).ok()?;
-                if parent == body {
-                    return None;
-                }
-                body = parent;
-            }
-            let [cx, cy, cz, hx, hy, hz] = model.geom_aabb()[geom];
-            let [_, _, _, _, _, _, r20, r21, r22] = data.geom_xmat()[geom];
-            Some(
-                data.geom_xpos()[geom][2] + r20 * cx + r21 * cy + r22 * cz
-                    - r20.abs() * hx
-                    - r21.abs() * hy
-                    - r22.abs() * hz,
-            )
-        })
-        .reduce(f64::min)
-        .expect("robot should have geometry");
-    let root_z = data.body("Trunk").unwrap().view(data).xpos[2];
-    (root_z - minimum) as f32
 }
 
 fn load_binary_stl(path: &Path) -> Result<Mesh, String> {

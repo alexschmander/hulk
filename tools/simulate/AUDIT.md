@@ -13,10 +13,10 @@ subjects. The new panel creates one controlled robot and adds balls with a butto
 | Game state, penalties, field side | External HSL GameController over the real network pipeline |
 | Motion/actuator/behavior readouts | Twix Text, Plot and Behavior tree panels |
 | Robot and ball palette | One controlled robot; Add ball in the simulator |
-| Pause, reset and object placement | Simulator toolbar and Placement section |
+| Pause, reset and object placement | Simulator toolbar; ball dragging and robot translation/rotation gizmo |
 | Walk/kick arrows and camera | Simulator scene |
 | Reset robot and stack | Reset pose; Stop/Start for a new stack |
-| Physical stand-button presses | Simulator toolbar, through the real button topic |
+| Physical F1/Stand/Walk buttons | Simulator toolbar, emitting raw `rt/button_event` through the unchanged bridge and handler |
 | Track first ball and fill kick ground truth | Removed convenience commands; not provided by Twix's parameter editor |
 
 The last row is the material capability Twix does not already duplicate. The old
@@ -34,8 +34,8 @@ The launcher scopes both Twix and the simulator to `hulk_simulator/` at the Zeno
 session level. The panel requires that scope before it can start.
 Closing the panel stops the worker and node tasks and releases their sockets. The
 simulator binds the same production message nodes as `hulk_ros_z`. There is no
-separate simulator game-state implementation and no robotics-crate delta beyond
-the explicitly requested upstream branch merges.
+separate simulator game-state implementation. The simulator invokes the production
+message and button nodes unchanged.
 
 This is sufficient to test the selected motion and message stack. It is not yet a
 full executable-level `hulk_ros_z` simulation. That binary also starts device

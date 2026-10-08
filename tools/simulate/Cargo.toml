@@ -8,8 +8,10 @@ homepage.workspace = true
 [dependencies]
 ball_state_composer = { workspace = true }
 behavior_node = { workspace = true }
-bevy = { workspace = true, features = ["3d_bevy_render", "png"] }
+bevy = { workspace = true, features = ["3d_bevy_render", "png", "mesh_picking"] }
 booster = { workspace = true }
+button_event_bridge = { workspace = true }
+button_event_handler = { workspace = true }
 cdr = { workspace = true }
 color-eyre = { workspace = true }
 coordinate_systems = { workspace = true }
