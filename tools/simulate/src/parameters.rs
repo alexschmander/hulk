@@ -10,6 +10,8 @@ use types::field_dimensions::FieldDimensions;
 #[serde(deny_unknown_fields)]
 pub struct SimulatorParameters {
     pub ball: BallParameters,
+    #[serde(default)]
+    pub observations: crate::observations::ObservationParameters,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ros_z::Message)]
@@ -30,6 +32,7 @@ pub struct BallParameters {
 impl SimulatorParameters {
     pub fn validate(parameters: &Self) -> Result<(), String> {
         parameters.ball.validate()?;
+        parameters.observations.validate()?;
 
         Ok(())
     }

@@ -8,7 +8,7 @@ use crate::{
     parameters::CurrentSimulatorParameters,
 };
 
-const GOAL_HEIGHT: f64 = 0.8;
+pub(crate) const GOAL_HEIGHT: f64 = 0.8;
 const SUPPORT_RADIUS: f64 = 0.01;
 const NET_RADIUS: f64 = 0.001;
 

@@ -275,6 +275,55 @@ mod tests {
                     .unwrap(),
             );
         }
+        // Identical ROS topic names and discovery also remain isolated by scope.
+        let node42 = contexts[0].create_node("scope_test").build().await.unwrap();
+        let node43 = contexts[1].create_node("scope_test").build().await.unwrap();
+        let sub42 = node42
+            .subscriber::<String>("same_topic")
+            .build()
+            .await
+            .unwrap();
+        let sub43 = node43
+            .subscriber::<String>("same_topic")
+            .build()
+            .await
+            .unwrap();
+        let pub42 = node42
+            .publisher::<String>("same_topic")
+            .build()
+            .await
+            .unwrap();
+        let pub43 = node43
+            .publisher::<String>("same_topic")
+            .build()
+            .await
+            .unwrap();
+        pub42.publish(&"robot 42".into()).await.unwrap();
+        pub43.publish(&"robot 43".into()).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), sub42.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "robot 42"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), sub43.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "robot 43"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), sub42.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), sub43.recv())
+                .await
+                .is_err()
+        );
         let (robot42, task42) = start(&Handle::current(), &contexts[0]).await.unwrap();
         let (robot43, task43) = start(&Handle::current(), &contexts[1]).await.unwrap();
         let global_replies = router
