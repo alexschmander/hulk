@@ -115,6 +115,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         "robot_to_ground",
         "ground_to_robot",
         "camera_matrix",
+        "camera_geometry",
         "inputs/odometry",
         "ground_to_field",
         "ball_filter/ball_position",
@@ -381,7 +382,7 @@ fn validate_filtering(
                 .build()
                 .await
                 .unwrap(),
-            node.subscriber::<linear_algebra::Point2<coordinate_systems::Field>>(
+            node.subscriber::<Option<linear_algebra::Point2<coordinate_systems::Field>>>(
                 "suggested_search_position",
             )
             .cache(1)
@@ -461,7 +462,10 @@ fn validate_filtering(
         "observation loss removed truth"
     );
     assert!(detected.get_latest().unwrap().inner.is_empty());
-    let target = search.get_latest().unwrap();
+    let target = search
+        .get_latest()
+        .expect("no search output")
+        .expect("no search target after ball loss");
     assert!(target.x().is_finite() && target.y().is_finite());
     assert!(
         target.x().abs() <= io.field_dimensions.length / 2.0
@@ -668,10 +672,9 @@ fn validate_body_state(runtime: &tokio::runtime::Runtime, io: &Robotics, physics
     eprintln!(
         "BodyStateOdometry: 3 s walking maximum odometry error {max_position_error:.4} m, yaw {max_yaw_error:.4} rad"
     );
-    // Detection hypotheses retain production's missing-delta identity fallback.
-    // Record their lag without claiming the mapped-post accuracy applies to them.
+    // Compare arrival-time output against truth; this includes processing delay.
     eprintln!(
-        "BodyStateOdometry: moving-observer goalpost maximum arrival-time discrepancy {max_obstacle_error:.4} m; missing odometry-delta input remains absent"
+        "BodyStateOdometry: moving-observer goalpost maximum arrival-time discrepancy {max_obstacle_error:.4} m; production filter uses absolute odometry"
     );
     let mut world = physics.lock();
     let robot = world.robot.unwrap();
@@ -727,13 +730,13 @@ fn validate_localization(
     physics: &SharedPhysics,
     require_acquisition: bool,
 ) {
-    use coordinate_systems::{Field, Ground, Robot};
-    use linear_algebra::{Isometry2, Isometry3};
+    use coordinate_systems::{Field, Ground};
+    use linear_algebra::Isometry2;
     use types::{time_wrapper::TimeWrapper, visual_localization::VisualLocalizationFrame};
     let (localized, pose, truth, associations, diagnostics) = runtime.block_on(async {
         let node = io.node();
         (
-            node.subscriber::<Option<Isometry3<Field, Robot>>>("localization")
+            node.subscriber::<types::localization::LocalizationEstimate>("localization/estimate")
                 .cache(10)
                 .build()
                 .await
@@ -749,31 +752,33 @@ fn validate_localization(
                 .await
                 .unwrap(),
             node.subscriber::<TimeWrapper<VisualLocalizationFrame>>(
-                types::visual_localization::VISUAL_LOCALIZATION_TOPIC,
+                "field_mark_association/visual_localization_local",
             )
             .cache(32)
             .build()
             .await
             .unwrap(),
-            node.subscriber::<TimeWrapper<localization_3d::SolveDiagnostics>>(
-                "debug/solve_diagnostics",
-            )
-            .cache(32)
-            .build()
-            .await
-            .unwrap(),
+            node.subscriber::<localization_3d::SolveDiagnostics>("debug/solve_diagnostics")
+                .cache(32)
+                .build()
+                .await
+                .unwrap(),
         )
     });
     if !require_acquisition {
         let start = Instant::now();
         while !diagnostics
             .get_latest()
-            .is_some_and(|d| d.inner.visual_odometry.factor_count > 0)
+            .is_some_and(|d| d.measurement_count > 0 && d.failure.is_none())
+            || associations.get_latest().is_none()
+            || localized.get_latest().is_none()
         {
             assert!(io.poll().is_none(), "{}", io.status());
             assert!(
                 start.elapsed() < Duration::from_secs(3),
-                "localizer did not ingest camera motion"
+                "localization outputs did not arrive: associations {:?}, diagnostics {:?}",
+                associations.get_latest(),
+                diagnostics.get_latest()
             );
             thread::sleep(Duration::from_millis(20));
         }
@@ -782,19 +787,25 @@ fn validate_localization(
             "association node did not emit frames"
         );
         assert!(io.ready());
-        if !localized.get_latest().is_some_and(|pose| pose.is_some()) {
+        if !localized
+            .get_latest()
+            .is_some_and(|pose| pose.robot_to_field.is_some())
+        {
             assert!(
                 io.status().contains("acquiring"),
                 "startup prior was presented as an acquired pose"
             );
         }
         eprintln!(
-            "Localization: raw sensors, body/filter outputs, association frames and VO ingestion live; acquisition/tracking checked separately because of the production lookup-budget limitation"
+            "Localization: raw sensors, body/filter outputs, association frames and VO ingestion live; acquisition/tracking checked separately"
         );
         return;
     }
     let start = Instant::now();
-    while !localized.get_latest().is_some_and(|pose| pose.is_some()) {
+    while !localized
+        .get_latest()
+        .is_some_and(|pose| pose.robot_to_field.is_some())
+    {
         assert!(io.poll().is_none(), "{}", io.status());
         assert!(
             start.elapsed() < Duration::from_secs(15),
@@ -913,50 +924,51 @@ fn validate_localization(
         .get_latest()
         .expect("localization solver did not emit diagnostics");
     assert!(
-        diagnostics.inner.visual_odometry.factor_count > 0,
-        "VO was not ingested"
+        diagnostics.measurement_count > 0,
+        "no measurements in localization solve"
     );
-    assert!(
-        diagnostics.inner.visual_reprojection.factor_count > 0,
-        "field marks were not ingested"
-    );
+    assert!(diagnostics.failure.is_none(), "{diagnostics:?}");
     eprintln!(
-        "Localization: 3 s walking/head tracking max error {max_error:.4} m, yaw {max_yaw_error:.4} rad; VO factors {}, reprojection factors {}",
-        diagnostics.inner.visual_odometry.factor_count,
-        diagnostics.inner.visual_reprojection.factor_count
+        "Localization: 3 s walking/head tracking max error {max_error:.4} m, yaw {max_yaw_error:.4} rad; measurements {}, solve {:?}",
+        diagnostics.measurement_count, diagnostics.duration
     );
 }
 
 #[test]
-#[ignore = "blocked by production field-association lookup budget; see PROFILES.md"]
 fn localization_startup_frame_acquires_with_production_parameters() {
     let captured: serde_json::Value =
         serde_json::from_str(include_str!("../tests/fixtures/localization_startup.json")).unwrap();
     let objects: Vec<types::object_detection::Object<types::object_detection::RobocupObjectLabel>> =
         serde_json::from_value(captured["objects"].clone()).unwrap();
-    let camera = serde_json::from_value(captured["camera"].clone()).unwrap();
+    let camera: projection::camera_matrix::CameraMatrix =
+        serde_json::from_value(captured["camera"].clone()).unwrap();
     let field = serde_json::from_value(captured["field"].clone()).unwrap();
-    let robot = serde_json::from_value(captured["robot"].clone()).unwrap();
     let params: field_mark_association::FieldMarkAssociationParameters = json5::from_str(
         include_str!("../../../etc/parameters/base/field_mark_association.json5"),
     )
     .unwrap();
     let features = field_mark_association::find_detected_visual_features(&objects);
-    let result = field_mark_association::localize_global_visual_features_detailed_debug(
-        &features,
-        &camera,
-        &field,
-        Some(robot),
-        &params.global_localizer,
+    let result = field_mark_association::associate_global_visual_features(
+        field_mark_association::GlobalAssociationInput {
+            visual_features: &features,
+            robot_to_ground: linear_algebra::Rotation3::wrap(
+                camera.ground_to_robot.inner.rotation.inverse(),
+            ),
+            robot_to_camera: camera.head_to_camera * camera.robot_to_head,
+            camera_intrinsic: camera.intrinsics,
+            field_dimensions: &field,
+            parameters: &params.global_localizer,
+            heading: None,
+        },
     );
     assert!(
-        result.is_some(),
+        result.associations.len() >= 3,
         "visible startup landmarks did not acquire localization"
     );
 }
 
 #[test]
-#[ignore = "production field-association lookup budget blocks default-spawn acquisition"]
+#[ignore = "requires ONNX Runtime, motion models, and free GameController UDP ports"]
 fn localization_acquisition_and_tracking() {
     validate_profile(crate::Profile::Localization, true);
 }

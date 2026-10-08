@@ -5498,7 +5498,7 @@ dependencies = [
  "log",
  "ros-z",
  "serde",
- "socket2 0.6.4",
+ "socket2 0.6.5",
  "thiserror 2.0.21",
  "tokio",
  "types",
@@ -7521,31 +7521,6 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
-]
-
-[[package]]
-name = "ndarray-conv"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61a04cd712622c289a7b523d3195e4fb5e2bf30c44de12355463fe58aa12213b"
-dependencies = [
- "ndarray 0.16.1",
- "ndarray-rand",
- "num",
- "realfft",
- "rustfft",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ndarray-rand"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f093b3db6fd194718dcdeea6bd8c829417deae904e3fcc7732dabcd4416d25d8"
-dependencies = [
- "ndarray 0.16.1",
- "rand 0.8.8",
- "rand_distr 0.4.3",
 ]
 
 [[package]]
@@ -10788,7 +10763,7 @@ dependencies = [
  "player_states_receiver",
  "primary_state_filter",
  "projection",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rand_distr 0.5.1",
  "ros-z",
  "ros-z-streams",
@@ -13717,7 +13692,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
- "rustix 1.1.4",
+ "rustix 1.1.5",
 ]
 
 [[package]]
@@ -14616,7 +14591,7 @@ dependencies = [
  "arbitrary",
  "crc32fast",
  "flate2",
- "indexmap 2.14.0",
+ "indexmap 2.14.2",
  "memchr",
  "zopfli",
 ]
