@@ -132,7 +132,7 @@ async fn real_udp_game_controller_returns_penalties_and_team_messages() {
 }
 
 // Run through tests/hsl/roundtrip.sh: requires the real upstream runtime in another
-// network namespace because both applications own the team's UDP port.
+// network namespace shared by both applications.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires upstream HSL GameController; run tools/simulate/tests/hsl/roundtrip.sh"]
 async fn upstream_hsl_game_controller_roundtrip() {

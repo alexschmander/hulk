@@ -5498,6 +5498,7 @@ dependencies = [
  "log",
  "ros-z",
  "serde",
+ "socket2 0.6.4",
  "thiserror 2.0.21",
  "tokio",
  "types",
