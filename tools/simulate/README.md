@@ -1,6 +1,6 @@
-# Motion simulator in Twix
+# Simulator in Twix
 
-The Motion simulator panel runs one K1 with the real motion, inference, fall detection,
+The Simulator panel runs one K1 with the real motion, inference, fall detection,
 behavior and HSL message nodes. MuJoCo supplies physics and simulated sensor inputs.
 The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did. All simulator
 wiring and hardware substitutes live under `tools/simulate`; robotics crates need no
@@ -26,28 +26,45 @@ Twix builds keep their existing dependencies. With Cargo directly, enable
 library path yourself.
 The current Nix Twix package builds ordinary Twix; it does not bundle the simulator.
 
-Open the **Motion simulator** preset or add a **Motion simulator** panel. Press
-**Start simulator**, then **Inspect this robot in Twix** to select its namespace in
-other panels. Only one simulator can run per Twix process. Restoring a saved layout
-does not start robotics or bind UDP sockets until you press Start.
+Open the **Simulator** preset or add a **Simulator** panel. Press **Start simulator**.
+Twix selects the robot's namespace automatically. Only one simulator can run per
+Twix process. Restoring a saved layout does not start robotics or bind UDP sockets.
 
-The simulation starts paused. Press **Stand: prepare**, then **Run**. Once the robot
-settles in the preparation pose, **Stand: enable** follows the real safe-pose and
-motion state machines. Motion overrides are edited in the existing Parameter panel:
-select `/simulator/robot/behavior_node`, path `control.injected_motion_command`.
-Set it to `null` to let behavior choose motion. The preset opens this parameter;
-press **Refresh** once the simulator has started. Overrides still pass through the
-real motion safety state machine, so use the stand buttons to prepare and enable.
+The robot starts upright and paused in **Initial**. Startup uses the real button
+bridge, handler and safe-pose check to pass through Prepare to Initial. Press **Run**
+to advance physics. If GameController is already running, its game state takes over.
 
-**Add ball** places a ball at the configured x/y position. **Placement** contains
-ball position, removal, and paused robot placement. Robot x/y use field coordinates;
-z is height above its grounded spawn pose. Roll, pitch and yaw are degrees.
-Reset pose pauses and repositions the robot. Stop and Start rebuild the node stack
-and clear a latched emergency stop. Drag to orbit, right-drag to pan, scroll to zoom.
+**F1**, **Stand** and **Walk** emit CDR `ButtonEventMsg` packets on `rt/button_event`
+within the simulator's global Zenoh scope. The unchanged `button_event_bridge` and
+`button_event_handler` process them. Tap F1 for Damping, tap Stand for Prepare;
+hold Stand for one second and release to enter Initial once the pose is safe.
+Hold Walk and release to enter Playing from Initial. The one-second hold threshold
+is a simulator convention. Short presses emit PressDown/PressUp/SingleClick; long
+presses emit PressDown/LongPressStart/LongPressHold/LongPressEnd/PressUp.
+The simulator implements passive damping and a two-second Prepare joint trajectory
+behind the existing Booster mode RPC, including requests from hardware_interface.
+These are approximations of the manufacturer's controller, not firmware emulation.
+See the [K1 body controls](https://docs.booster.tech/docs/product-manual/k1/basic-operations/body-operations/).
+HULK's long-press actions differ from Booster's default firmware WALK action.
+
+Motion overrides use the Parameter panel: select `/simulator/robot/behavior_node`,
+path `control.injected_motion_command`. Set it to `null` to let behavior choose motion.
+The preset opens this parameter; press **Refresh** once the simulator has started.
+
+**M** or **Fly camera** captures/releases the mouse; **Esc** releases it.
+While captured, use W/A/S/D to move, Q/E for down/up, and Shift for faster movement.
+**Add ball** places a ball one meter from the origin. Select and drag it on the
+horizontal plane, or press **Delete** while pointing inside the scene to remove it.
+Select the robot to show translation arrows and rotation rings. Dragging pauses
+physics and restores its previous running state on release. Reset pose pauses and
+returns the robot to its standing spawn pose. Stop and Start rebuild the node stack
+and clear a latched emergency stop.
 Blue arrows show commanded translation, green shows yaw rate, amber shows kicks.
 
 The physics worker publishes sensors independently of the visible panel and repaint
-rate. Pausing freezes physics while publishing stationary observations; the real
+rate. Scene recompilation freezes physics while the worker keeps publishing the
+last scene snapshot, so adding or deleting a ball does not interrupt sensor delivery.
+Pausing freezes physics while publishing stationary observations; the real
 nodes, network and wall clock continue running. This is not deterministic stepped
 robotics time. Neural policies and contacts still need validation against hardware.
 
@@ -101,6 +118,8 @@ export MUJOCO_DOWNLOAD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mujoco-rs"
 export LD_LIBRARY_PATH="$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 cargo test -p simulate --lib
 cargo test -p twix --features simulator --bin twix
+# With ONNX Runtime/models available and no simulator using the GameController ports:
+cargo test -p simulate startup_reaches_initial_and_scene_edits_keep_sensors_live -- --ignored
 
 git clone https://github.com/RoboCup-HumanoidSoccerLeague/GameController /tmp/hsl-game-controller
 tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
@@ -117,7 +136,10 @@ itself is not driven. Tested against upstream commit
 
 The ordinary unit suite also checks UDP team-message reception, SDK request/reply
 isolation for global Zenoh prefixes `42` and `43`, physics model recompilation,
-sensor transforms, command vectors and fall-detection poses.
+sensor transforms, command vectors, fall-detection poses, gizmo geometry, and raw
+body-button delivery through the real bridge, handler and primary-state filter.
+The optional startup test runs the full simulator node stack and verifies that
+sensor publication continues across a 300 ms scene-edit lock.
 
 On the tested Linux environment, dynamically loading ONNX Runtime 1.22.1 caused
 an exit-time crash in its global environment destructor. Preloading the same library
