@@ -10733,6 +10733,7 @@ dependencies = [
  "coordinate_systems",
  "eframe",
  "egui_bevy",
+ "egui_material_icons",
  "fall_detection",
  "field_mark_association",
  "game_controller_filter",

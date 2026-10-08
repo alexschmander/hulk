@@ -36,6 +36,8 @@ impl BodyButtons {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, io: &Robotics) -> Result<()> {
+        let mut rects = [egui::Rect::NOTHING; 3];
+        ui.spacing_mut().item_spacing.x = 2.0;
         for (button, label, help) in [
             (0, "F1", "Tap to enter Damping"),
             (
@@ -49,7 +51,10 @@ impl BodyButtons {
                 "Hold 1 second and release to enter Playing from Initial",
             ),
         ] {
-            let response = ui.button(label).on_hover_text(help);
+            let response = ui
+                .add(egui::Button::new(label).min_size(egui::vec2(36.0, 0.0)))
+                .on_hover_text(help);
+            rects[button as usize] = response.rect;
             if self.held.is_none() {
                 if response.is_pointer_button_down_on() {
                     io.button_event(button, ButtonEventType::PressDown)?;
@@ -59,12 +64,28 @@ impl BodyButtons {
                 }
             }
         }
+        ui.spacing_mut().item_spacing.x = ui.style().spacing.item_spacing.x;
         if let Some((button, started, long)) = &mut self.held {
             if !*long && started.elapsed() >= HOLD {
                 io.button_event(*button, ButtonEventType::LongPressStart)?;
                 io.button_event(*button, ButtonEventType::LongPressHold)?;
                 *long = true;
             }
+            // Fills while the press counts toward the long-press threshold.
+            let rect = rects[*button as usize].shrink2(egui::vec2(3.0, 2.0));
+            let progress = (started.elapsed().as_secs_f32() / HOLD.as_secs_f32()).min(1.0);
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - 2.0),
+                egui::pos2(rect.left() + rect.width() * progress, rect.bottom()),
+            );
+            let visuals = ui.visuals();
+            let color = if *long {
+                visuals.selection.stroke.color
+            } else {
+                visuals.selection.bg_fill
+            };
+            ui.painter().rect_filled(bar, 1.0, color);
+            ui.ctx().request_repaint();
             if ui.input(|input| !input.pointer.primary_down() || !input.focused) {
                 release(io, *button, *long)?;
                 self.held = None;
