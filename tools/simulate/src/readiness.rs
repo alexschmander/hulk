@@ -1,7 +1,7 @@
 //! Startup is driven by outputs from the selected pipeline, after physics starts.
 use crate::profiles::Profile;
 use color_eyre::Result;
-use coordinate_systems::{Field, Ground, Odometry, Robot};
+use coordinate_systems::{Ground, Odometry, Robot};
 use linear_algebra::{Isometry3, Pose2};
 use ros_z::{Message, prelude::*, time::Time};
 use std::time::Duration;
@@ -88,15 +88,17 @@ impl Readiness {
             required.push(
                 Probe::new::<TimeWrapper<types::visual_localization::VisualLocalizationFrame>>(
                     node,
-                    types::visual_localization::VISUAL_LOCALIZATION_TOPIC,
+                    "field_mark_association/visual_localization_local",
                     |_| true,
                 )
                 .await?,
             );
             Some(
-                Probe::new::<Option<Isometry3<Field, Robot>>>(node, "localization", |pose| {
-                    pose.is_some()
-                })
+                Probe::new::<types::localization::LocalizationEstimate>(
+                    node,
+                    "localization/estimate",
+                    |estimate| estimate.robot_to_field.is_some(),
+                )
                 .await?,
             )
         } else {
