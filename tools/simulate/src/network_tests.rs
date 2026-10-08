@@ -4,6 +4,16 @@ use std::{net::UdpSocket as StdSocket, time::Duration};
 use tokio::net::UdpSocket;
 use types::{filtered_game_state::FilteredGameState, players::Players, world_state::PlayerState};
 
+fn drive_clock(context: &Context) -> tokio::task::JoinHandle<()> {
+    let clock = context.clock().clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            clock.advance(Duration::from_millis(10)).unwrap();
+        }
+    })
+}
+
 fn reserve_port() -> StdSocket {
     StdSocket::bind("127.0.0.1:0").unwrap()
 }
@@ -44,6 +54,9 @@ async fn real_udp_game_controller_returns_penalties_and_team_messages() {
     // A private peer prevents this test from discovering another running robot.
     let context = Arc::new(
         ContextBuilder::default()
+            .with_clock(ros_z::time::Clock::logical(
+                ros_z::time::Clock::wallclock().now(),
+            ))
             .with_namespace("/network_test")
             .with_parameter_layers([
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../etc/parameters/base"),
@@ -56,7 +69,16 @@ async fn real_udp_game_controller_returns_penalties_and_team_messages() {
             .await
             .unwrap(),
     );
+    let clock_driver = drive_clock(&context);
     let node = context.create_node("observer").build().await.unwrap();
+    let raw_game = node
+        .subscriber::<Option<types::game_controller_state::GameControllerState>>(
+            "game_controller_state",
+        )
+        .cache(1)
+        .build()
+        .await
+        .unwrap();
     let game = node
         .subscriber::<FilteredGameControllerState>("filtered_game_controller_state")
         .build()
@@ -122,6 +144,32 @@ async fn real_udp_game_controller_returns_penalties_and_team_messages() {
     })
     .await
     .expect("real network pipeline should receive UDP and send a GC return packet");
+    clock_driver.abort();
+    let _ = clock_driver.await;
+    let frozen = context.clock().now();
+    // Real UDP reception continues while the robotics clock is stopped.
+    // Match time belongs to the external controller, not the local clock.
+    for remaining in [599i16, 598] {
+        let mut packet = game_packet(3, false);
+        packet[14..16].copy_from_slice(&remaining.to_le_bytes());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                sender.send_to(&packet, gc_address).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                if raw_game.get_latest().is_some_and(|value| {
+                    value.as_ref().as_ref().is_some_and(|game| {
+                        game.remaining_time_in_half == Duration::from_secs(remaining as u64)
+                    })
+                }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(context.clock().now(), frozen);
+        assert_eq!(raw_game.latest_stamp(), Some(frozen));
+    }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     context.shutdown().unwrap();
@@ -144,6 +192,9 @@ async fn upstream_hsl_game_controller_roundtrip() {
     .unwrap();
     let context = Arc::new(
         ContextBuilder::default()
+            .with_clock(ros_z::time::Clock::logical(
+                ros_z::time::Clock::wallclock().now(),
+            ))
             .with_namespace("/hsl_roundtrip")
             .with_parameter_layers([
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../etc/parameters/base"),
@@ -156,6 +207,7 @@ async fn upstream_hsl_game_controller_roundtrip() {
             .await
             .unwrap(),
     );
+    let clock_driver = drive_clock(&context);
     let node = context.create_node("observer").build().await.unwrap();
     let game = node
         .subscriber::<FilteredGameControllerState>("filtered_game_controller_state")
@@ -198,15 +250,40 @@ async fn upstream_hsl_game_controller_roundtrip() {
             let state = game.recv().await.unwrap();
             if state.game_state == FilteredGameState::Set { eprintln!("Received upstream Set; injecting whistle"); break; }
         }
-        pulse.send_replace(Some(std::time::Instant::now()+crate::whistle::PULSE_DURATION));
+        pulse.send_replace(Some(context.clock().now()+crate::whistle::PULSE_DURATION));
         loop {
             let state = game.recv().await.unwrap();
             if matches!(state.game_state, FilteredGameState::Playing {..}) { break; }
         }
         assert!(raw_game.get_latest().is_some_and(|game| game.as_ref().as_ref().is_some_and(|game| game.game_state == hsl_network_messages::GameState::Set)));
         std::fs::write(exchange.join("whistle_in_set"), b"observed").unwrap();
-        // Let the upstream controller check that returns remain live after removal.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // The upstream driver now calls Playing and keeps its match clock running.
+        while !raw_game.get_latest().is_some_and(|value| value.as_ref().as_ref().is_some_and(|game| game.game_state == hsl_network_messages::GameState::Playing)) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        clock_driver.abort();
+        let _ = clock_driver.await;
+        let frozen = context.clock().now();
+        let remaining = raw_game.get_latest().unwrap().as_ref().as_ref().unwrap().remaining_time_in_half;
+        while !raw_game.get_latest().is_some_and(|value| value.as_ref().as_ref().is_some_and(|game| remaining.saturating_sub(game.remaining_time_in_half) >= Duration::from_secs(2))) {
+            assert_eq!(context.clock().now(), frozen);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(context.clock().now(), frozen);
+        assert_eq!(raw_game.latest_stamp(), Some(frozen));
+        eprintln!("Upstream match clock advanced two seconds with robotics time frozen");
+        std::fs::write(exchange.join("paused_clock"), b"observed").unwrap();
+        while !exchange.join("returns_paused").exists() {
+            assert_eq!(context.clock().now(), frozen);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let resumed_driver = drive_clock(&context);
+        // Wait for the upstream runtime to acknowledge new return messages after resume.
+        while !exchange.join("returns_resumed").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        resumed_driver.abort();
+        let _ = resumed_driver.await;
     }).await.expect("upstream GameController roundtrip");
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
