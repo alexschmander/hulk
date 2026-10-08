@@ -63,7 +63,8 @@ See the [K1 body controls](https://docs.booster.tech/docs/product-manual/k1/basi
 HULK's long-press actions differ from Booster's default firmware WALK action.
 
 The default **Local gamepad** source runs the real controller handler on the Twix host.
-Press the controller's Start button to toggle behavior's remote mode; walking axes, head controls and kicks use the existing robot mappings. **External controller** disables only the local producer and accepts `ControllerInput` on `inputs/controller_input` in the same robot namespace and global Zenoh scope.
+Press the controller's Start button to toggle behavior's remote mode; walking axes, head controls and kicks use the existing robot mappings.
+**External controller** disables only the local producer and accepts `ControllerInput` on `inputs/controller_input` in the same robot namespace and global Zenoh scope.
 Behavior stops using stale controller input after its existing 250 ms freshness window.
 No connected gamepad is required for startup.
 
@@ -76,8 +77,9 @@ Motion overrides use the Parameter panel: select `/simulator/robot/behavior_node
 Set it to `null` to let behavior choose motion.
 The preset opens this parameter; press **Refresh** once the simulator has started.
 
-**M** or **Fly camera** captures/releases the mouse; **Esc** releases it.
-While captured, use W/A/S/D to move, Q/E for down/up, and Shift for faster movement. **Add ball** places a ball one meter from the origin.
+**M** or **Fly camera (M)** captures/releases the mouse; **Esc** releases it.
+While captured, use W/A/S/D to move, Q/E for down/up, and Shift for faster movement.
+**Add ball** places a ball one meter from the origin.
 Select and drag it on the horizontal plane, or press **Delete** while pointing inside the scene to remove it.
 Select the robot to show translation arrows and rotation rings.
 Dragging pauses physics and restores its previous running state on release.
