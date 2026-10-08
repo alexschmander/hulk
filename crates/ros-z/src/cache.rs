@@ -15,6 +15,11 @@
 //!   user-supplied closure that extracts a [`crate::time::Time`] from each deserialized
 //!   message. Required for `header.stamp` / sensor capture time alignment.
 //!
+//! In a logical-clock context, the default strategy instead uses the ROS-Z
+//! source timestamp, falling back to the context clock for non-ROS-Z samples.
+//! Wall-clock contexts retain the transport-timestamp behavior above.
+//! This prevents wall time from entering caches used by simulation and replay.
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -489,6 +494,7 @@ where
         let inner = Arc::new(RwLock::new(CacheInner::<T>::new(capacity)));
         let inner_cb = inner.clone();
 
+        let clock = sub_builder.context.clock.clone();
         let raw_subscriber = sub_builder.raw().build().await?;
         let mut raw_subscriber_task = raw_subscriber;
         let task = tokio::spawn(async move {
@@ -503,20 +509,28 @@ where
                 let payload = sample.payload().to_bytes();
                 match S::deserialize(&payload) {
                     Ok(message) => {
-                        let stamp = match sample.timestamp() {
-                            Some(ts) => Time::from_wallclock(ts.get_time().to_system_time()),
-                            None => {
-                                let mut guard = inner_cb.write();
-                                if !guard.warned_no_ts {
-                                    warn!(
-                                        "[CACHE] Incoming sample has no Zenoh timestamp; \
+                        let stamp = if clock.is_logical() {
+                            sample
+                                .attachment()
+                                .and_then(|raw| crate::attachment::Attachment::try_from(raw).ok())
+                                .map(|attachment| attachment.source_time())
+                                .unwrap_or_else(|| clock.now())
+                        } else {
+                            match sample.timestamp() {
+                                Some(ts) => Time::from_wallclock(ts.get_time().to_system_time()),
+                                None => {
+                                    let mut guard = inner_cb.write();
+                                    if !guard.warned_no_ts {
+                                        warn!(
+                                            "[CACHE] Incoming sample has no Zenoh timestamp; \
                                          falling back to current wallclock time. \
                                          Enable timestamping in the Zenoh config to avoid this."
-                                    );
-                                    guard.warned_no_ts = true;
+                                        );
+                                        guard.warned_no_ts = true;
+                                    }
+                                    drop(guard);
+                                    Time::from_wallclock(std::time::SystemTime::now())
                                 }
-                                drop(guard);
-                                Time::from_wallclock(std::time::SystemTime::now())
                             }
                         };
                         inner_cb.write().insert(stamp, message);
@@ -600,6 +614,59 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn default_cache_uses_source_time_only_with_a_logical_clock() {
+        use crate::{context::ContextBuilder, time::Clock};
+        for logical in [false, true] {
+            let clock = if logical {
+                Clock::logical(Time::from_nanos(1000))
+            } else {
+                Clock::wallclock()
+            };
+            let context = ContextBuilder::default()
+                .with_clock(clock)
+                .with_mode("peer")
+                .disable_multicast_scouting()
+                .with_connect_endpoints(std::iter::empty::<&str>())
+                .with_listen_endpoints(std::iter::empty::<&str>())
+                .build()
+                .await
+                .unwrap();
+            let node = context
+                .create_node("cache_clock_test")
+                .build()
+                .await
+                .unwrap();
+            let cache = node
+                .subscriber::<u32>("value")
+                .cache(1)
+                .build()
+                .await
+                .unwrap();
+            let publisher = node.publisher::<u32>("value").build().await.unwrap();
+            let source_time = Time::from_nanos(500);
+            let wall_before = Clock::wallclock().now();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while cache.get_latest().is_none() {
+                    publisher
+                        .publish_with_source_time(&7, source_time)
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if logical {
+                assert_eq!(cache.latest_stamp(), Some(source_time));
+                assert_eq!(*cache.get_before(context.clock().now()).unwrap(), 7);
+            } else {
+                assert!(cache.latest_stamp().unwrap() >= wall_before);
+            }
+            context.shutdown().unwrap();
+        }
+    }
 
     #[test]
     fn cache_inner_capacity_zero_retains_no_messages() {

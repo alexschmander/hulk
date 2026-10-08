@@ -244,6 +244,11 @@ impl Clock {
         Self::logical(start)
     }
 
+    /// Whether timestamps belong to a manually advanced logical timeline.
+    pub fn is_logical(&self) -> bool {
+        matches!(self.inner.as_ref(), ClockInner::Logical(_))
+    }
+
     pub fn now(&self) -> Time {
         match self.inner.as_ref() {
             ClockInner::Wallclock => Time::from_wallclock(SystemTime::now()),
@@ -557,6 +562,12 @@ mod tests {
         assert_eq!(a.duration_since(b), Duration::from_secs(2));
         // saturates to zero when earlier > self
         assert_eq!(b.duration_since(a), Duration::ZERO);
+    }
+
+    #[test]
+    fn clock_kind_distinguishes_logical_and_wall_time() {
+        assert!(Clock::logical(Time::zero()).is_logical());
+        assert!(!Clock::wallclock().is_logical());
     }
 
     // --- Clock constructors ---
