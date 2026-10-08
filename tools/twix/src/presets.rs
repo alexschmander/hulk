@@ -15,6 +15,10 @@ pub const PROVIDED: &[(&str, &str)] = &[
     ("Overview", include_str!("../presets/Overview.json")),
     ("Vision", include_str!("../presets/Vision.json")),
     ("Parameters", include_str!("../presets/Parameters.json")),
+    (
+        "Motion simulator",
+        include_str!("../presets/Motion simulator.json"),
+    ),
 ];
 
 pub fn directory() -> Result<PathBuf> {
