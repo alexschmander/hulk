@@ -4,10 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bevy::prelude::*;
 use color_eyre::{Result, eyre::ensure};
 use eframe::{
-    egui::{self, Ui, Widget},
+    egui::{self, RichText, Ui, Widget},
     egui_wgpu::RenderState,
 };
 use egui_bevy::BevyWidget;
+use egui_material_icons::icons;
 use tokio::runtime::Handle;
 
 mod controller;
@@ -31,6 +32,7 @@ mod simulated_sdk;
 mod simulation;
 mod viewport;
 mod whistle;
+pub mod widgets;
 
 use bevy_mujoco::{SharedPhysics, SimulationMode};
 pub use profiles::{ControllerSource, Profile};
@@ -94,6 +96,7 @@ pub struct Simulator {
     pending_robot: Option<tokio_util::task::AbortOnDropHandle<()>>,
     added_robot: Option<std::sync::mpsc::Receiver<Result<u8, String>>>,
     selected: u8,
+    started: ros_z::time::Time,
 }
 
 impl Drop for Simulator {
@@ -129,6 +132,7 @@ impl Drop for Simulator {
 
 impl Simulator {
     pub fn new(prepared: PreparedSimulator, renderer: RenderState) -> Self {
+        let started = prepared.team.now();
         let mut widget = BevyWidget::new(renderer);
         let app = &mut widget.bevy_app;
         let first = prepared.team.members()[0].io.clone();
@@ -168,6 +172,7 @@ impl Simulator {
             pending_robot: None,
             added_robot: None,
             selected: 1,
+            started,
         }
     }
 
@@ -200,9 +205,187 @@ impl Simulator {
         };
     }
 
+    /// Controls for Twix's panel header: the whole simulation first, then the selected player.
+    /// Returns whether Stop simulator was pressed.
+    pub fn header(&mut self, ui: &mut Ui) -> bool {
+        let compact = ui.available_width() < 640.0;
+        // Do not touch physics after a worker panic may have poisoned its mutex.
+        let failed = self.physics.poll().is_some();
+        let mut stop = false;
+        ui.vertical(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                if !failed {
+                    self.simulation_controls(ui, compact);
+                }
+                widgets::trailing(ui, 150.0, |ui| {
+                    stop = widgets::action(ui, icons::ICON_STOP.codepoint, "Stop simulator", false)
+                        .clicked();
+                });
+            });
+            if !failed {
+                ui.horizontal_wrapped(|ui| {
+                    self.player_controls(ui);
+                    widgets::trailing(ui, 130.0, |ui| self.viewport.toolbar(ui, compact));
+                });
+            }
+        });
+        stop
+    }
+
+    fn simulation_controls(&mut self, ui: &mut Ui, compact: bool) {
+        let world = self.widget.bevy_app.world_mut();
+        let team = world.resource::<team::Team>().clone();
+        let ready = self.physics.ready();
+        let paused = world.resource::<SharedPhysics>().lock().mode == SimulationMode::Paused;
+        let (icon, label) = if paused {
+            (icons::ICON_PLAY_ARROW.codepoint, "Run")
+        } else {
+            (icons::ICON_PAUSE.codepoint, "Pause")
+        };
+        if ui
+            .add_enabled_ui(self.error.is_none() && ready, |ui| {
+                widgets::primary(ui, icon, label)
+            })
+            .inner
+            .on_hover_text("Space also toggles while the Simulator is focused")
+            .clicked()
+        {
+            world.resource::<SharedPhysics>().lock().mode = if paused {
+                SimulationMode::Running
+            } else {
+                SimulationMode::Paused
+            };
+        }
+        ui.label(RichText::new(clock(team.now().duration_since(self.started))).monospace())
+            .on_hover_text("Simulation time since start; it stops while paused");
+        if !ready {
+            ui.spinner();
+            ui.weak("Initializing robot…");
+        }
+        ui.separator();
+        if widgets::action(ui, icons::ICON_SPORTS.codepoint, "Whistle", compact)
+            .on_hover_text("Send a whistle detection to every robot")
+            .clicked()
+        {
+            for member in team.members() {
+                member.io.whistle();
+            }
+        }
+        if ui
+            .add_enabled_ui(ready, |ui| {
+                widgets::action(ui, icons::ICON_SPORTS_SOCCER.codepoint, "Add ball", compact)
+            })
+            .inner
+            .on_hover_text("Place a ball one meter from the center")
+            .clicked()
+        {
+            world.resource_scope(|world, assets: Mut<scene::visual::ObjectVisualAssets>| {
+                scene::ball::spawn(
+                    &mut world.commands(),
+                    &assets.ball,
+                    Transform::from_xyz(1.0, 0.0, 0.0),
+                );
+            });
+        }
+        let full = team.members().len() >= 5;
+        let add = ui
+            .add_enabled_ui(!full && self.pending_robot.is_none() && ready, |ui| {
+                widgets::action(ui, icons::ICON_PERSON_ADD.codepoint, "Add robot", compact)
+            })
+            .inner
+            .on_hover_text("Start the next free player at a vacant sideline slot")
+            .on_disabled_hover_text(if full {
+                "All five players are running"
+            } else {
+                "Available once the current robots are ready"
+            });
+        if add.clicked() {
+            let selected = team.selected().expect("team always has a selected player");
+            let occupied = {
+                let physics = world.resource::<SharedPhysics>().lock();
+                physics
+                    .robots
+                    .iter()
+                    .filter_map(|entity| physics.object_pose(*entity))
+                    .collect::<Vec<_>>()
+            };
+            let field = world
+                .resource::<parameters::CurrentSimulatorParameters>()
+                .field_dimensions;
+            if let Some(pose) = team::vacant_spawn(&field, &occupied, selected.io.away()) {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                self.added_robot = Some(receiver);
+                let team = team.clone();
+                let runtime = team.runtime().clone();
+                let repaint = ui.ctx().clone();
+                self.pending_robot = Some(tokio_util::task::AbortOnDropHandle::new(
+                    runtime.clone().spawn_blocking(move || {
+                        let result = runtime
+                            .block_on(team.add(pose))
+                            .map_err(|error| format!("{error:#}"));
+                        let _ = sender.send(result);
+                        repaint.request_repaint();
+                    }),
+                ));
+            } else {
+                self.error = Some("No free sideline spawn position".into());
+            }
+        }
+        if self.pending_robot.is_some() {
+            ui.spinner();
+        }
+    }
+
+    fn player_controls(&mut self, ui: &mut Ui) {
+        let world = self.widget.bevy_app.world_mut();
+        let selected = world
+            .resource::<team::Team>()
+            .selected()
+            .expect("team always has a selected player");
+        let exists = selected.number == self.selected;
+        let name = RichText::new(format!("Player {}", self.selected));
+        if exists {
+            ui.label(name.strong());
+        } else {
+            ui.label(name.weak()).on_hover_text(format!(
+                "No robot runs as player {}. Add robot starts the next free player.",
+                self.selected
+            ));
+        }
+        let led = exists.then(|| selected.io.led_color()).flatten();
+        ui.weak("LED");
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 16.0), egui::Sense::hover());
+        let color = led.map_or(ui.visuals().faint_bg_color, |color| {
+            egui::Color32::from_rgb(color.r, color.g, color.b)
+        });
+        ui.painter().rect_filled(rect, 2.0, color);
+        ui.painter().rect_stroke(
+            rect,
+            2.0,
+            ui.visuals().widgets.noninteractive.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+        response.on_hover_text(led.map_or_else(
+            || "LED: no active command".to_owned(),
+            |color| format!("LED: RGB ({}, {}, {})", color.r, color.g, color.b),
+        ));
+        ui.separator();
+        ui.add_enabled_ui(self.physics.ready() && exists, |ui| {
+            if let Err(error) = self.buttons.ui(ui, &selected.io) {
+                self.error = Some(format!("{error:#}"));
+            }
+            if widgets::action(ui, icons::ICON_RESTART_ALT.codepoint, "Reset pose", false)
+                .on_hover_text("Pause and return this robot to its spawn pose")
+                .clicked()
+            {
+                simulation::reset(world);
+            }
+        });
+    }
+
     pub fn ui(&mut self, ui: &mut Ui) {
         if let Some(error) = self.physics.poll() {
-            ui.colored_label(egui::Color32::RED, &error);
+            widgets::error_banner(ui, &error);
             self.error = Some(error);
             // Do not touch physics after a worker panic may have poisoned its mutex.
             return;
@@ -225,141 +408,35 @@ impl Simulator {
             }
         }
         let world = self.widget.bevy_app.world_mut();
-        let team = world.resource::<team::Team>().clone();
-        let selected = team.selected().expect("team always has a selected player");
-        let selection_exists = selected.number == self.selected;
+        let selected = world
+            .resource::<team::Team>()
+            .selected()
+            .expect("team always has a selected player");
         if let Some(error) = selected.io.poll() {
             self.error = Some(error.to_owned());
             world.resource::<SharedPhysics>().lock().mode = SimulationMode::Paused;
         }
-        ui.horizontal_wrapped(|ui| {
-            let paused = world.resource::<SharedPhysics>().lock().mode == SimulationMode::Paused;
-            if ui
-                .add_enabled(
-                    self.error.is_none() && self.physics.ready(),
-                    egui::Button::new(if paused { "Run" } else { "Pause" }),
-                )
-                .clicked()
-            {
-                world.resource::<SharedPhysics>().lock().mode = if paused {
-                    SimulationMode::Running
-                } else {
-                    SimulationMode::Paused
-                };
-            }
-            if ui
-                .add_enabled(
-                    self.physics.ready() && selection_exists,
-                    egui::Button::new("Reset pose"),
-                )
-                .clicked()
-            {
-                simulation::reset(world);
-            }
-            ui.add_enabled_ui(self.physics.ready() && selection_exists, |ui| {
-                if let Err(error) = self.buttons.ui(ui, &selected.io) {
-                    self.error = Some(format!("{error:#}"));
-                }
-            });
-            if ui
-                .button("Whistle")
-                .on_hover_text("Inject a whistle detection pulse")
-                .clicked()
-            {
-                for member in team.members() {
-                    member.io.whistle();
-                }
-            }
-            self.viewport.toolbar(ui);
-            if ui
-                .add_enabled(self.physics.ready(), egui::Button::new("Add ball"))
-                .clicked()
-            {
-                world.resource_scope(|world, assets: Mut<scene::visual::ObjectVisualAssets>| {
-                    scene::ball::spawn(
-                        &mut world.commands(),
-                        &assets.ball,
-                        Transform::from_xyz(1.0, 0.0, 0.0),
-                    );
-                });
-            }
-            if ui
-                .add_enabled(
-                    team.members().len() < 5
-                        && self.pending_robot.is_none()
-                        && self.physics.ready(),
-                    egui::Button::new("Add robot"),
-                )
-                .clicked()
-            {
-                let occupied = {
-                    let physics = world.resource::<SharedPhysics>().lock();
-                    physics
-                        .robots
-                        .iter()
-                        .filter_map(|entity| physics.object_pose(*entity))
-                        .collect::<Vec<_>>()
-                };
-                let field = world
-                    .resource::<parameters::CurrentSimulatorParameters>()
-                    .field_dimensions;
-                if let Some(pose) = team::vacant_spawn(&field, &occupied, selected.io.away()) {
-                    let (sender, receiver) = std::sync::mpsc::channel();
-                    self.added_robot = Some(receiver);
-                    let team = team.clone();
-                    let runtime = team.runtime().clone();
-                    let repaint = ui.ctx().clone();
-                    self.pending_robot = Some(tokio_util::task::AbortOnDropHandle::new(
-                        runtime.clone().spawn_blocking(move || {
-                            let result = runtime
-                                .block_on(team.add(pose))
-                                .map_err(|error| format!("{error:#}"));
-                            let _ = sender.send(result);
-                            repaint.request_repaint();
-                        }),
-                    ));
-                } else {
-                    self.error = Some("No free sideline spawn position".into());
-                }
-            }
-            if self.pending_robot.is_some() {
-                ui.spinner();
-            }
-            let led = selection_exists.then(|| selected.io.led_color()).flatten();
-            ui.label("LED");
-            let (rect, response) =
-                ui.allocate_exact_size(egui::vec2(28.0, 16.0), egui::Sense::hover());
-            let color = led.map_or(ui.visuals().faint_bg_color, |color| {
-                egui::Color32::from_rgb(color.r, color.g, color.b)
-            });
-            ui.painter().rect_filled(rect, 2.0, color);
-            ui.painter().rect_stroke(
-                rect,
-                2.0,
-                ui.visuals().widgets.noninteractive.bg_stroke,
-                egui::StrokeKind::Inside,
-            );
-            response.on_hover_text(led.map_or_else(
-                || "LED: no active command".to_owned(),
-                |color| format!("LED: RGB ({}, {}, {})", color.r, color.g, color.b),
-            ));
-            if !self.physics.ready() {
-                ui.spinner();
-                ui.label("Initializing robot…");
-            }
-        });
-        if let Some(error) = &self.error {
-            ui.colored_label(egui::Color32::RED, error);
+        for error in [self.error.as_deref(), self.viewport.error()]
+            .into_iter()
+            .flatten()
+        {
+            widgets::error_banner(ui, error);
+            ui.add_space(4.0);
         }
         let rect = ui.available_rect_before_wrap();
         self.viewport
             .input(ui, rect, self.widget.bevy_app.world_mut());
         self.widget.ui(ui);
         self.viewport
-            .paint(ui, rect, self.widget.bevy_app.world_mut());
+            .paint(ui, rect, self.widget.bevy_app.world_mut(), self.selected);
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(16));
     }
+}
+
+fn clock(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs_f64();
+    format!("{}:{:04.1}", (seconds / 60.0).floor(), seconds % 60.0)
 }
 
 /// The same storage-buffer limit used by Twix's legacy Bevy panels.

@@ -36,14 +36,16 @@ Set `ORT_DYLIB_PATH` to your ONNX Runtime library if it is not available in the 
 The launcher enables Twix's optional `simulator` Cargo feature and configures its MuJoCo library path.
 Robot N uses global Zenoh prefix `hulk_simulator/N` and ROS namespace `/N`, including raw Booster topics, discovery, parameters and RPCs.
 The top-left namespace selector switches Twix and simulator body controls between `/1` through `/5`.
-Selecting an absent player disables its body controls.
+Selecting an absent player dims its name and disables its body controls.
 Without `--router`, simulator mode starts a private loopback router automatically.
 Ordinary Twix builds keep their existing dependencies.
 With Cargo directly, enable `--features simulator`, pass `--zenoh-namespace hulk_simulator`, and set the MuJoCo library path yourself.
 The current Nix Twix package builds ordinary Twix; it does not bundle the simulator.
 
 Open the **Simulator** preset or add a **Simulator** panel.
-Select a profile, initial robot count and location, then press **Start simulator**.
+Select an initial robot count, field location, profile and gamepad source, then press **Start simulator**.
+The field preview draws the selected location's parameter dimensions and the spawn slots for up to five players.
+Parameter and model directories are under **Parameter and model paths**.
 Twix selects the robot's namespace automatically.
 Only one simulator can run per Twix process.
 Restoring a saved layout does not start robotics or bind UDP sockets.
@@ -54,8 +56,12 @@ Initial players alternate between both long touchlines in their own half, starti
 Placement follows the known GameController field side and defaults to Home before the first packet.
 A running match continues during startup; a paused match keeps the existing clock and poses frozen.
 Reset pose returns the selected robot to its original spawn placement.
-Floating player numbers use each robot's actual commanded LED color.
+Floating player numbers use each robot's actual commanded LED color; the selected player's number is ringed.
 Startup uses the real button bridge, handler and safe-pose check to pass through Prepare to Initial.
+While running, the panel header is the toolbar.
+Its first row controls the whole simulation: **Run**/**Pause**, simulation time, **Whistle**, **Add ball**, **Add robot** and **Stop simulator**.
+Its second row controls the selected player: LED, **F1**, **Stand**, **Walk**, **Reset pose** and the fly camera.
+Narrow panels show icons for the scene actions; hover them for their names.
 Press **Run** to advance physics.
 If GameController is already running, its game state takes over.
 
@@ -64,17 +70,18 @@ The unchanged `button_event_bridge` and `button_event_handler` process them.
 Tap F1 for Damping, tap Stand for Prepare; hold Stand for one second and release to enter Initial once the pose is safe.
 Hold Walk and release to enter Playing from Initial.
 The one-second hold threshold is a simulator convention.
+A bar under the held button fills toward the threshold.
 Short presses emit PressDown/PressUp/SingleClick; long presses emit PressDown/LongPressStart/LongPressHold/LongPressEnd/PressUp.
 The simulator implements passive damping and a two-second Prepare joint trajectory behind the existing Booster mode RPC, including requests from hardware_interface.
 These are approximations of the manufacturer's controller, not firmware emulation.
 See the [K1 body controls](https://docs.booster.tech/docs/product-manual/k1/basic-operations/body-operations/).
 HULK's long-press actions differ from Booster's default firmware WALK action.
 
-The toolbar's **LED** rectangle displays the actual color commanded by `led_handler` through `hardware_interface` and `rt/LightControlApiTopicReq`.
+The header's **LED** rectangle displays the actual color commanded by `led_handler` through `hardware_interface` and `rt/LightControlApiTopicReq`.
 The simulator acknowledges the Booster light RPC and follows color changes and Stop-state blinking in every profile.
 Before the first command or after releasing LED control, the rectangle is neutral; the tooltip reports that no command is active.
 Firmware-owned LED colors after release are not simulated.
-Inspect primary state, localization and Game Controller connection status in Twix or GameController; the simulator toolbar does not repeat them.
+Inspect primary state, localization and Game Controller connection status in Twix or GameController; the simulator header does not repeat them.
 
 The default **Local gamepad** source runs the real controller handler on the Twix host.
 It routes input only to the robot selected in Twix.
@@ -95,7 +102,8 @@ Motion overrides use the Parameter panel: select the relative node `behavior_nod
 Set it to `null` to let behavior choose motion.
 The preset opens this parameter; press **Refresh** once the simulator has started.
 
-**M** or **Fly camera (M)** captures/releases the mouse; **Esc** releases it.
+**M** or **Fly camera** captures/releases the mouse; **Esc** releases it.
+While captured, a legend at the bottom of the scene lists the movement keys.
 While captured, use W/A/S/D to move, Q/E for down/up, and Shift for faster movement.
 **Add ball** places a ball one meter from the origin.
 Select and drag it on the horizontal plane, or press **Delete** while pointing inside the scene to remove it.

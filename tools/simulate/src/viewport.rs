@@ -152,15 +152,34 @@ fn plane_hit(ray: Ray3d, point: Vec3, normal: Vec3) -> Option<Vec3> {
 }
 
 impl Viewport {
-    pub fn toolbar(&mut self, ui: &mut Ui) {
-        if ui.selectable_label(self.captured.is_some(), "Fly camera (M)").on_hover_text(
-            "M: capture/release mouse • Esc: release\nW/A/S/D: move • Q/E: down/up • Shift: faster\nSelect a ball to drag or Delete. Select the robot for its gizmo."
-        ).clicked() {
+    pub fn toolbar(&mut self, ui: &mut Ui, compact: bool) {
+        let icon = egui_material_icons::icons::ICON_3D_ROTATION.codepoint;
+        let text = if compact {
+            icon.to_owned()
+        } else {
+            format!("{icon} Fly camera")
+        };
+        let response = ui
+            .add(egui::Button::selectable(self.captured.is_some(), text).shortcut_text("M"))
+            .on_hover_text(
+                "Capture the mouse to fly the camera; M or Esc releases it.\n\
+                 Click a ball to drag it, or point at it and press Delete.\n\
+                 Click a robot for its translation arrows and rotation rings.",
+            );
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                self.captured.is_some(),
+                "Fly camera (M)",
+            )
+        });
+        if response.clicked() {
             self.capture(ui.ctx(), self.captured.is_none());
         }
-        if let Some(error) = &self.error {
-            ui.colored_label(Color32::RED, error);
-        }
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
     fn capture(&mut self, context: &egui::Context, capture: bool) {
         self.warp_position = None;
@@ -319,7 +338,13 @@ impl Viewport {
             world.resource::<SharedPhysics>().lock().mode = drag.resume;
         }
     }
-    pub fn paint(&self, ui: &Ui, rect: Rect, world: &mut World) {
+    pub fn paint(&self, ui: &Ui, rect: Rect, world: &mut World, selected: u8) {
+        self.paint_scene(ui, rect, world, selected);
+        if self.captured.is_some() {
+            capture_legend(ui, rect);
+        }
+    }
+    fn paint_scene(&self, ui: &Ui, rect: Rect, world: &mut World, selected: u8) {
         if let Some(view) = CameraView::new(world, rect) {
             let team = world.resource::<crate::team::Team>();
             let physics = world.resource::<SharedPhysics>().lock();
@@ -343,8 +368,23 @@ impl Viewport {
                     let rect = Rect::from_center_size(position, egui::vec2(30.0, 28.0));
                     let painter = ui
                         .painter()
-                        .with_clip_rect(rect.intersect(view.rect).expand(2.0));
-                    painter.rect_filled(rect, 4.0, color);
+                        .with_clip_rect(rect.intersect(view.rect).expand(5.0));
+                    if member.number == selected {
+                        painter.rect_stroke(
+                            rect.expand(3.0),
+                            7.0,
+                            Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    painter.rect_filled(rect, 5.0, color);
+                    // A dark rim keeps light LED colors legible against field lines and goals.
+                    painter.rect_stroke(
+                        rect,
+                        5.0,
+                        Stroke::new(1.0, Color32::from_black_alpha(150)),
+                        egui::StrokeKind::Inside,
+                    );
                     let text = if u16::from(color.r()) + u16::from(color.g()) + u16::from(color.b())
                         > 380
                     {
@@ -391,6 +431,40 @@ impl Viewport {
             }
         }
     }
+}
+/// Shortcut legend while the mouse is captured and the cursor is hidden.
+fn capture_legend(ui: &Ui, rect: Rect) {
+    egui::Area::new(ui.id().with("capture_legend"))
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(rect.center_bottom() - egui::vec2(0.0, 12.0))
+        .constrain_to(rect)
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            ui.style_mut().interaction.selectable_labels = false;
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (index, (keys, action)) in [
+                        (&["W", "A", "S", "D"][..], "move"),
+                        (&["Q", "E"], "down and up"),
+                        (&["Shift"], "faster"),
+                        (&["M", "Esc"], "release"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if index > 0 {
+                            ui.add_space(10.0);
+                        }
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        for key in keys {
+                            crate::widgets::keycap(ui, key);
+                        }
+                        ui.add_space(2.0);
+                        ui.label(action);
+                    }
+                });
+            });
+        });
 }
 impl Drop for Viewport {
     fn drop(&mut self) {
