@@ -1,7 +1,6 @@
 //! Physics and sensor publication run independently of Twix's repaint rate and active tab.
 use crate::{
     bevy_mujoco::{SharedPhysics, SimulationMode},
-    parameters::CurrentSimulatorParameters,
     robot_io::RobotBinding,
     robotics::Robotics,
     scene::{robot, visual::ObjectVisualAssets},
@@ -24,7 +23,7 @@ pub struct ControlledRobot;
 pub struct MotionSimulationPlugin;
 impl Plugin for MotionSimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_robot);
+        app.add_systems(PreUpdate, spawn_robot);
     }
 }
 fn initial_pose(field: &FieldDimensions) -> Transform {
@@ -37,14 +36,83 @@ fn initial_pose(field: &FieldDimensions) -> Transform {
 fn spawn_robot(
     mut commands: Commands,
     assets: Res<ObjectVisualAssets>,
-    parameters: Res<CurrentSimulatorParameters>,
+    team: Res<crate::team::Team>,
 ) {
-    let robot = robot::spawn(
-        &mut commands,
-        &assets.robot,
-        initial_pose(&parameters.field_dimensions),
-    );
-    commands.entity(robot).insert(ControlledRobot);
+    for member in team.members() {
+        if member.entity.is_some() {
+            continue;
+        }
+        let robot = robot::spawn(&mut commands, &assets.robot, member.pose);
+        commands.entity(robot).insert(ControlledRobot);
+        team.bind(member.number, robot);
+    }
+}
+
+/// Fill the new robot's sensors and operate its real body buttons at frozen time.
+/// The prepared pose already matches firmware Prepare; no other robot needs to step.
+pub(crate) fn bootstrap(io: &Robotics, cancelled: &AtomicBool) -> color_eyre::Result<()> {
+    thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut app = App::new();
+                app.add_plugins((MinimalPlugins, crate::bevy_mujoco::MujocoWorldPlugin));
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        crate::bevy_mujoco::MjcfObject::new(
+                            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/k1_robot.xml"),
+                            "Trunk",
+                        )
+                        .with_free_joint("world_joint")
+                        .grounded(),
+                        Transform::default(),
+                    ))
+                    .id();
+                app.update();
+                let physics = app.world().resource::<SharedPhysics>().clone();
+                let observation = {
+                    let mut world = physics.lock();
+                    let binding =
+                        RobotBinding::new(world.data(), &format!("object_{}_", entity.to_bits()))?;
+                    binding.reset_joints(world.data_mut());
+                    world
+                        .ground_object(entity, initial_pose(&io.field_dimensions))
+                        .map_err(|error| color_eyre::eyre::eyre!(error))?;
+                    let mut observation = binding.observe(world.data());
+                    observation.stationary();
+                    observation
+                };
+                let mut startup = crate::buttons::Startup::default();
+                let deadline = Instant::now() + Duration::from_secs(20);
+                loop {
+                    color_eyre::eyre::ensure!(
+                        !cancelled.load(Ordering::Acquire),
+                        "Robot startup cancelled"
+                    );
+                    color_eyre::eyre::ensure!(
+                        Instant::now() < deadline,
+                        "Robot startup timed out: {}",
+                        io.status()
+                    );
+                    if let Some(error) = io.poll() {
+                        return Err(color_eyre::eyre::eyre!(error));
+                    }
+                    io.publish_observation(&observation, io.now())?;
+                    if io.inference.get_latest().is_some_and(|status| {
+                        matches!(status.state, motion_inference::node::State::Initialized)
+                    }) && startup
+                        .advance(io)
+                        .map_err(|error| color_eyre::eyre::eyre!(error))?
+                    {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(())
+            })
+            .join()
+            .map_err(|_| color_eyre::eyre::eyre!("Robot initialization panicked"))?
+    })
 }
 
 pub struct PhysicsWorker {
@@ -54,6 +122,174 @@ pub struct PhysicsWorker {
     thread: Option<thread::JoinHandle<Result<(), String>>>,
 }
 impl PhysicsWorker {
+    pub(crate) fn start_team(physics: SharedPhysics, team: crate::team::Team) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let ready = Arc::new(AtomicBool::new(false));
+        let initialized = ready.clone();
+        let thread = thread::spawn(move || {
+            struct State {
+                binding: RobotBinding,
+                controller: crate::simulated_sdk::Controller,
+            }
+            let mut states = std::collections::BTreeMap::<u8, State>::new();
+            let mut placed = std::collections::HashSet::new();
+            let mut generation = None;
+            let mut last_frame = None;
+            let mut sequence = 0;
+            while !stopped.load(Ordering::Acquire) {
+                let started = Instant::now();
+                if let Some(error) = team.poll_controller() {
+                    return Err(error);
+                }
+                let members = team.members();
+                for member in &members {
+                    if let Some(error) = member.io.poll() {
+                        return Err(format!("Player {}: {error}", member.number));
+                    }
+                }
+                let mut period = Duration::from_millis(2);
+                let mut samples = Vec::new();
+                let mut advanced = false;
+                if let Some(mut world) = physics.try_lock() {
+                    let rebuilt = generation != Some(world.generation);
+                    if rebuilt {
+                        let mut previous = std::mem::take(&mut states);
+                        for member in &members {
+                            if let Some(entity) = member.entity
+                                && world.contains_object(entity)
+                            {
+                                let binding = RobotBinding::new(
+                                    world.data(),
+                                    &format!("object_{}_", entity.to_bits()),
+                                )
+                                .map_err(|error| {
+                                    format!("Player {} binding: {error:#}", member.number)
+                                })?;
+                                if placed.insert(member.number) {
+                                    binding.reset_joints(world.data_mut());
+                                    world.ground_object(entity, member.pose)?;
+                                }
+                                states.insert(
+                                    member.number,
+                                    State {
+                                        binding,
+                                        controller: previous
+                                            .remove(&member.number)
+                                            .map(|state| state.controller)
+                                            .unwrap_or_default(),
+                                    },
+                                );
+                            }
+                        }
+                        generation = Some(world.generation);
+                    }
+                    period = Duration::from_secs_f64(world.data().model_opt().timestep);
+                    let running = world.mode == SimulationMode::Running;
+                    let ready = states.len() == members.len();
+                    initialized.store(ready, Ordering::Release);
+                    if running || !ready || rebuilt {
+                        let time = team.now();
+                        if running {
+                            for member in &members {
+                                if let Some(state) = states.get_mut(&member.number) {
+                                    state.controller.apply(
+                                        &state.binding,
+                                        world.data_mut(),
+                                        &member.io.actuator_control(),
+                                    );
+                                }
+                            }
+                            world.data_mut().step();
+                            advanced = true;
+                        }
+                        world.data_mut().forward();
+                        let observations: Vec<_> = members
+                            .iter()
+                            .filter_map(|member| {
+                                let mut observation =
+                                    states.get(&member.number)?.binding.observe(world.data());
+                                if !running {
+                                    observation.stationary();
+                                }
+                                Some((member, observation))
+                            })
+                            .collect();
+                        let frame_due = rebuilt
+                            || !ready
+                            || last_frame.is_none_or(|last| {
+                                time.duration_since(last) >= Duration::from_millis(33)
+                            });
+                        if frame_due {
+                            sequence += 1;
+                            last_frame = Some(time);
+                        }
+                        let balls = crate::observations::balls(&world);
+                        for (member, observation) in &observations {
+                            let frame = if frame_due {
+                                let others = observations
+                                    .iter()
+                                    .filter(|(other, _)| other.number != member.number)
+                                    .map(|(_, other)| {
+                                        let p = other.ground_to_world.translation.vector;
+                                        [p.x, p.y, p.z]
+                                    })
+                                    .collect::<Vec<_>>();
+                                let field = member.io.field_dimensions;
+                                let detections = crate::observations::detect_scene(
+                                    world.data_mut(),
+                                    observation,
+                                    &balls,
+                                    &field,
+                                    &others,
+                                    team.configuration()
+                                        .field_configuration
+                                        .as_ref()
+                                        .unwrap()
+                                        .goal_height,
+                                );
+                                Some(crate::observations::Frame {
+                                    time,
+                                    sequence,
+                                    epoch: world.motion_epoch,
+                                    sample: observation.clone(),
+                                    balls: balls.clone(),
+                                    robots: others,
+                                    detections,
+                                    field,
+                                })
+                            } else {
+                                None
+                            };
+                            samples.push((member.io.clone(), observation.clone(), time, frame));
+                        }
+                    }
+                }
+                for (io, observation, time, _) in &samples {
+                    io.publish_observation(observation, *time)
+                        .map_err(|error| format!("Sensor publication: {error:#}"))?;
+                }
+                if advanced {
+                    team.advance(period)
+                        .map_err(|error| format!("Simulation clock: {error:#}"))?;
+                }
+                for (io, _, _, frame) in samples {
+                    if let Some(frame) = frame {
+                        io.publish_frame(frame);
+                    }
+                }
+                thread::sleep(period.saturating_sub(started.elapsed()));
+            }
+            Ok(())
+        });
+        Self {
+            stop,
+            ready,
+            failure: None,
+            thread: Some(thread),
+        }
+    }
+
     pub fn ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
@@ -73,6 +309,7 @@ impl PhysicsWorker {
         }
         self.failure.clone()
     }
+    #[cfg(test)]
     pub fn start(physics: SharedPhysics, io: Robotics) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
@@ -102,7 +339,9 @@ impl PhysicsWorker {
                     }
                     if generation != Some(world.generation) {
                         binding = world
-                            .robot
+                            .robots
+                            .first()
+                            .copied()
                             .map(|robot| {
                                 RobotBinding::new(
                                     world.data(),
@@ -117,7 +356,7 @@ impl PhysicsWorker {
                     if let Some(robot) = &binding {
                         if !placed {
                             robot.reset_joints(world.data_mut());
-                            let entity = world.robot.expect("bound robot");
+                            let entity = *world.robots.first().expect("bound robot");
                             world.ground_object(entity, initial_pose(&io.field_dimensions))?;
                             placed = true;
                         }
@@ -170,6 +409,7 @@ impl PhysicsWorker {
                                     epoch: world.motion_epoch,
                                     sample: observation.clone(),
                                     balls,
+                                    robots: Vec::new(),
                                     detections,
                                     field,
                                 });
@@ -223,19 +463,16 @@ impl Drop for PhysicsWorker {
 }
 
 pub fn reset(world: &mut World) {
-    let pose = initial_pose(
-        &world
-            .resource::<CurrentSimulatorParameters>()
-            .field_dimensions,
-    );
     let mut physics = world.resource::<SharedPhysics>().lock();
     physics.mode = SimulationMode::Paused;
-    if let Some(robot) = physics.robot {
+    if let Some(member) = world.resource::<crate::team::Team>().selected()
+        && let Some(robot) = member.entity
+    {
         let binding = RobotBinding::new(physics.data(), &format!("object_{}_", robot.to_bits()))
             .expect("controlled robot joints");
         binding.reset_joints(physics.data_mut());
         physics
-            .ground_object(robot, pose)
+            .ground_object(robot, member.pose)
             .expect("reset controlled robot");
     }
 }

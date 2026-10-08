@@ -6,6 +6,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+json5 = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 ball_filter = { workspace = true }
@@ -63,6 +64,7 @@ rule_obstacle_composer = { workspace = true }
 safe_pose_checker = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+socket2 = { workspace = true }
 team_ball_filter = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
@@ -71,5 +73,5 @@ types = { workspace = true }
 zenoh = { workspace = true }
 
 [dev-dependencies]
-json5 = { workspace = true }
+tracing-subscriber = { workspace = true }
 bincode = { workspace = true }

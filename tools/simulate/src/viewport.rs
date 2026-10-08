@@ -320,6 +320,48 @@ impl Viewport {
         }
     }
     pub fn paint(&self, ui: &Ui, rect: Rect, world: &mut World) {
+        if let Some(view) = CameraView::new(world, rect) {
+            let team = world.resource::<crate::team::Team>();
+            let physics = world.resource::<SharedPhysics>().lock();
+            for member in team.members() {
+                let Some(entity) = member.entity else {
+                    continue;
+                };
+                let Some(body) = physics
+                    .data()
+                    .body(&format!("object_{}_Head_2", entity.to_bits()))
+                else {
+                    continue;
+                };
+                let p = body.view(physics.data()).xpos;
+                let point = Vec3::new(p[0] as f32, p[2] as f32 + 0.22, -p[1] as f32);
+                if let Some(position) = view.project(point) {
+                    let color = member
+                        .io
+                        .led_color()
+                        .map_or(Color32::GRAY, |led| Color32::from_rgb(led.r, led.g, led.b));
+                    let rect = Rect::from_center_size(position, egui::vec2(30.0, 28.0));
+                    let painter = ui
+                        .painter()
+                        .with_clip_rect(rect.intersect(view.rect).expand(2.0));
+                    painter.rect_filled(rect, 4.0, color);
+                    let text = if u16::from(color.r()) + u16::from(color.g()) + u16::from(color.b())
+                        > 380
+                    {
+                        Color32::BLACK
+                    } else {
+                        Color32::WHITE
+                    };
+                    painter.text(
+                        position,
+                        egui::Align2::CENTER_CENTER,
+                        member.number.to_string(),
+                        egui::FontId::proportional(20.0),
+                        text,
+                    );
+                }
+            }
+        }
         let Some(entity) = self.selected else {
             return;
         };

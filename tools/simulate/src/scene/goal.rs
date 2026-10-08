@@ -8,7 +8,7 @@ use crate::{
     parameters::CurrentSimulatorParameters,
 };
 
-pub(crate) const GOAL_HEIGHT: f64 = 0.8;
+pub(crate) const GOAL_HEIGHT: f64 = 1.6;
 const SUPPORT_RADIUS: f64 = 0.01;
 const NET_RADIUS: f64 = 0.001;
 
@@ -37,6 +37,7 @@ pub(crate) struct GoalDimensions {
     inner_width: f64,
     post_diameter: f64,
     depth: f64,
+    height: f64,
 }
 
 impl From<&FieldDimensions> for GoalDimensions {
@@ -45,6 +46,7 @@ impl From<&FieldDimensions> for GoalDimensions {
             inner_width: dimensions.goal_inner_width as f64,
             post_diameter: dimensions.goal_post_diameter as f64,
             depth: dimensions.goal_depth as f64,
+            height: GOAL_HEIGHT,
         }
     }
 }
@@ -72,11 +74,12 @@ pub struct GoalAssets {
 
 impl GoalAssets {
     pub fn load(world: &mut World) -> Self {
-        let dimensions = GoalDimensions::from(
+        let mut dimensions = GoalDimensions::from(
             &world
                 .resource::<CurrentSimulatorParameters>()
                 .field_dimensions,
         );
+        dimensions.height = f64::from(world.resource::<CurrentSimulatorParameters>().goal_height);
         let solid = world
             .resource_mut::<Assets<StandardMaterial>>()
             .add(StandardMaterial {
@@ -154,7 +157,8 @@ pub(super) fn update_goal_dimensions(
     mut goals: Query<&mut MjcfObject, (With<Goal>, Without<GoalPartIndex>)>,
     mut visual_parts: Query<(&GoalPartIndex, &mut Transform), Without<Goal>>,
 ) {
-    let dimensions = GoalDimensions::from(&parameters.field_dimensions);
+    let mut dimensions = GoalDimensions::from(&parameters.field_dimensions);
+    dimensions.height = f64::from(parameters.goal_height);
     if assets.goal.dimensions == dimensions {
         return;
     }
@@ -210,13 +214,13 @@ fn goal_primitives(dimensions: GoalDimensions) -> Vec<GoalPrimitive> {
         add(
             MjtGeom::mjGEOM_CYLINDER,
             SUPPORT_RADIUS,
-            GOAL_HEIGHT / 2.0,
-            [-dimensions.depth, y, GOAL_HEIGHT / 2.0],
+            dimensions.height / 2.0,
+            [-dimensions.depth, y, dimensions.height / 2.0],
             IDENTITY,
             true,
         );
     }
-    for z in [SUPPORT_RADIUS, GOAL_HEIGHT] {
+    for z in [SUPPORT_RADIUS, dimensions.height] {
         add(
             MjtGeom::mjGEOM_CAPSULE,
             SUPPORT_RADIUS,
@@ -227,7 +231,7 @@ fn goal_primitives(dimensions: GoalDimensions) -> Vec<GoalPrimitive> {
         );
     }
     for y in [-half_span, half_span] {
-        for z in [SUPPORT_RADIUS, GOAL_HEIGHT] {
+        for z in [SUPPORT_RADIUS, dimensions.height] {
             add(
                 MjtGeom::mjGEOM_CYLINDER,
                 SUPPORT_RADIUS,
@@ -242,8 +246,8 @@ fn goal_primitives(dimensions: GoalDimensions) -> Vec<GoalPrimitive> {
         add(
             MjtGeom::mjGEOM_CYLINDER,
             post_radius,
-            GOAL_HEIGHT / 2.0,
-            [0.0, y, GOAL_HEIGHT / 2.0],
+            dimensions.height / 2.0,
+            [0.0, y, dimensions.height / 2.0],
             IDENTITY,
             true,
         );
@@ -252,7 +256,7 @@ fn goal_primitives(dimensions: GoalDimensions) -> Vec<GoalPrimitive> {
         MjtGeom::mjGEOM_CAPSULE,
         post_radius,
         half_span,
-        [0.0, 0.0, GOAL_HEIGHT],
+        [0.0, 0.0, dimensions.height],
         ALONG_Y,
         true,
     );
@@ -262,14 +266,14 @@ fn goal_primitives(dimensions: GoalDimensions) -> Vec<GoalPrimitive> {
         add(
             MjtGeom::mjGEOM_CYLINDER,
             NET_RADIUS,
-            GOAL_HEIGHT / 2.0,
-            [-dimensions.depth, y, GOAL_HEIGHT / 2.0],
+            dimensions.height / 2.0,
+            [-dimensions.depth, y, dimensions.height / 2.0],
             IDENTITY,
             false,
         );
     }
     for index in 2..=7 {
-        let z = GOAL_HEIGHT * index as f64 / 8.0;
+        let z = dimensions.height * index as f64 / 8.0;
         add(
             MjtGeom::mjGEOM_CYLINDER,
             NET_RADIUS,
@@ -285,14 +289,14 @@ fn goal_primitives(dimensions: GoalDimensions) -> Vec<GoalPrimitive> {
             add(
                 MjtGeom::mjGEOM_CYLINDER,
                 NET_RADIUS,
-                GOAL_HEIGHT / 2.0,
-                [x, y, GOAL_HEIGHT / 2.0],
+                dimensions.height / 2.0,
+                [x, y, dimensions.height / 2.0],
                 IDENTITY,
                 false,
             );
         }
         for index in 2..=7 {
-            let z = GOAL_HEIGHT * index as f64 / 8.0;
+            let z = dimensions.height * index as f64 / 8.0;
             add(
                 MjtGeom::mjGEOM_CYLINDER,
                 NET_RADIUS,
@@ -309,7 +313,7 @@ fn goal_primitives(dimensions: GoalDimensions) -> Vec<GoalPrimitive> {
             MjtGeom::mjGEOM_CYLINDER,
             NET_RADIUS,
             half_span,
-            [x, 0.0, GOAL_HEIGHT],
+            [x, 0.0, dimensions.height],
             ALONG_Y,
             false,
         );
@@ -320,7 +324,7 @@ fn goal_primitives(dimensions: GoalDimensions) -> Vec<GoalPrimitive> {
             MjtGeom::mjGEOM_CYLINDER,
             NET_RADIUS,
             dimensions.depth / 2.0,
-            [-dimensions.depth / 2.0, y, GOAL_HEIGHT],
+            [-dimensions.depth / 2.0, y, dimensions.height],
             ALONG_X,
             false,
         );

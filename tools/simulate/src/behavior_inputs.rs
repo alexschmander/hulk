@@ -41,6 +41,7 @@ impl BehaviorInputs {
         ball: Option<([f64; 3], [f64; 3])>,
         field: &types::field_dimensions::FieldDimensions,
         side: GlobalFieldSide,
+        robots: &[[f32; 3]],
         time: Time,
     ) -> Result<()> {
         let pose = ground_to_field(ground_to_world, side);
@@ -48,7 +49,7 @@ impl BehaviorInputs {
             .map(|(position, velocity)| ball_in_ground(ground_to_world, position, velocity, time));
         let inverse = ground_to_world.inverse();
         use types::field_dimensions::{Half, Side};
-        let obstacles = [Half::Own, Half::Opponent]
+        let mut obstacles: Vec<_> = [Half::Own, Half::Opponent]
             .into_iter()
             .flat_map(|half| {
                 [Side::Left, Side::Right].map(|side| {
@@ -58,6 +59,10 @@ impl BehaviorInputs {
                 })
             })
             .collect();
+        obstacles.extend(robots.iter().map(|position| {
+            let p = inverse * nalgebra::Point3::from(*position);
+            Obstacle::robot(point![p.x, p.y], 0.2, 0.25)
+        }));
         self.pose.publish(&pose, time).await?;
         self.ball.publish(&ball, time).await?;
         self.visual_ball.publish(&ball, time).await?;
