@@ -20,7 +20,7 @@ Do not conceal such defects with ground truth.
 
 Continue in the existing isolated worktree and branch.
 Use linear commits and rebase workflows.
-Keep one controlled robot and the existing physics, fly camera, gizmo, ball controls and Booster mode emulation.
+Keep the existing physics, fly camera, gizmo, ball controls and Booster mode emulation for each controlled robot.
 Multiple robotics processes, dynamic controlled robots and router-side namespace rewriting remain separate work.
 
 Microphone capture and audio processing are out of scope.
@@ -585,3 +585,13 @@ The four live profiles and the separate localization tracking fixture pass; both
 - Filtering contracts: [ball_filter](../../crates/nodes/ball_filter/src/lib.rs), [obstacle_filter](../../crates/nodes/obstacle_filter/src/lib.rs), [announcing publisher](../../crates/ros-z-streams/src/announce.rs).
 - Estimated geometry: [ground_provider](../../crates/nodes/ground_provider/src/lib.rs), [camera_matrix_calculator](../../crates/nodes/camera_matrix_calculator/src/lib.rs), [odometry](../../crates/nodes/odometry/src/lib.rs).
 - Localization contracts: [feature extraction](../../crates/nodes/field_mark_association/src/features.rs), [VO messages](../../crates/types/src/visual_odometry.rs), [localization node](../../crates/nodes/localization-3d/src/node.rs), [local-frame initialization](../../crates/nodes/localization-3d/src/pose.rs), [symmetry branch selection](../../crates/nodes/localization-3d/src/alignment.rs), [IMU constraints](../../crates/localization-fagra/src/factors/imu.rs), [field side provider](../../crates/nodes/world_to_field_provider/src/lib.rs), [2D projection](../../crates/nodes/localization-2d/src/lib.rs).
+
+## Multi-robot execution
+
+The four profiles also run as independent player stacks in one shared MuJoCo world.
+Every player publishes its own `ground_truth/` references within its isolated transport scope.
+Profile 1 includes other simulated robots in ideal obstacles, and profiles 2–4 receive visible synthetic robot detections through the existing obstacle filter.
+Initial count and the shared parameter location are selected before startup.
+Dynamic robot initialization preserves paused simulation time and existing poses.
+The team runtime test covers identity allocation, isolated body commands, paused and running additions, common clock behavior and socket cleanup.
+The upstream HSL runtime test covers all five players and an individual penalty.

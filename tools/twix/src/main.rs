@@ -83,6 +83,10 @@ struct TwixApp {
     visual: Visuals,
     backend: Arc<RobotBackend>,
     runtime: tokio::runtime::Runtime,
+    #[cfg(feature = "simulator")]
+    simulator_router: Option<Arc<RobotBackend>>,
+    #[cfg(feature = "simulator")]
+    pending_backend: Option<(String, tokio::task::JoinHandle<Result<RobotBackend>>)>,
 }
 
 impl TwixApp {
@@ -131,6 +135,11 @@ impl TwixApp {
         visual.set_visual(&creation_context.egui_ctx);
 
         Self {
+            #[cfg(feature = "simulator")]
+            simulator_router: (backend.transport_scope() == Some(simulate::ZENOH_NAMESPACE))
+                .then(|| backend.clone()),
+            #[cfg(feature = "simulator")]
+            pending_backend: None,
             layout,
             namespace_editor,
             visual,
@@ -138,11 +147,69 @@ impl TwixApp {
             runtime,
         }
     }
+    #[cfg(feature = "simulator")]
+    fn synchronize_simulator_target(&mut self, context: &eframe::egui::Context) {
+        let Some(root) = &self.simulator_router else {
+            return;
+        };
+        let namespace = self.backend.namespace();
+        let number = namespace
+            .trim_start_matches('/')
+            .parse::<u8>()
+            .ok()
+            .filter(|n| (1..=5).contains(n));
+        self.layout.select_simulator_robot(number.unwrap_or(0));
+        let scope = number.map_or_else(
+            || simulate::ZENOH_NAMESPACE.to_owned(),
+            |number| format!("{}/{number}", simulate::ZENOH_NAMESPACE),
+        );
+        if self
+            .pending_backend
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending != scope)
+            && let Some((_, task)) = self.pending_backend.take()
+        {
+            task.abort();
+        }
+        if self
+            .pending_backend
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            let (_, task) = self.pending_backend.take().unwrap();
+            match self.runtime.block_on(task) {
+                Ok(Ok(backend)) => {
+                    self.backend = Arc::new(backend);
+                    self.layout.reconnect(&self.backend, context);
+                }
+                Ok(Err(error)) => log::error!("Switching simulator connection: {error:#}"),
+                Err(error) => log::error!("Switching simulator task: {error}"),
+            }
+        }
+        if self.backend.transport_scope() != Some(scope.as_str()) && self.pending_backend.is_none()
+        {
+            let runtime = self.runtime.handle().clone();
+            let router = root.router().map(str::to_owned);
+            let requested_scope = scope.clone();
+            let repaint = context.clone();
+            self.pending_backend = Some((
+                scope,
+                self.runtime.spawn(async move {
+                    let result =
+                        RobotBackend::new_scoped(runtime, router, namespace, Some(requested_scope))
+                            .await;
+                    repaint.request_repaint();
+                    result
+                }),
+            ));
+        }
+    }
 }
 
 impl App for TwixApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut Frame) {
-        let _runtime_guard = self.runtime.enter();
+        let runtime_handle = self.runtime.handle().clone();
+        let _runtime_guard = runtime_handle.enter();
         let context = ui.ctx().clone();
         let shortcuts_enabled = !self.layout.dialog_open();
 
@@ -185,6 +252,9 @@ impl App for TwixApp {
         });
 
         self.backend.replay().update(&context, &self.backend);
+
+        #[cfg(feature = "simulator")]
+        self.synchronize_simulator_target(&context);
 
         CentralPanel::default().show(ui, |ui| {
             let layout = &mut self.layout;

@@ -7,7 +7,7 @@
       "tiles": {
         "1": { "Pane": { "kind": "motion_simulator", "state": {} } },
         "2": { "Container": { "Tabs": { "children": [1], "active": 1 } } },
-        "3": { "Pane": { "kind": "parameter", "state": { "node": "/simulator/robot/behavior_node", "path": "control.injected_motion_command" } } },
+        "3": { "Pane": { "kind": "parameter", "state": { "node": "behavior_node", "path": "control.injected_motion_command" } } },
         "4": { "Pane": { "kind": "plot", "state": {} } },
         "5": { "Pane": { "kind": "behavior_tree", "state": {} } },
         "6": { "Container": { "Tabs": { "children": [3, 4, 5], "active": 3 } } },

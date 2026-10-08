@@ -4,7 +4,7 @@
 
 The old left palette and right Motion studio are removed.
 The palette could create robots without an owning robotics instance, so those robots were misleading test subjects.
-The new panel creates one controlled robot and adds balls with a button.
+The panel starts a configured team and adds controlled robots and balls with toolbar buttons.
 
 | Former control | Owner after integration |
 | --- | --- |
@@ -12,7 +12,7 @@ The new panel creates one controlled robot and adds balls with a button.
 | Parameter groups, snapshots, apply/discard, validation | Twix Parameter panel and the nodes' real parameter services |
 | Game state, penalties, field side | External HSL GameController over the real network pipeline |
 | Motion/actuator/behavior readouts | Twix Text, Plot and Behavior tree panels |
-| Robot and ball palette | One controlled robot; Add ball in the simulator |
+| Robot and ball palette | One to five controlled robots; Add robot and Add ball in the simulator |
 | Pause, reset and object placement | Simulator toolbar; ball dragging and robot translation/rotation gizmo |
 | Walk/kick arrows and camera | Simulator scene |
 | Reset robot and stack | Reset pose; Stop/Start for a new stack |
@@ -31,10 +31,11 @@ The simulator retains ball dragging and robot translation/rotation gizmos.
 
 ## Current process boundary
 
-Twix owns one in-process robotics context, the SDK substitute and a physics worker.
-The launcher scopes both Twix and the simulator to `hulk_simulator/` at the Zenoh session level.
+Twix owns one robotics context and SDK substitute per player, plus a shared physics worker and logical clock.
+Robot N uses the Zenoh session scope `hulk_simulator/N/` and ROS namespace `/N`.
 The panel requires that scope before it can start.
-Closing the panel stops the worker and node tasks and releases their sockets.
+Closing the panel cancels pending additions, drains the physics worker and node tasks, and releases their sockets.
+The simulator lease stays owned by the team until teardown completes.
 The simulator binds the same production message nodes as `hulk_ros_z`.
 There is no separate simulator game-state implementation.
 The simulator invokes the production message and button nodes unchanged.
@@ -61,19 +62,19 @@ A router-only solution still needs a gateway/plugin experiment with request/repl
 
 References: [Zenoh namespace introduction](https://zenoh.io/blog/2025-04-14-zenoh-gozuryu/), [Zenoh configuration](https://github.com/eclipse-zenoh/zenoh/blob/main/DEFAULT_CONFIG.json5).
 
-## Work to support dynamic robots
+## Multiple robots
 
-| Area | Existing support | Remaining work and relative difficulty |
-| --- | --- | --- |
-| Physics objects | Add/remove/recompile preserves existing state; each object has a unique entity prefix | Moderate: own a binding and SDK controller per robot and route observations by identity |
-| Booster transport | Namespaced sessions prove commands and replies do not cross robots | Small for scoped sessions; larger for transparent router-only rewriting |
-| Robotics identity | Binary derives ROS namespace from hardware identity; player/team are parameters | Moderate: allocate consistent hardware ID, robot prefix and unique player number; independent writable parameter directories |
-| Lifecycle | Single simulator owns its tasks and sockets | Moderate: launch/monitor each child, await readiness, remove robot only after its process exits, roll back failed starts |
-| HSL networking | Full one-robot message path and real GC returns work | Substantial: one network namespace and IP per robot, broadcast reachability and return routing; Zenoh prefixes alone cannot solve UDP port collisions |
-| Full `hulk_ros_z` | Node functions are reusable unchanged | Substantial: emulate raw device inputs and decide how real perception receives simulated camera data without duplicate ground-truth publishers |
-| Twix inspection | One ROS namespace can be selected | Moderate: select the matching global Zenoh session scope and preserve service/discovery behavior |
+Players 1 through 5 now have independent SDK controllers, raw sensor/button streams, node stacks, writable parameters and observation publishers.
+Adding a robot rebuilds MuJoCo while preserving existing state and SDK controller modes.
+Private UDP state/return ports avoid production endpoint collisions without changing the robotics nodes.
+An ephemeral loopback team channel keeps physical teammate broadcasts out of the simulation, while forwarding copies of simulated team messages to GameController for accounting.
+The upstream GameController runtime has accepted all five return streams and delivered a player-3 penalty through the unchanged production filters.
 
-A practical first increment is two isolated robotics processes and two physics robots with fixed identities, before adding dynamic UI.
-Validate addressed SDK queries/replies, independent parameter edits, disconnect/restart, real GC returns, team messages and cleanup after a failed launch.
-Dynamic Add/Remove should be the last step once these cases pass.
-The complete executable-level version is a separate development effort, not a palette button or a topic rename.
+Twix recreates inspection panels on a scoped backend switch while retaining the Simulator panel and scene.
+Relative topic and node names follow the selected player; intentionally absolute inspection paths remain absolute.
+One local gamepad is captured centrally and gated per selection with a fresh Start press.
+The remote-enabled state is read from the real behavior blackboard rather than inferred from UI input.
+
+This implements in-process multi-robot profiles, not separate full `hulk_ros_z` processes.
+Full executable support still needs device substitutes, a perception strategy, child-process supervision and end-to-end validation.
+Opposing teams and removing individual robots are outside the current one-team implementation.
