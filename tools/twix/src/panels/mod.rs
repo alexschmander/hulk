@@ -17,3 +17,6 @@ pub use parameter::ParameterPanel;
 pub use plot::PlotPanel;
 pub use text::TextPanel;
 pub use timeline::TimelinePanel;
+
+pub mod simulator;
+pub use simulator::SimulatorPanel;

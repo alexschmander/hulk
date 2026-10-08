@@ -1,0 +1,12 @@
+{
+  ball: {
+    mass: 0.450,
+    joint_damping: 0.002,
+    joint_friction_loss: 0.0,
+    // MuJoCo friction: sliding, torsional, rolling.
+    friction: [1.0, 0.005, 0.0001],
+    // Positive solref is [time constant, damping ratio].
+    solref: [0.08, 0.25],
+    solimp: [0.9, 0.95, 0.001, 0.5, 2.0],
+  },
+}

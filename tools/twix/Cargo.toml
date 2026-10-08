@@ -47,3 +47,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 twix_visualization = { workspace = true }
 types = { workspace = true }
 uuid = { workspace = true }
+simulate = { workspace = true, optional = true }
+
+[features]
+simulator = ["dep:simulate"]
