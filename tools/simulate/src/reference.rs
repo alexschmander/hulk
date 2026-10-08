@@ -64,10 +64,13 @@ use coordinate_systems::{Ground, Odometry, Robot};
 use kinematics::robot_kinematics::RobotKinematics;
 use linear_algebra::{Isometry3, Pose2, point};
 use projection::camera_matrix::CameraMatrix;
-use types::{support_foot::SupportFootState, time_wrapper::TimeWrapper};
+use types::{
+    camera_geometry::CameraGeometry, support_foot::SupportFootState, time_wrapper::TimeWrapper,
+};
 
 pub(crate) struct BodyReferences {
     camera: Reference<TimeWrapper<CameraMatrix>>,
+    camera_geometry: Reference<TimeWrapper<CameraGeometry>>,
     ground: Reference<TimeWrapper<Option<Isometry3<Ground, Robot>>>>,
     robot: Reference<TimeWrapper<Option<Isometry3<Robot, Ground>>>>,
     kinematics: Reference<TimeWrapper<RobotKinematics>>,
@@ -80,6 +83,7 @@ impl BodyReferences {
         Ok(Self {
             odometry_origin: std::sync::Mutex::new(None),
             camera: Reference::new(node, "camera_matrix", !profile.body_state()).await?,
+            camera_geometry: Reference::new(node, "camera_geometry", !profile.body_state()).await?,
             ground: Reference::new(node, "ground_to_robot", !profile.body_state()).await?,
             robot: Reference::new(node, "robot_to_ground", !profile.body_state()).await?,
             kinematics: Reference::new(node, "robot_kinematics", !profile.body_state()).await?,
@@ -89,6 +93,15 @@ impl BodyReferences {
         })
     }
     pub async fn publish(&self, sample: &Observation, time: Time) -> Result<()> {
+        self.camera_geometry
+            .publish(
+                &TimeWrapper {
+                    time,
+                    inner: CameraGeometry::from(&sample.camera_matrix),
+                },
+                time,
+            )
+            .await?;
         self.camera
             .publish(
                 &TimeWrapper {

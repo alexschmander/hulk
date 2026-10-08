@@ -1,8 +1,8 @@
 # Simulator profiles implementation plan
 
-Status: implemented on `twix/motion-simulator`, with the retained profile-4 limitation documented below.
-Profiles 1–3 pass their runtime gates; profile 4 is wired but its startup acquisition is blocked by the production field-association search budget.
-The camera-mount correction and prior-aligned spawn/reset placement have been implemented separately as prerequisites.
+Status: implemented on `twix/motion-simulator`.
+The authorized localization, preferred ball-filter and ball-search branches are squashed beneath the simulator commits.
+The camera-mount correction and sideline spawn/reset placement have been implemented separately as prerequisites.
 The [README](README.md) describes the current simulator.
 
 ## Scope and constraints
@@ -13,7 +13,8 @@ Synthetic image-space observations are in scope because filtering and localizati
 
 All wiring, substitute publishers, calibration overrides and tests belong in `tools/simulate`, with panel/settings changes in `tools/twix`.
 Reuse production node entry points and message types unchanged.
-Do not edit `crates/nodes`, supporting robotics crates, or shared robot parameter files.
+Simulator changes must not edit `crates/nodes`, supporting robotics crates, or shared robot parameter files.
+The three explicitly requested upstream branches are an authorized exception, including conflict resolution against the existing new-motion base.
 If testing exposes a robotics defect that cannot be resolved at the simulator boundary, report it separately; fixing it requires explicit approval.
 Do not conceal such defects with ground truth.
 
@@ -77,6 +78,7 @@ Mirror production topic suffixes and types where meaningful, for example:
 | `ground_truth/robot_to_ground`, `ground_truth/ground_to_robot` | Physical body/ground geometry |
 | `ground_truth/robot_kinematics`, `ground_truth/support_foot_state` | MuJoCo link transforms and support derived from physical contacts |
 | `ground_truth/camera_matrix` | Exact physical camera geometry and intrinsics |
+| `ground_truth/camera_geometry` | Exact body-relative camera geometry, independent of ground contact |
 | `ground_truth/inputs/odometry` | Exact planar movement relative to the trial's odometry origin |
 | `ground_truth/ball_filter/ball_position`, `ground_truth/visual_kick/ball_position` | Ideal scalar ball reference with the documented selection policy |
 | `ground_truth/obstacles` | Physical obstacle positions |
@@ -103,7 +105,7 @@ The table below describes only production ownership, not whether the reference i
 | `detected_whistle` / `filtered_whistle` | Simulator / whistle filter | Same | Same | Same |
 | `robot_kinematics`, `support_foot_state` | Truth | Truth | Real estimators | Real estimators |
 | `robot_to_ground`, `ground_to_robot` | Truth | Truth | Ground provider | Ground provider |
-| `camera_matrix` | Truth | Truth | Camera-matrix calculator | Camera-matrix calculator |
+| `camera_matrix`, `camera_geometry` | Truth | Truth | Camera-matrix calculator | Camera-matrix calculator |
 | `inputs/camera_info` | Simulator calibration | Simulator calibration | Simulator calibration | Simulator calibration |
 | `inputs/odometry` | Truth | Truth | Odometry node | Odometry node |
 | `current_odometry_to_last_odometry` | Not needed | No producer, matching production | No producer, matching production | No producer, matching production |
@@ -111,8 +113,8 @@ The table below describes only production ownership, not whether the reference i
 | `ball_filter/ball_position`, `visual_kick/ball_position` | Truth | Real filters/selector | Real filters/selector | Real filters/selector |
 | `obstacles` | Truth | Obstacle filter | Obstacle filter | Obstacle filter |
 | Ball hypotheses and search suggestions | Not needed | Real filter/suggestor | Real filter/suggestor | Real filter/suggestor |
-| Both `visual_odometry/...` outputs | Not needed | Not needed | Not needed | Simulated camera motion |
-| Field associations and localization pose/hint | Not needed | Not needed | Not needed | Real association/localization nodes |
+| `visual_odometry/current_left_camera_to_visual_odometer`, including its delta | Not needed | Not needed | Not needed | Simulated camera motion |
+| Field associations, localization estimate and lifecycle status | Not needed | Not needed | Not needed | Real association/localization nodes |
 | `ground_to_field` | Truth | Truth | Truth | Localization 2D projection |
 | `position_of_interest` | Minimal tool fallback using the selected ball topic | Same, using filtered ball | Same | Same |
 
@@ -235,12 +237,11 @@ Publish ground-truth planar odometry on `inputs/odometry`, using its existing an
 Anchor it at startup, independently of field side.
 Use the Ground frame convention expected by the real estimator/filter.
 
-There is no producer for `current_odometry_to_last_odometry` in this checkout, including the main `hulk_ros_z` setup.
-Leave it unproduced in the simulator as well, as requested.
-The obstacle filter's missing-input fallback is identity, so its prediction does not compensate existing hypotheses for observer movement through that input.
-Fresh detections still update them.
-Do not add the previously proposed adapter or fail readiness because this intentionally dangling subscriber is empty.
-Keep moving-observer tests and ground-truth comparisons to expose the actual production behavior; they must not assume compensation that production lacks.
+The old `current_odometry_to_last_odometry` topic remains unproduced.
+The preferred obstacle-filter branch now consumes absolute `inputs/odometry` and computes its own prediction deltas.
+Profiles 1–2 provide ideal absolute odometry; profiles 3–4 run the real odometry node.
+That node also publishes continuous-contact measurements on `odometry/kinematic_delta` for localization, whose production parameters control whether it uses them.
+Keep moving-observer tests and ground-truth comparisons to expose the actual production behavior.
 
 Acceptance: ball acquisition, motion/velocity estimation, multiple hypotheses, visibility loss and reacquisition, deletion expiry, kick-ball selection, goalpost obstacles while the observer walks/turns, and useful search suggestions after ball loss.
 Compare estimates to independent truth.
@@ -306,8 +307,8 @@ Publish the existing message types and topics:
 
 | Topic | Payload |
 | --- | --- |
-| `visual_odometry/current_left_camera_to_previous_left_camera` | `VisualOdometryDelta` with previous/current timestamps and `inverse(C(previous)) * C(current)` |
-| `visual_odometry/current_left_camera_to_visual_odometer` | `VisualOdometer` with current time, epoch and `inverse(C(epoch_start)) * C(current)` |
+| `ground_truth/visual_odometry/current_left_camera_to_previous_left_camera` | Reference-only `VisualOdometryDelta` with previous timestamp, current source timestamp and `inverse(C(previous)) * C(current)` |
+| `visual_odometry/current_left_camera_to_visual_odometer` | `VisualOdometer` with current time, epoch, optional delta and `inverse(C(epoch_start)) * C(current)` |
 
 The first sample of each epoch is identity and produces no delta.
 Both outputs derive from one trajectory and share timestamps.
@@ -319,24 +320,24 @@ Test noise/drift by perturbing one coherent camera trajectory and deriving both 
 A tracking reset increments the epoch, starts from identity and never creates a cross-epoch delta.
 Losing field observations must not silently stop VO; these are independent observation sources with independent loss tests.
 
-Localization needs fresh camera matrices at both VO endpoints, currently within 100 ms.
+Localization needs fresh body-relative `camera_geometry` at the VO endpoints; its production camera-gap limit is 20 ms.
 Schedule observations so the real geometry chain can produce these values, without delaying the high-rate sensor worker.
 Missing geometry must produce an observable dropped/deferred measurement, not substitution by perfect geometry.
 
-### Initialization at the production prior
+### Initialization at the sideline
 
-Spawn and Reset pose use the placement already expected by localization: `x=-field.length/2, y=-field.width/2, yaw=+90 degrees`, looking into the field.
+Spawn and Reset pose retain the established sideline placement: `x=-field.length/2, y=-field.width/2, yaw=+90 degrees`, looking into the field.
 MuJoCo grounds the prepared robot physically instead of imposing a nominal body height.
 Use the configured field dimensions.
 This placement is shared by all four profiles and is implemented in the current simulator.
 
-During Damping, localization resets to its existing startup prior and discards normal measurement processing.
-Leaving Damping allows field association/acquisition again.
-The published `localization` value is None for a startup prior, but the 3D pose/hint topics carry the prior, and the 2D projector can publish it as `ground_to_field`.
-Seeing a field-pose message alone therefore does not prove a visual fix.
-Distinguish the prior from an acquired result in profile-4 readiness/status.
+The new localization lifecycle starts a fresh epoch when leaving Damping.
+It initializes a field-independent local trajectory from IMU and kinematics, then obtains field alignment from visual associations.
+`localization/estimate.robot_to_field` stays absent until field alignment is available.
+The 2D projector publishes `ground_to_field` only from an aligned estimate with coherent ground geometry.
+Readiness distinguishes a live pipeline from acquired field alignment.
 
-Per the user's decision, keep baseline acquisition at this expected placement and skip the additional center-spawn, displaced/rotated-robot recovery, symmetry-branch and GameController side-change test scenarios.
+Per the user's decision, keep baseline acquisition at this sideline placement and skip the additional center-spawn, displaced/rotated-robot recovery, symmetry-branch and GameController side-change test scenarios.
 Do not add compensating logic for those cases.
 Preserve the existing robotics initialization and branch selection.
 
@@ -449,35 +450,42 @@ Reuse Twix for plotting those errors.
 Deliver linear, reviewable increments.
 Each gate must pass before the next profile is presented as supported.
 
-1. **Profile assembly and lifecycle.** Add enum, saved settings, immutable startup configuration and node/substitute ownership.
+1. **Profile assembly and lifecycle.**
+   Add enum, saved settings, immutable startup configuration and node/substitute ownership.
    Explicitly carry all 19 currently running nodes into profile 1: `behavior_node`, `ball_state_composer`, `rule_obstacle_composer`, `motion`, `motion_inference`, `head_motion`, `hardware_interface`, `fall_detection`, `safe_pose_checker`, `button_event_bridge`, `button_event_handler`, `global_parameter_provider`, `message_handler`, `message_filter`, `game_controller_filter`, `game_controller_state_filter`, `primary_state_filter`, `player_states_receiver` and `team_ball_filter`.
    Keep their SDK and input dependencies intact.
    Check saved-layout migration, startup cancellation, repeat start/stop, and default Twix compilation without the simulator feature.
    Keep unfinished profiles unavailable until their implementation gates pass.
-2. **Complete the profile-1 node set and shared controls.** Add the four missing common nodes explicitly: `low_state_bridge`, `controller_handler`, `whistle_filter` and `world_to_field_provider`.
+2. **Complete the profile-1 node set and shared controls.**
+   Add the four missing common nodes explicitly: `low_state_bridge`, `controller_handler`, `whistle_filter` and `world_to_field_provider`.
    Profile 1 is not complete until the 24-node common set is wired and validated; profiles 2-4 inherit it, with the documented external controller-source exception.
    Run `led_handler` and consume and acknowledge its Booster light RPC through the unchanged hardware interface.
    Implement raw paired sensor packets, gamepad source selection and whistle pulses.
    Remove direct sensor publishers.
    Exercise real button/mode paths, actual HSL roundtrip, raw timestamps, no-gamepad startup and external controller disconnect.
    Verify the native OS gamepad path with a real or virtual input device.
-3. **Coherent truth and geometry.** Capture unified samples, camera calibration, all ball poses and discontinuities.
+3. **Coherent truth and geometry.**
+   Capture unified samples, camera calibration, all ball poses and discontinuities.
    Establish independent transform fixtures, physical camera conventions and paused-sensor semantics.
    Publish all reference streams under `ground_truth/`, regardless of selected profile; test their presence across all four configurations.
    Move attention fallback to the active ball topic.
    Finish and verify Motion & behavior.
-4. **Filtering.** Add synthetic detections and announcing truth odometry; enable the four filtering nodes.
+4. **Filtering.**
+   Add synthetic detections and announcing truth odometry; enable the four filtering nodes.
    Leave `current_odometry_to_last_odometry` unproduced.
    Verify hypothesis lifecycle, moving-observer obstacles, empty frames, partial visibility, physical ball height, and FutureMap ordering/latency.
    Enable profile 2.
-5. **Body state & odometry.** Add real estimators and periodic camera calibration; remove perfect transforms/odometry from their production topics.
+5. **Body state & odometry.**
+   Add real estimators and periodic camera calibration; remove perfect transforms/odometry from their production topics.
    Verify calibration parity first, then stationary, walking, fall and recovery cases.
    Enable profile 3.
-6. **Localization.** Add labeled field observations and coherent VO streams; run association/localization and remove the field-pose substitute.
+6. **Localization.**
+   Add labeled field observations and coherent VO streams; run association/localization and remove the field-pose substitute.
    Test acquisition, head motion, ordinary tracking, coherent VO epochs and topic ownership.
    Skip the additional recovery, symmetry and GC side-change scenarios as requested.
    Enable profile 4 only after its actual observable behavior is documented.
-7. **Cross-profile acceptance and documentation.** Run a scenario matrix through the same production profile launcher, complete native Twix checks, update the README/preset and replace stale audit statements about current controls/coverage.
+7. **Cross-profile acceptance and documentation.**
+   Run a scenario matrix through the same production profile launcher, complete native Twix checks, update the README/preset and replace stale audit statements about current controls/coverage.
    Verify the final diff contains no robotics/shared-parameter edits and history remains linear.
 
 Use tests that cross the actual boundary, not replicas of node implementations:
@@ -513,16 +521,16 @@ Runtime validation is required for these implementations.
   Retain its transform check and verify joint/sole frame parity when enabling profile 3.
   Any actual robotics correction still requires explicit approval.
 - The obstacle-delta subscriber intentionally remains dangling, matching main `hulk_ros_z`.
-  Record its identity fallback and any resulting moving-observer tracking errors; do not add simulator compensation for missing production logic.
-- Start at the production localization prior.
+  The preferred obstacle filter uses absolute odometry; preserve that production path without a simulator delta adapter.
+- Start at the established sideline placement.
   Additional arbitrary-placement, symmetry and GC side-change tests are excluded by the user's decision; do not make them implementation gates or introduce simulator workarounds for them.
 - Correct sensor publication during pauses and scene edits matters more once IMU integration runs.
   Measuring queue delays and coherent stationary observations is a prerequisite, not a later performance polish.
 
 ## Validation record and retained limitations
 
-Profiles 1–3 have passed the same production launcher with real physics, motion models and ONNX Runtime.
-The latest profile-3 fixture measured 0.047 m maximum walking odometry error over three seconds, less than 1 mm paused drift, and about 0.1 mm initial camera translation difference.
+Profiles 1–4 have passed the same production launcher with real physics, motion models and ONNX Runtime.
+The latest profile-3 fixture measured 0.0432 m maximum walking odometry error over three seconds, less than 1 mm paused drift, and about 0.1 mm initial camera translation difference.
 The filter fixtures cover rolling-ball velocity, seeded 2 px noise, total detection loss, reacquisition, multiple hypotheses, nearest kick-ball selection and deletion expiry.
 The robot-obstacle fixture exercises the actual filter through announcing publishers and verifies acquisition and timeout.
 Raw sensor pairing and source timestamps are tested through the unchanged low-state bridge.
@@ -531,26 +539,27 @@ Both raw SDK request/reply and ROS topics are isolated between global scopes `42
 
 The actual HSL runtime roundtrip passes Ready, pickup penalty, penalty removal, accepted return messages and whistle-in-Set with no fabricated GameController packets.
 Twix tests pass with the simulator feature enabled and disabled.
-Native Twix starts profiles 1–3 and preserves the profile choice across application restart.
+Native Twix starts all four profiles and preserves the profile choice across application restart.
+The updated Bevy renderer displays the scene with orbit controls disabled, and the native check confirms that `M` captures the fly camera and `W` moves it.
 The local controller node starts without a device and the external controller path passes walking/disconnect tests.
 OS gamepad capture remains unverified because this environment exposes neither an input device nor `uinput`.
 
-Moving-observer obstacle comparisons expose existing production limitations rather than compensating for them.
-Goalpost outputs differed from arrival-time truth by up to 0.44 m in the walking fixture; those outputs contain no measurement timestamp, so this includes processing delay.
-The missing odometry-delta input remains unproduced.
-The obstacle filter's fixed map also offsets post centers by `(goal_post_diameter - line_width)/2` relative to the shared field helper, or 0.02 m with the default dimensions.
-These findings do not authorize robotics changes.
+The preferred obstacle filter computes observer-motion compensation from absolute odometry.
+Moving-observer goalpost outputs differed from arrival-time truth by up to 0.1084 m in the walking fixture; this comparison includes processing delay.
+The obsolete `current_odometry_to_last_odometry` topic remains unproduced.
+The obstacle filter's fixed map still offsets post centers by `(goal_post_diameter - line_width)/2` relative to the shared field helper, or 0.02 m with the default dimensions.
+These findings do not authorize further robotics changes.
 
-Profile 4's 13-landmark startup frame reproduces a separate production limitation.
-The field-association solver stops at 2,501 lookup hits and rejects the truncated search, despite having valid candidate matches.
-A debugger replay allowing the complete search uses 6,654 lookups and 56 refined seeds, and returns an acquired pose without changing observations, geometry or acceptance gates.
-The proposed correction raises `MAX_TRIPLET_LOOKUP_HITS` from 2,500 to 10,000 in `crates/nodes/field_mark_association/src/global_association/solver/types.rs`.
-The user chose to retain the existing robotics code and report the limitation instead of applying that correction.
-No robotics source file has been changed for this implementation.
-The captured frame is retained in `tests/fixtures/localization_startup.json`; its acquisition regression test is explicitly ignored with the production limitation stated in its reason.
-The separate `localization_acquisition_and_tracking` test also remains ignored and will fail at acquisition with current production code.
-The shared startup test validates profile 4's live input chain, VO ingestion, topic ownership and honest acquisition status, without claiming an acquired pose or validated tracking.
-Profile 4 is implemented with this accepted limitation; acquisition and tracking remain unvalidated.
+The user explicitly authorized the localization-improvements branch, preferred ball-filter branch and ball-search-behavior branch as three squashes below the simulator history.
+The localization branch replaces the old solver and its lookup-budget limitation; the previously declined one-line budget patch was not applied.
+The captured 13-landmark startup frame now passes the production global association solver and runs in the ordinary unit suite.
+Live localization acquired with 0.0002 m stationary position error and less than 0.0001 rad yaw error.
+The three-second walking and articulated-head fixture measured 0.0152 m maximum position error and 0.0091 rad maximum yaw error.
+Its last solve took 2.56 ms with 2,050 measurements.
+These are measurements from one simulator run, not guarantees for arbitrary trajectories, occlusion or sensor noise.
+Localization uses the new `localization/estimate`, `localization/status` and `field_mark_association/visual_localization_local` contracts.
+VO deltas are carried by `VisualOdometer`, and body-relative camera geometry remains available under `ground_truth/camera_geometry` in every profile.
+All simulator adaptations remain in tooling; the only new robotics changes are the authorized upstream branch contents and their compatibility conflict resolutions.
 
 ## Source references
 
@@ -559,4 +568,4 @@ Profile 4 is implemented with this accepted limitation; acquisition and tracking
 - Common controls: [controller_handler](../../crates/nodes/controller_handler/src/lib.rs), [behavior input freshness](../../crates/nodes/behavior_node/src/node.rs), [whistle_filter](../../crates/nodes/whistle_filter/src/lib.rs), [game state filter](../../crates/nodes/game_controller_state_filter/src/lib.rs).
 - Filtering contracts: [ball_filter](../../crates/nodes/ball_filter/src/lib.rs), [obstacle_filter](../../crates/nodes/obstacle_filter/src/lib.rs), [announcing publisher](../../crates/ros-z-streams/src/announce.rs).
 - Estimated geometry: [ground_provider](../../crates/nodes/ground_provider/src/lib.rs), [camera_matrix_calculator](../../crates/nodes/camera_matrix_calculator/src/lib.rs), [odometry](../../crates/nodes/odometry/src/lib.rs).
-- Localization contracts: [feature extraction](../../crates/nodes/field_mark_association/src/features.rs), [VO messages](../../crates/types/src/visual_odometry.rs), [localization node](../../crates/nodes/localization-3d/src/node.rs), [startup prior](../../crates/nodes/localization-3d/src/pose.rs), [symmetry branch selection](../../crates/nodes/field_mark_association/src/global_association/solver/output.rs), [IMU yaw constraints](../../crates/localization-factrs/src/factors/imu/relative_yaw.rs), [field side provider](../../crates/nodes/world_to_field_provider/src/lib.rs), [2D projection](../../crates/nodes/localization-2d/src/lib.rs).
+- Localization contracts: [feature extraction](../../crates/nodes/field_mark_association/src/features.rs), [VO messages](../../crates/types/src/visual_odometry.rs), [localization node](../../crates/nodes/localization-3d/src/node.rs), [local-frame initialization](../../crates/nodes/localization-3d/src/pose.rs), [symmetry branch selection](../../crates/nodes/localization-3d/src/alignment.rs), [IMU constraints](../../crates/localization-fagra/src/factors/imu.rs), [field side provider](../../crates/nodes/world_to_field_provider/src/lib.rs), [2D projection](../../crates/nodes/localization-2d/src/lib.rs).

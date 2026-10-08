@@ -305,7 +305,6 @@ impl CameraMotion {
             .filter(|(old_epoch, old_time, _)| *old_epoch == epoch && *old_time < time)
             .map(|(_, previous_time, previous)| VisualOdometryDelta {
                 previous_time,
-                current_time: time,
                 current_left_camera_to_previous_left_camera: previous.inverse() * camera,
             });
         if delta.is_none() {
@@ -314,6 +313,7 @@ impl CameraMotion {
         self.previous = Some((epoch, time, camera));
         (
             VisualOdometer {
+                delta: delta.clone(),
                 time,
                 epoch,
                 current_left_camera_to_visual_odometer: self.origin.inverse() * camera,
@@ -362,7 +362,7 @@ impl CameraInputs {
             delta: Reference::new(
                 node,
                 "visual_odometry/current_left_camera_to_previous_left_camera",
-                profile.localization(),
+                false,
             )
             .await?,
             odometer: Reference::new(
@@ -617,6 +617,12 @@ mod tests {
             .announcing_publisher::<TimeWrapper<Vec<Object<Label>>>>("detected_objects")
             .await
             .unwrap();
+        let odometry = node
+            .announcing_publisher::<linear_algebra::Pose2<coordinate_systems::Odometry>>(
+                "inputs/odometry",
+            )
+            .await
+            .unwrap();
         let obstacles = node
             .subscriber::<Vec<Obstacle>>("obstacles")
             .cache(1)
@@ -650,6 +656,13 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            odometry
+                .announce(time)
+                .await
+                .unwrap()
+                .publish(&linear_algebra::Pose2::new(point![0.0, 0.0], 0.0))
+                .await
+                .unwrap();
             detections
                 .announce(time)
                 .await
@@ -670,6 +683,13 @@ mod tests {
         assert!((robot.position - position).norm() < 0.001);
         for _ in 0..45 {
             let time = node.clock().now();
+            odometry
+                .announce(time)
+                .await
+                .unwrap()
+                .publish(&linear_algebra::Pose2::new(point![0.0, 0.0], 0.0))
+                .await
+                .unwrap();
             detections
                 .announce(time)
                 .await
@@ -713,6 +733,7 @@ mod tests {
             );
         let (initial, delta) = motion.observe(0, Time::from_nanos(1), first);
         assert!(delta.is_none());
+        assert!(initial.delta.is_none());
         assert!(
             initial
                 .current_left_camera_to_visual_odometer
@@ -723,6 +744,17 @@ mod tests {
         );
         let (_, a) = motion.observe(0, Time::from_nanos(2), second);
         let (total, b) = motion.observe(0, Time::from_nanos(3), third);
+        let embedded = total
+            .delta
+            .as_ref()
+            .expect("production odometer carries its delta");
+        assert_eq!(embedded.previous_time, Time::from_nanos(2));
+        assert_eq!(
+            embedded.current_left_camera_to_previous_left_camera,
+            b.as_ref()
+                .unwrap()
+                .current_left_camera_to_previous_left_camera,
+        );
         let composed = a.unwrap().current_left_camera_to_previous_left_camera
             * b.unwrap().current_left_camera_to_previous_left_camera;
         assert!(
