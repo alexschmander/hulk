@@ -64,11 +64,12 @@ and `team_ball_filter`. Behavior sends the real return and team messages through
 that handler. The simulator does not publish fabricated filtered game or primary
 states. Use GameController for game phases, penalties, scores, sides and restarts.
 
-Run GameController on a separate machine or in a separate network namespace.
-Both GameController and HULK bind the team's UDP port, so starting both in the same
-host network namespace conflicts. Zenoh namespaces do not isolate UDP sockets.
-The automated roundtrip below creates private networks without changing the host's
-interfaces. Ensure UDP can cross the network when using separate machines.
+GameController and Twix can run on the same machine, in either startup order.
+Both receivers share the team's UDP port and receive team broadcasts. Select a
+GameController network interface whose broadcast address matches HULK's configured
+address. When using separate machines, ensure UDP can cross the network.
+The automated roundtrip below runs both applications in one private network without
+changing the host's interfaces.
 
 ## Parameters and observations
 
@@ -105,10 +106,10 @@ git clone https://github.com/RoboCup-HumanoidSoccerLeague/GameController /tmp/hs
 tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
 ```
 
-The last test requires Linux user/network namespaces, `ip`, `nsenter`, Python 3,
+The last test requires Linux user/network namespaces, `ip`, Python 3,
 and the upstream Rust build dependencies including libclang. It compiles the
 upstream `game_controller_runtime` used by the GUI, drives its normal action API,
-and connects it to HULK's production message nodes in two private networks. It
+and connects it to HULK's production message nodes in the same private network. It
 checks Ready, a pickup penalty, penalty removal, and GameController's acceptance of
 return messages. No synthetic GameController packets are used in this test. The GUI
 itself is not driven. Tested against upstream commit

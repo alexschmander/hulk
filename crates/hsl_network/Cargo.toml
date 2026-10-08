@@ -13,6 +13,7 @@ hsl_network_messages = { workspace = true }
 log = { workspace = true }
 ros-z = { workspace = true }
 serde = { workspace = true }
+socket2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 types = { workspace = true }

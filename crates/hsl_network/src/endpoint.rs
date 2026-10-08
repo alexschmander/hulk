@@ -6,6 +6,7 @@ use std::{
 use log::warn;
 use ros_z::Message;
 use serde::{Deserialize, Serialize};
+use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
 use tokio::{net::UdpSocket, select};
 use types::messages::{IncomingMessage, OutgoingMessage};
@@ -20,6 +21,8 @@ pub struct Endpoint {
 pub enum Error {
     #[error("failed to bind socket")]
     CannotBind(io::Error),
+    #[error("failed to create team message socket")]
+    CreateTeamSocket(io::Error),
     #[error("failed to enable broadcast socket option")]
     EnableBroadcast(io::Error),
     #[error("failed to read from socket")]
@@ -34,10 +37,7 @@ impl Endpoint {
         ))
         .await
         .map_err(Error::CannotBind)?;
-        let hsl_socket =
-            UdpSocket::bind(SocketAddrV4::new(Ipv4AddrStd::UNSPECIFIED, parameters.hsl))
-                .await
-                .map_err(Error::CannotBind)?;
+        let hsl_socket = bind_team_socket(parameters.hsl)?;
         hsl_socket
             .set_broadcast(true)
             .map_err(Error::EnableBroadcast)?;
@@ -128,6 +128,27 @@ impl Endpoint {
     }
 }
 
+fn bind_team_socket(port: u16) -> Result<UdpSocket, Error> {
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        .map_err(Error::CreateTeamSocket)?;
+    // GameController also listens for team broadcasts. Both receivers must opt
+    // into sharing before binding, regardless of which application starts first.
+    socket
+        .set_reuse_address(true)
+        .map_err(Error::CreateTeamSocket)?;
+    #[cfg(target_os = "macos")]
+    socket
+        .set_reuse_port(true)
+        .map_err(Error::CreateTeamSocket)?;
+    socket
+        .bind(&SocketAddrV4::new(Ipv4AddrStd::UNSPECIFIED, port).into())
+        .map_err(Error::CannotBind)?;
+    socket
+        .set_nonblocking(true)
+        .map_err(Error::CreateTeamSocket)?;
+    UdpSocket::from_std(socket.into()).map_err(Error::CreateTeamSocket)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Message)]
 pub struct Ports {
     game_controller_state: u16,
@@ -144,5 +165,102 @@ pub struct Ipv4Addr {
 impl From<Ipv4Addr> for Ipv4AddrStd {
     fn from(addr: Ipv4Addr) -> Self {
         Self::from_octets(addr.octets)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::{net::UdpSocket as StdSocket, time::Duration};
+
+    use hsl_network_messages::{HulkMessage, PlayerNumber, StateMessage};
+
+    use super::*;
+
+    // Match the Linux socket options of upstream GameController's team receiver.
+    fn controller_receiver(port: u16) -> UdpSocket {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket.set_reuse_address(true).unwrap();
+        socket
+            .bind(&SocketAddrV4::new(Ipv4AddrStd::UNSPECIFIED, port).into())
+            .unwrap();
+        socket.set_nonblocking(true).unwrap();
+        UdpSocket::from_std(socket.into()).unwrap()
+    }
+
+    async fn shared_team_port(controller_first: bool) {
+        let controller = controller_first.then(|| controller_receiver(0));
+        let mut endpoint = Endpoint::new(Ports {
+            game_controller_state: 0,
+            game_controller_return: 0,
+            hsl: controller
+                .as_ref()
+                .map_or(0, |socket| socket.local_addr().unwrap().port()),
+            hsl_broadcast_address: Ipv4Addr {
+                octets: [127, 255, 255, 255],
+            },
+        })
+        .await
+        .unwrap();
+        let team_port = endpoint.hsl_socket.local_addr().unwrap().port();
+        endpoint.ports.hsl = team_port;
+        let controller = controller.unwrap_or_else(|| controller_receiver(team_port));
+
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender.set_broadcast(true).unwrap();
+        let teammate = HulkMessage::State(StateMessage {
+            player_number: PlayerNumber::Two,
+            ..Default::default()
+        });
+        let bytes = bincode::serialize(&teammate).unwrap();
+        sender
+            .send_to(&bytes, ("127.255.255.255", team_port))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut buffer = [0; 1024];
+            let length = controller.recv(&mut buffer).await.unwrap();
+            assert_eq!(&buffer[..length], bytes);
+            assert!(matches!(
+                endpoint.read().await.unwrap(),
+                IncomingMessage::Hsl(HulkMessage::State(StateMessage {
+                    player_number: PlayerNumber::Two,
+                    ..
+                }))
+            ));
+
+            let outgoing = HulkMessage::State(StateMessage {
+                player_number: PlayerNumber::Three,
+                ..Default::default()
+            });
+            let bytes = bincode::serialize(&outgoing).unwrap();
+            endpoint.write(OutgoingMessage::Hsl(outgoing)).await;
+            let length = controller.recv(&mut buffer).await.unwrap();
+            assert_eq!(&buffer[..length], bytes);
+            assert!(matches!(
+                endpoint.read().await.unwrap(),
+                IncomingMessage::Hsl(HulkMessage::State(StateMessage {
+                    player_number: PlayerNumber::Three,
+                    ..
+                }))
+            ));
+        })
+        .await
+        .expect("both receivers must receive team broadcasts");
+
+        let game_address = endpoint.game_controller_state_socket.local_addr().unwrap();
+        drop(endpoint);
+        drop(controller);
+        StdSocket::bind(game_address).unwrap();
+        StdSocket::bind((Ipv4AddrStd::UNSPECIFIED, team_port)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn team_broadcasts_are_shared_when_hulk_starts_first() {
+        shared_team_port(false).await;
+    }
+
+    #[tokio::test]
+    async fn team_broadcasts_are_shared_when_game_controller_starts_first() {
+        shared_team_port(true).await;
     }
 }
