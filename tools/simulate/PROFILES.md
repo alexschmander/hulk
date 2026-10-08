@@ -50,6 +50,7 @@ Run these in every profile:
 | Raw Booster inputs and body buttons | `low_state_bridge`, `button_event_bridge`, `button_event_handler` |
 | Gamepad | `controller_handler`, using the existing controller input and behavior path |
 | Whistle | `whistle_filter` |
+| LED output | `led_handler`, through the existing `hardware_interface` light RPC |
 | HSL communications and state | `message_handler`, `message_filter`, `game_controller_filter`, `game_controller_state_filter`, `primary_state_filter`, `player_states_receiver`, `team_ball_filter` |
 | Shared configuration and field side | `global_parameter_provider`, `world_to_field_provider` |
 
@@ -415,7 +416,7 @@ Keep responsibilities small in number:
 | Ideal behavior inputs, always-published references and synthetic detections | Tool-local input modules replacing the monolithic `BehaviorInputs` ownership |
 | Camera-motion trajectory and VO messages | Tool-local VO substitute |
 | Whistle pulse scheduling | Tool-local control publisher, driven by toolbar intent |
-| Profile selection/persistence and running status | `tools/twix/src/panels/simulator.rs` plus existing simulator toolbar |
+| Profile selection/persistence and startup errors | `tools/twix/src/panels/simulator.rs` plus existing simulator toolbar |
 
 Only add module splits where there is substantial behavior to own.
 Reuse existing types and projection math; add dependencies in `tools/simulate/Cargo.toml` on the already available nodes, ROS2 sensor types and `ros-z-streams`.
@@ -428,7 +429,9 @@ Persist the profile with the existing panel settings and retain the legacy panel
 Do not offer Vision until it exists.
 Keep detailed node coverage in an optional disclosure.
 
-During a run, display the selected profile and concise startup/failure/acquisition status.
+Show startup progress and failures in the panel.
+Inspect primary state, localization and Game Controller status through Twix or GameController instead of repeating them in the toolbar.
+Display the received Booster LED color in a toolbar rectangle.
 Add Whistle next to the existing body buttons.
 Keep robot tuning in Twix's Parameter panel and output analysis in Text/Plot/Map; do not reintroduce a simulator parameter editor.
 Optional observation noise/loss belongs in simulator parameters, with zero-noise defaults.
@@ -452,7 +455,8 @@ Each gate must pass before the next profile is presented as supported.
    Check saved-layout migration, startup cancellation, repeat start/stop, and default Twix compilation without the simulator feature.
    Keep unfinished profiles unavailable until their implementation gates pass.
 2. **Complete the profile-1 node set and shared controls.** Add the four missing common nodes explicitly: `low_state_bridge`, `controller_handler`, `whistle_filter` and `world_to_field_provider`.
-   Profile 1 is not complete until the 23-node common set is wired and validated; profiles 2-4 inherit it, with the documented external controller-source exception.
+   Profile 1 is not complete until the 24-node common set is wired and validated; profiles 2-4 inherit it, with the documented external controller-source exception.
+   Run `led_handler` and consume and acknowledge its Booster light RPC through the unchanged hardware interface.
    Implement raw paired sensor packets, gamepad source selection and whistle pulses.
    Remove direct sensor publishers.
    Exercise real button/mode paths, actual HSL roundtrip, raw timestamps, no-gamepad startup and external controller disconnect.
@@ -485,7 +489,7 @@ Use tests that cross the actual boundary, not replicas of node implementations:
 | Ownership/isolation | Exactly one producer for designated functional topics; all references remain under `ground_truth/` in every profile; no truth fallback in higher profiles; intentionally missing obstacle-delta input stays absent; scopes `42`/`43` stay isolated for raw and ROS traffic |
 | Lifecycle/load | Hidden panel, pause/resume, slow scene rebuild, ball edits, missing observations, failed start, repeated Stop/Start, no sensor starvation |
 | External controls | Actual HSL runtime roundtrip including whistle-in-Set; real/virtual OS gamepad and separate external publisher; held/released body buttons |
-| Native UI | Persisted selector, disabled changes during startup/run, profile status, Whistle, existing camera/gizmo controls, useful startup errors |
+| Native UI | Persisted selector, disabled changes during startup/run, LED color, Whistle, existing camera/gizmo controls, useful startup errors |
 
 For transform/serialization fixtures use tight numerical assertions.
 For integrated estimators define tolerances per scenario and units before accepting results, based on the configured estimator noise and observation rate.
@@ -503,7 +507,7 @@ Runtime validation is required for these implementations.
   Do not add their dependencies or present their coverage in these four profiles.
 - Do not run the stub nodes `active_vision`, `world_state_composer`, `time_to_reach_kick_position`, `motor_commands_collector` or `trigger` as evidence of additional coverage.
   Only the minimal attention substitute is needed here.
-- Booster odometer/fall-state firmware topics, LED emulation and MCAP recording are separate optional features.
+- Booster odometer/fall-state firmware topics and MCAP recording are separate optional features.
   They are not prerequisites for these profile boundaries.
 - The camera mount has been aligned with the production parameters.
   Retain its transform check and verify joint/sole frame parity when enabling profile 3.
