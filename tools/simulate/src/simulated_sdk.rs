@@ -1,5 +1,5 @@
-//! Simulator-side replacement for the manufacturer's mode and joint controller.
-use booster::{LowCommand, RobotMode, RpcReqMsg, RpcRespMsg};
+//! Simulator-side replacement for the manufacturer's mode, joint and LED controllers.
+use booster::{LedColor, LowCommand, RobotMode, RpcReqMsg, RpcRespMsg};
 use color_eyre::{Result, eyre::eyre};
 use mujoco_rs::prelude::{MjData, MjModel};
 use ros_z::prelude::Context;
@@ -12,6 +12,8 @@ pub struct Control {
     pub mode: RobotMode,
     pub command: Option<LowCommand>,
     generation: u64,
+    /// None means no active LED override; firmware-owned colors are not simulated.
+    pub led: Option<LedColor>,
 }
 
 impl Default for Control {
@@ -20,6 +22,7 @@ impl Default for Control {
             mode: RobotMode::Damping,
             command: None,
             generation: 0,
+            led: None,
         }
     }
 }
@@ -44,6 +47,11 @@ pub async fn start(
     let requests = context
         .session()
         .declare_subscriber("rt/LocoApiTopicReq")
+        .await
+        .map_err(|e| eyre!("{e}"))?;
+    let lights = context
+        .session()
+        .declare_subscriber("rt/LightControlApiTopicReq")
         .await
         .map_err(|e| eyre!("{e}"))?;
     let joints = context
@@ -77,19 +85,23 @@ pub async fn start(
                         // Publish the new ownership before acknowledging the mode change.
                         updates.send_replace(control.clone());
                     }
-                    let response = RpcRespMsg {
-                        uuid: request.uuid,
-                        header: serde_json::json!({"status": if mode.is_some() { 0 } else { 1 }}).to_string(),
-                        body: if mode.is_some() { String::new() } else { "Unsupported simulator SDK request".into() },
+                    respond(&session, "rt/LocoApiTopicResp", request.uuid, mode.is_some()).await;
+                }
+                sample = lights.recv_async() => {
+                    let Ok(sample) = sample else { break };
+                    let request = match cdr::deserialize::<RpcReqMsg>(&sample.payload().to_bytes()) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            log::warn!("invalid simulator LED request: {error}");
+                            continue;
+                        }
                     };
-                    let result = async {
-                        let bytes = cdr::serialize::<_, _, cdr::CdrLe>(&response, cdr::Infinite)?;
-                        session.put("rt/LocoApiTopicResp", bytes).await.map_err(|e| eyre!("{e}"))?;
-                        Ok::<_, color_eyre::Report>(())
-                    }.await;
-                    if let Err(error) = result {
-                        log::warn!("simulator SDK response failed: {error:#}");
+                    let led = requested_led(&request);
+                    if let Ok(color) = led.as_ref() {
+                        control.led = *color;
+                        updates.send_replace(control.clone());
                     }
+                    respond(&session, "rt/LightControlApiTopicResp", request.uuid, led.is_ok()).await;
                 }
                 sample = joints.recv_async() => {
                     let Ok(sample) = sample else { break };
@@ -113,6 +125,36 @@ pub async fn start(
         }
     });
     Ok((control, task))
+}
+
+async fn respond(session: &zenoh::Session, topic: &str, uuid: String, accepted: bool) {
+    let response = RpcRespMsg {
+        uuid,
+        header: serde_json::json!({"status": if accepted { 0 } else { 1 }}).to_string(),
+        body: if accepted {
+            String::new()
+        } else {
+            "Unsupported simulator SDK request".into()
+        },
+    };
+    let result = async {
+        let bytes = cdr::serialize::<_, _, cdr::CdrLe>(&response, cdr::Infinite)?;
+        session.put(topic, bytes).await.map_err(|e| eyre!("{e}"))?;
+        Ok::<_, color_eyre::Report>(())
+    }
+    .await;
+    if let Err(error) = result {
+        log::warn!("simulator SDK response failed: {error:#}");
+    }
+}
+
+fn requested_led(request: &RpcReqMsg) -> Result<Option<LedColor>> {
+    let header: serde_json::Value = serde_json::from_str(&request.header)?;
+    match header["api_id"].as_i64() {
+        Some(2000) => Ok(Some(serde_json::from_str(&request.body)?)),
+        Some(2001) => Ok(None),
+        _ => Err(eyre!("unsupported LED API")),
+    }
 }
 
 fn requested_mode(request: &RpcReqMsg) -> Option<RobotMode> {
@@ -343,6 +385,57 @@ mod tests {
         assert!(request(&contexts[1], 2000, 1).await);
         assert_eq!(robot42.borrow().mode, RobotMode::Custom);
         assert_eq!(robot43.borrow().mode, RobotMode::Prepare);
+        let light = hardware_interface::LightClient::new(contexts[0].session())
+            .await
+            .unwrap();
+        let light_replies = router
+            .session()
+            .declare_subscriber("42/rt/LightControlApiTopicResp")
+            .await
+            .unwrap();
+        let color = LedColor {
+            r: 12,
+            g: 34,
+            b: 56,
+        };
+        light
+            .set_led_light_color(color, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(robot42.borrow().led, Some(color));
+        assert_eq!(robot43.borrow().led, None);
+        let reply = tokio::time::timeout(Duration::from_secs(2), light_replies.recv_async())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.key_expr().as_str(), "42/rt/LightControlApiTopicResp");
+        // Reject unsupported APIs and malformed/out-of-range colors without changing the LED.
+        let rpc = hardware_interface::ZenohRpcClient::new(
+            contexts[0].session(),
+            "rt/LightControlApiTopic",
+        )
+        .await
+        .unwrap();
+        for (api, body) in [
+            (9999, ""),
+            (2000, "invalid"),
+            (2000, r#"{"r":256,"g":0,"b":0}"#),
+        ] {
+            let error = rpc
+                .call(api, body, Duration::from_secs(2))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("status 1"), "{error}");
+            assert_eq!(robot42.borrow().led, Some(color));
+        }
+        light
+            .stop_led_light_control(Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(robot42.borrow().led, None);
+        assert_eq!(robot42.borrow().mode, RobotMode::Custom);
+        drop(rpc);
+        drop(light);
         // Production uses the same isolation helper, even on an unscoped router.
         let simulation = crate::robotics::scoped_transport(
             ContextBuilder::default()
@@ -443,6 +536,113 @@ mod tests {
         );
         task.abort();
         let _ = task.await;
+        context.shutdown().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn led_handler_reaches_simulated_hardware_and_blinks() {
+        use led_handler::DefaultLEDColors;
+        use ros_z::{prelude::QosProfile, qos::QosDurability};
+        use std::sync::Arc;
+        use tokio_util::task::AbortOnDropHandle;
+        use types::primary_state::PrimaryState;
+
+        let context = Arc::new(
+            ContextBuilder::default()
+                .with_namespace("/led_test")
+                .with_mode("peer")
+                .disable_multicast_scouting()
+                .with_connect_endpoints(std::iter::empty::<&str>())
+                .with_listen_endpoints(std::iter::empty::<&str>())
+                .with_parameter_layers([std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../etc/parameters/base")])
+                .build()
+                .await
+                .unwrap(),
+        );
+        let (mut control, sdk) = start(&Handle::current(), &context).await.unwrap();
+        let sdk = AbortOnDropHandle::new(sdk);
+        let node = context.create_node("test_input").build().await.unwrap();
+        let primary = node
+            .publisher::<PrimaryState>("primary_state")
+            .qos(QosProfile {
+                durability: QosDurability::TransientLocal,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let commands = node
+            .publisher::<hardware_interface::LedCommand>("commands/led_command")
+            .build()
+            .await
+            .unwrap();
+        let hardware =
+            AbortOnDropHandle::new(tokio::spawn(hardware_interface::run_boxed(context.clone())));
+        // Wait for the real hardware subscriber before the LED handler's initial publication.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                commands
+                    .publish(&hardware_interface::LedCommand::SetParam { r: 1, g: 2, b: 3 })
+                    .await
+                    .unwrap();
+                if tokio::time::timeout(
+                    Duration::from_millis(20),
+                    control.wait_for(|control| control.led.is_some()),
+                )
+                .await
+                .is_ok()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let handler = AbortOnDropHandle::new(tokio::spawn(led_handler::run_boxed(context.clone())));
+        for (state, color) in [
+            (PrimaryState::Initial, LedColor::MAGENTA),
+            (PrimaryState::Damping, LedColor::BLUE),
+            (PrimaryState::Prepare, LedColor::YELLOW),
+            (PrimaryState::Playing, LedColor::GREEN),
+            (PrimaryState::Penalized, LedColor::RED),
+        ] {
+            primary.publish(&state).await.unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                control.wait_for(|control| control.led == Some(color)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        primary.publish(&PrimaryState::Stop).await.unwrap();
+        for color in [LedColor::BLACK, LedColor::RED] {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                control.wait_for(|control| control.led == Some(color)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        handler.abort();
+        let _ = handler.await;
+        commands
+            .publish(&hardware_interface::LedCommand::Stop)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            control.wait_for(|control| control.led.is_none()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        hardware.abort();
+        let _ = hardware.await;
+        sdk.abort();
+        let _ = sdk.await;
         context.shutdown().unwrap();
     }
 

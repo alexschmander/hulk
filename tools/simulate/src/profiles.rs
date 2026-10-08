@@ -88,6 +88,10 @@ macro_rules! nodes {
 }
 const COMMON: &[NodeSpec] = &[
     NodeSpec {
+        name: "led_handler",
+        run: led_handler::run_boxed,
+    },
+    NodeSpec {
         name: "head_motion",
         run: head_motion::node::run_boxed,
     },
@@ -184,7 +188,7 @@ mod tests {
     #[test]
     fn profiles_are_cumulative_and_keep_all_common_nodes() {
         let mut previous = HashSet::new();
-        for (profile, count) in Profile::ALL.into_iter().zip([23, 27, 32, 35]) {
+        for (profile, count) in Profile::ALL.into_iter().zip([24, 28, 33, 36]) {
             let names: HashSet<_> = profile
                 .nodes(ControllerSource::Local)
                 .map(|node| node.name)
@@ -193,6 +197,7 @@ mod tests {
             assert!(previous.is_subset(&names));
             for required in [
                 "low_state_bridge",
+                "led_handler",
                 "controller_handler",
                 "whistle_filter",
                 "world_to_field_provider",

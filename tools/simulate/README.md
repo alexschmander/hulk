@@ -12,7 +12,7 @@ The [profile plan](PROFILES.md) records topic ownership and validation contracts
 
 | Profile | Additional real nodes | Remaining ideal inputs |
 | --- | --- | --- |
-| Motion & behavior | Common 23-node stack, including raw sensor/button bridges, gamepad, whistle filter and HSL communications | Body geometry, odometry, field pose, first ball and fixed goalposts |
+| Motion & behavior | Common 24-node stack, including raw sensor/button bridges, gamepad, LED handler, whistle filter and HSL communications | Body geometry, odometry, field pose, first ball and fixed goalposts |
 | Filtering | Ball filter, visual-kick selector, obstacle filter, search suggestor | Body geometry, odometry and field pose; synthetic camera detections |
 | Body state & odometry | Kinematics, support foot, ground provider, camera matrix and odometry | Field pose; synthetic camera detections and camera calibration |
 | Localization | Field-mark association and 3D/2D localization | Synthetic camera detections, calibration and coherent camera-motion measurements |
@@ -61,6 +61,12 @@ The simulator implements passive damping and a two-second Prepare joint trajecto
 These are approximations of the manufacturer's controller, not firmware emulation.
 See the [K1 body controls](https://docs.booster.tech/docs/product-manual/k1/basic-operations/body-operations/).
 HULK's long-press actions differ from Booster's default firmware WALK action.
+
+The toolbar's **LED** rectangle displays the actual color commanded by `led_handler` through `hardware_interface` and `rt/LightControlApiTopicReq`.
+The simulator acknowledges the Booster light RPC and follows color changes and Stop-state blinking in every profile.
+Before the first command or after releasing LED control, the rectangle is neutral; the tooltip reports that no command is active.
+Firmware-owned LED colors after release are not simulated.
+Inspect primary state, localization and Game Controller connection status in Twix or GameController; the simulator toolbar does not repeat them.
 
 The default **Local gamepad** source runs the real controller handler on the Twix host.
 Press the controller's Start button to toggle behavior's remote mode; walking axes, head controls and kicks use the existing robot mappings.

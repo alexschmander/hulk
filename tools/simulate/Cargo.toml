@@ -15,6 +15,7 @@ field_mark_association = { workspace = true }
 geometry = { workspace = true }
 ground_provider = { workspace = true }
 kinematics_provider = { workspace = true }
+led_handler = { workspace = true }
 localization-2d = { workspace = true }
 localization-3d = { workspace = true }
 low_state_bridge = { workspace = true }

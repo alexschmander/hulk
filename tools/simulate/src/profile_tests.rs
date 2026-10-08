@@ -88,6 +88,17 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(*io.primary.get_latest().unwrap(), PrimaryState::Initial);
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while io.led_color()
+                != Some(<booster::LedColor as led_handler::DefaultLEDColors>::MAGENTA)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Initial LED command must reach the simulator");
+    });
     assert_eq!(physics.lock().mode, SimulationMode::Paused);
     let scene_pose = physics.lock().object_pose(robot).unwrap();
     assert!(scene_pose.translation.y > 0.4);
