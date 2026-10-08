@@ -10,6 +10,7 @@ use types::field_dimensions::FieldDimensions;
 #[serde(deny_unknown_fields)]
 pub struct SimulatorParameters {
     pub ball: BallParameters,
+    pub goal_height: f32,
     #[serde(default)]
     pub observations: crate::observations::ObservationParameters,
 }
@@ -32,6 +33,9 @@ pub struct BallParameters {
 impl SimulatorParameters {
     pub fn validate(parameters: &Self) -> Result<(), String> {
         parameters.ball.validate()?;
+        if !parameters.goal_height.is_finite() || parameters.goal_height <= 0.0 {
+            return Err("goal_height must be finite and positive".into());
+        }
         parameters.observations.validate()?;
 
         Ok(())
@@ -158,6 +162,7 @@ pub struct CurrentSimulatorParameters {
     pub revision: u64,
     pub parameters: Arc<SimulatorParameters>,
     pub field_dimensions: FieldDimensions,
+    pub goal_height: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
@@ -167,22 +172,24 @@ pub struct SimulatorParameterSyncSet;
 struct SimulatorParameterAdapter {
     _binding: NodeParameters<SimulatorParameters>,
     receiver: ParameterSubscription<SimulatorParameters>,
-    field_stamp: Option<ros_z::time::Time>,
 }
 
 pub struct SimulatorParametersPlugin {
     parameters: NodeParameters<SimulatorParameters>,
     field_dimensions: FieldDimensions,
+    goal_height: f32,
 }
 
 impl SimulatorParametersPlugin {
     pub fn new(
         parameters: NodeParameters<SimulatorParameters>,
         field_dimensions: FieldDimensions,
+        goal_height: f32,
     ) -> Self {
         Self {
             parameters,
             field_dimensions,
+            goal_height,
         }
     }
 }
@@ -194,11 +201,11 @@ impl Plugin for SimulatorParametersPlugin {
             revision: snapshot.revision,
             parameters: snapshot.typed.clone(),
             field_dimensions: self.field_dimensions,
+            goal_height: self.goal_height,
         })
         .insert_resource(SimulatorParameterAdapter {
             _binding: self.parameters.clone(),
             receiver: self.parameters.subscribe(),
-            field_stamp: None,
         })
         .configure_sets(PreUpdate, SimulatorParameterSyncSet)
         .add_systems(
@@ -211,24 +218,12 @@ impl Plugin for SimulatorParametersPlugin {
 fn synchronize_simulator_parameters(
     mut adapter: ResMut<SimulatorParameterAdapter>,
     mut current: ResMut<CurrentSimulatorParameters>,
-    io: Res<crate::robotics::Robotics>,
 ) {
-    let field = io.field.get_latest_with_stamp();
-    let field_stamp = field.as_ref().map(|(stamp, _)| *stamp);
-    let field_changed = field_stamp != adapter.field_stamp;
-    if !adapter.receiver.has_changed().unwrap_or(false) && !field_changed {
+    if !adapter.receiver.has_changed().unwrap_or(false) {
         return;
     }
-
-    adapter.field_stamp = field_stamp;
     let snapshot = adapter.receiver.borrow_and_update().clone();
-    if let Some((_, field)) = field {
-        if let Err(error) = validate_field_dimensions(&field) {
-            log::warn!("Ignoring invalid field dimensions: {error}");
-            return;
-        }
-        current.field_dimensions = *field;
-    }
     current.revision += 1;
+    current.goal_height = snapshot.typed.goal_height;
     current.parameters = snapshot.typed.clone();
 }

@@ -25,6 +25,16 @@ pub struct BodyButtons {
     held: Option<(i32, Instant, bool)>,
 }
 impl BodyButtons {
+    pub fn cancel(&mut self, io: &Robotics) -> Result<()> {
+        if let Some((button, _, long)) = self.held.take() {
+            if long {
+                io.button_event(button, ButtonEventType::LongPressEnd)?;
+            }
+            io.button_event(button, ButtonEventType::PressUp)?;
+        }
+        Ok(())
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, io: &Robotics) -> Result<()> {
         for (button, label, help) in [
             (0, "F1", "Tap to enter Damping"),

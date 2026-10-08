@@ -31,6 +31,9 @@ pub struct Configuration {
     pub model_directory: PathBuf,
     pub router: Option<String>,
     pub namespace: String,
+    pub location: Option<String>,
+    pub robot_count: u8,
+    pub field_configuration: Option<crate::FieldConfiguration>,
     pub profile: Profile,
     pub controller: ControllerSource,
 }
@@ -43,10 +46,26 @@ impl std::ops::Deref for Robotics {
         &self.0
     }
 }
+pub(crate) struct RobotSettings {
+    pub player: hsl_network_messages::PlayerNumber,
+    pub scope: String,
+    pub clock: Clock,
+    pub ports: crate::network::Ports,
+}
 impl Robotics {
+    pub(crate) async fn new_robot(
+        runtime: Handle,
+        configuration: Configuration,
+        settings: RobotSettings,
+    ) -> Result<Self> {
+        Ok(Self(Arc::new(
+            RobotStack::new(runtime, configuration, Some(settings)).await?,
+        )))
+    }
+    #[cfg(test)]
     pub async fn new(runtime: Handle, configuration: Configuration) -> Result<Self> {
         Ok(Self(Arc::new(
-            RobotStack::new(runtime, configuration).await?,
+            RobotStack::new(runtime, configuration, None).await?,
         )))
     }
 }
@@ -68,7 +87,9 @@ pub struct RobotStack {
     body: crate::reference::BodyReferences,
     readiness: crate::readiness::Readiness,
     pub primary: ros_z::cache::Cache<types::primary_state::PrimaryState>,
+    pub inference: ros_z::cache::Cache<motion_inference::node::Status>,
     pub safe_pose: ros_z::cache::Cache<bool>,
+    #[cfg(test)]
     pub field: ros_z::cache::Cache<types::field_dimensions::FieldDimensions>,
     game: Arc<ros_z::cache::Cache<FilteredGameControllerState>>,
     motion: ros_z::cache::Cache<MotionCommand>,
@@ -78,7 +99,11 @@ pub struct RobotStack {
 }
 
 impl RobotStack {
-    async fn new(runtime: Handle, configuration: Configuration) -> Result<Self> {
+    async fn new(
+        runtime: Handle,
+        configuration: Configuration,
+        settings: Option<RobotSettings>,
+    ) -> Result<Self> {
         let overrides = tempfile::tempdir()?;
         // Twix can write this last layer without changing the robot parameter files.
         std::fs::write(
@@ -93,20 +118,56 @@ impl RobotStack {
                 &serde_json::json!({"neural_networks_folder": configuration.model_directory.canonicalize()?}),
             )?,
         )?;
+        let mut global = serde_json::Map::new();
+        if let Some(field) = &configuration.field_configuration {
+            field
+                .validate()
+                .map_err(|error| color_eyre::eyre::eyre!(error))?;
+            global.insert(
+                "field_dimensions".into(),
+                serde_json::to_value(field.dimensions)?,
+            );
+        }
+        if let Some(settings) = &settings {
+            global.insert(
+                "player_number".into(),
+                serde_json::to_value(settings.player)?,
+            );
+            std::fs::write(
+                overrides.path().join("message_receiver.json5"),
+                serde_json::to_vec(&serde_json::json!({
+                    "ports": {"game_controller_state": settings.ports.state, "game_controller_return": settings.ports.returns,
+                        "hsl": settings.ports.team, "hsl_broadcast_address": {"octets": [127,255,255,255]}}
+                }))?,
+            )?;
+        }
+        std::fs::write(
+            overrides.path().join("global.json5"),
+            serde_json::to_vec(&global)?,
+        )?;
+        let scope = settings
+            .as_ref()
+            .map_or(crate::ZENOH_NAMESPACE, |settings| settings.scope.as_str());
+        let mut layers = vec![
+            configuration.parameter_root.join("base"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("parameters"),
+        ];
+        if let Some(location) = &configuration.location {
+            layers.push(configuration.parameter_root.join("location").join(location));
+        }
+        layers.extend([overrides.path().to_owned(), overrides.path().join("live")]);
         let mut builder = ContextBuilder::default()
-            .with_clock(Clock::logical(Clock::wallclock().now()))
+            .with_clock(settings.as_ref().map_or_else(
+                || Clock::logical(Clock::wallclock().now()),
+                |settings| settings.clock.clone(),
+            ))
             .with_namespace(&configuration.namespace)
-            .with_parameter_layers([
-                configuration.parameter_root.join("base"),
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("parameters"),
-                overrides.path().to_owned(),
-                overrides.path().join("live"),
-            ]);
+            .with_parameter_layers(layers);
         if let Some(router) = &configuration.router {
             builder = builder.with_router_endpoint(router)?;
         }
         // The physics worker advances this clock; the external GameController keeps wall time.
-        let context = Arc::new(scoped_transport(builder).build().await?);
+        let context = Arc::new(builder.with_json("namespace", scope).build().await?);
         // ROS-Z applies environment overrides after builder options. Reject a
         // conflicting override before starting any node that can send SDK traffic.
         color_eyre::eyre::ensure!(
@@ -115,8 +176,7 @@ impl RobotStack {
                 .config()
                 .get("namespace")
                 .is_ok_and(
-                    |value| serde_json::from_str::<String>(&value).ok().as_deref()
-                        == Some(crate::ZENOH_NAMESPACE)
+                    |value| serde_json::from_str::<String>(&value).ok().as_deref() == Some(scope)
                 ),
             "ZENOH_CONFIG_OVERRIDE conflicts with the simulator transport namespace"
         );
@@ -128,13 +188,33 @@ impl RobotStack {
             if let Some(router) = &configuration.router {
                 builder = builder.with_router_endpoint(router)?;
             }
-            Some(Arc::new(scoped_transport(builder).build().await?))
+            Some(Arc::new(
+                builder.with_json("namespace", scope).build().await?,
+            ))
         } else {
             None
         };
         let node = Arc::new(context.create_node("simulator").build().await?);
         let parameters = node.bind_parameter_as::<SimulatorParameters>("simulator")?;
         parameters.add_validation_hook(SimulatorParameters::validate)?;
+        if let Some(field) = &configuration.field_configuration {
+            let height = field.goal_height;
+            parameters.add_validation_hook(move |parameters| {
+                if parameters.goal_height != height {
+                    return Err("Goal height is shared by all robots; change the location parameters and restart".into());
+                }
+                Ok(())
+            })?;
+        }
+        let inference = node
+            .subscriber(motion_inference::node::STATUS_TOPIC)
+            .qos(QosProfile {
+                durability: ros_z::qos::QosDurability::TransientLocal,
+                ..Default::default()
+            })
+            .cache(1)
+            .build()
+            .await?;
         let primary = node
             .subscriber("primary_state")
             .qos(QosProfile {
@@ -153,6 +233,7 @@ impl RobotStack {
             })
             .build()
             .await?;
+        #[cfg(test)]
         let field = node
             .subscriber("field_dimensions")
             .qos(QosProfile {
@@ -245,6 +326,7 @@ impl RobotStack {
                                 .map(|ball| (ball.position, ball.velocity)),
                             &frame.field,
                             side,
+                            &frame.robots,
                             frame.time,
                         )
                         .await?;
@@ -258,6 +340,19 @@ impl RobotStack {
             tokio::time::timeout(std::time::Duration::from_secs(3), initial_field.recv()).await??;
         crate::parameters::validate_field_dimensions(&field_dimensions)
             .map_err(|error| color_eyre::eyre::eyre!(error))?;
+        if settings.is_some() {
+            let expected = serde_json::to_value(field_dimensions)?;
+            tasks.spawn(async move {
+                let result: Result<()> = async {
+                    loop {
+                        let actual = initial_field.recv().await?;
+                        color_eyre::eyre::ensure!(serde_json::to_value(actual)? == expected,
+                            "Field dimensions changed while running; stop the simulator, edit the location parameters and restart");
+                    }
+                }.await;
+                ("shared_field_guard", result)
+            });
+        }
         Ok(Self {
             runtime,
             context,
@@ -274,7 +369,9 @@ impl RobotStack {
             body,
             readiness,
             primary,
+            inference,
             safe_pose,
+            #[cfg(test)]
             field,
             game,
             motion,
@@ -313,6 +410,13 @@ impl RobotStack {
         if self.emergency.get_latest().is_some() {
             return "Emergency stop. Restart the simulator to clear it.".into();
         }
+        if !self.ready() {
+            return format!(
+                "{} · {}",
+                self.profile.label(),
+                self.readiness.status(self.now())
+            );
+        }
         let game = match self.game.latest_stamp() {
             None => "Waiting for HSL Game Controller",
             Some(stamp) if self.now().duration_since(stamp) > std::time::Duration::from_secs(3) => {
@@ -341,6 +445,12 @@ impl RobotStack {
         self.commands.borrow().led
     }
 
+    pub fn away(&self) -> bool {
+        self.game.get_latest().is_some_and(|game| {
+            game.global_field_side == types::field_dimensions::GlobalFieldSide::Away
+        })
+    }
+
     pub fn active_motion(&self) -> MotionCommand {
         self.motion
             .get_latest()
@@ -365,6 +475,7 @@ impl RobotStack {
         self.context.clock().now()
     }
 
+    #[cfg(test)]
     pub fn advance_time(&self, period: std::time::Duration) -> Result<()> {
         self.context.clock().advance(period)?;
         Ok(())
@@ -395,8 +506,15 @@ impl Drop for RobotStack {
     fn drop(&mut self) {
         let tasks = self.tasks.get_mut().unwrap();
         tasks.abort_all();
-        self.runtime
-            .block_on(async { while tasks.join_next().await.is_some() {} });
+        let mut shutdown = || {
+            self.runtime
+                .block_on(async { while tasks.join_next().await.is_some() {} })
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(shutdown);
+        } else {
+            shutdown();
+        }
         if let Some(context) = &self.controller_context
             && let Err(error) = context.shutdown()
         {
@@ -440,6 +558,7 @@ pub(crate) fn write_calibration(root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn scoped_transport(builder: ContextBuilder) -> ContextBuilder {
     builder.with_json("namespace", crate::ZENOH_NAMESPACE)
 }
