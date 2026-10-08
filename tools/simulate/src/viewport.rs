@@ -150,7 +150,7 @@ fn plane_hit(ray: Ray3d, point: Vec3, normal: Vec3) -> Option<Vec3> {
 
 impl Viewport {
     pub fn toolbar(&mut self, ui: &mut Ui) {
-        if ui.selectable_label(self.captured.is_some(), "Fly camera").on_hover_text(
+        if ui.selectable_label(self.captured.is_some(), "Fly camera (M)").on_hover_text(
             "M: capture/release mouse • Esc: release\nW/A/S/D: move • Q/E: down/up • Shift: faster\nSelect a ball to drag or Delete. Select the robot for its gizmo."
         ).clicked() {
             self.capture(ui.ctx(), self.captured.is_none());
