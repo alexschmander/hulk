@@ -7,6 +7,56 @@ use serde::{Deserialize, Serialize};
 use std::path::{Component, Path};
 use types::field_dimensions::FieldDimensions;
 
+/// Ball choice for a match, independent of the field; divisions share field sizes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BallSize {
+    /// The location's `field_dimensions.ball_radius`.
+    #[default]
+    Location,
+    Mini,
+    Size3,
+    Size4,
+    Size5,
+}
+impl BallSize {
+    pub const ALL: [Self; 5] = [
+        Self::Location,
+        Self::Mini,
+        Self::Size3,
+        Self::Size4,
+        Self::Size5,
+    ];
+    /// Radius from the middle of the size's circumference range.
+    pub fn radius(self) -> Option<f32> {
+        match self {
+            Self::Location => None,
+            Self::Mini => Some(0.073),
+            Self::Size3 => Some(0.095),
+            Self::Size4 => Some(0.103),
+            Self::Size5 => Some(0.11),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Location => "Location",
+            Self::Mini => "Mini",
+            Self::Size3 => "Size 3",
+            Self::Size4 => "Size 4",
+            Self::Size5 => "Size 5",
+        }
+    }
+    /// The HSL division that plays with this ball.
+    pub fn division(self) -> Option<&'static str> {
+        match self {
+            Self::Location => None,
+            Self::Mini => Some("Small division"),
+            Self::Size3 | Self::Size4 => Some("Middle division"),
+            Self::Size5 => Some("Large division"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FieldConfiguration {
     pub dimensions: FieldDimensions,
@@ -77,6 +127,13 @@ impl FieldConfiguration {
             .map_err(|error| color_eyre::eyre::eyre!(error))?;
         Ok(configuration)
     }
+    /// Replaces the location's ball for robots, physics and the referee alike.
+    pub fn with_ball(mut self, ball: BallSize) -> Self {
+        if let Some(radius) = ball.radius() {
+            self.dimensions.ball_radius = radius;
+        }
+        self
+    }
     pub fn validate(&self) -> Result<(), String> {
         crate::parameters::validate_field_dimensions(&self.dimensions)?;
         if !self.goal_height.is_finite() || self.goal_height <= 0.0 {
@@ -120,6 +177,18 @@ mod tests {
                 (length, width, height)
             );
         }
+        // HSL v1.1.1 Table 4: the Small division plays with a FIFA mini ball.
+        let small = FieldConfiguration::load(&root, "hsl_small").unwrap();
+        assert_eq!(small.dimensions.ball_radius, 0.073);
+        let middle_ball = small.clone().with_ball(BallSize::Size4);
+        assert_eq!(middle_ball.dimensions.ball_radius, 0.103);
+        assert_eq!(middle_ball.dimensions.length, 9.);
+        assert_eq!(
+            small.with_ball(BallSize::Location).dimensions.ball_radius,
+            0.073
+        );
+        let radii: Vec<_> = BallSize::ALL.iter().filter_map(|b| b.radius()).collect();
+        assert!(radii.windows(2).all(|pair| pair[0] < pair[1]));
     }
     #[test]
     fn a_new_partial_location_inherits_base_dimensions() {

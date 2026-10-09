@@ -22,6 +22,24 @@ pub enum RefereeMode {
     External,
     Automatic,
 }
+/// HSL division; field size is chosen separately because divisions share fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Division {
+    Small,
+    Middle,
+    Large,
+}
+impl Division {
+    pub const ALL: [Self; 3] = [Self::Small, Self::Middle, Self::Large];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Middle => "Middle",
+            Self::Large => "Large",
+        }
+    }
+}
+/// Upstream competition presets. Saved Advanced names stay unchanged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Competition {
@@ -29,13 +47,49 @@ pub enum Competition {
     #[default]
     Middle,
     Large,
+    SmallFoundation,
+    MiddleFoundation,
+    LargeFoundation,
 }
 impl Competition {
-    pub fn label(self) -> &'static str {
+    pub fn new(division: Division, advanced: bool) -> Self {
+        match (division, advanced) {
+            (Division::Small, true) => Self::Small,
+            (Division::Middle, true) => Self::Middle,
+            (Division::Large, true) => Self::Large,
+            (Division::Small, false) => Self::SmallFoundation,
+            (Division::Middle, false) => Self::MiddleFoundation,
+            (Division::Large, false) => Self::LargeFoundation,
+        }
+    }
+    pub fn division(self) -> Division {
         match self {
-            Self::Small => "Small · Advanced",
-            Self::Middle => "Middle · Advanced",
-            Self::Large => "Large · Advanced",
+            Self::Small | Self::SmallFoundation => Division::Small,
+            Self::Middle | Self::MiddleFoundation => Division::Middle,
+            Self::Large | Self::LargeFoundation => Division::Large,
+        }
+    }
+    pub fn advanced(self) -> bool {
+        matches!(self, Self::Small | Self::Middle | Self::Large)
+    }
+    pub fn label(self) -> String {
+        format!(
+            "{} {}",
+            self.division().label(),
+            if self.advanced() {
+                "Advanced"
+            } else {
+                "Foundation"
+            }
+        )
+    }
+    /// Players per team; the controller starts higher numbers as substitutes.
+    pub fn players(self) -> u8 {
+        match (self.division(), self.advanced()) {
+            (Division::Small, true) => 7,
+            (Division::Small, false) => 4,
+            (_, true) => 5,
+            (_, false) => 3,
         }
     }
     fn yaml(self) -> &'static str {
@@ -43,6 +97,9 @@ impl Competition {
             Self::Small => include_str!("small_advanced.yaml"),
             Self::Middle => include_str!("middle_advanced.yaml"),
             Self::Large => include_str!("large_advanced.yaml"),
+            Self::SmallFoundation => include_str!("small_foundation.yaml"),
+            Self::MiddleFoundation => include_str!("middle_foundation.yaml"),
+            Self::LargeFoundation => include_str!("large_foundation.yaml"),
         }
     }
 }
