@@ -296,6 +296,7 @@ Penalized robots acknowledge Penalized before physical removal, with a one-secon
 The referee stands them outside their own penalty mark, avoids occupied slots, starts the core penalty timer after placement and releases them when that timer expires.
 They must walk back under their own control.
 Motion-in-Set penalties stay in place; sent-off robots remain removed.
+The running panel shows team scores, the current half, remaining match or halftime time, game state and active restart.
 The **Referee** menu exposes score calls, stop/resume, dropped balls, whistles, restarts and penalties for the selected robot, plus a bounded decision log.
 Manual calls are applied on the next simulation step.
 Turning off automatic decisions preserves UDP transport and penalty handling for manual experiments.
