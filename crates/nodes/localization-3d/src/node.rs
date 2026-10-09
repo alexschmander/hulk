@@ -74,21 +74,21 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     };
     statuses.publish(&status).await?;
     let mut active: Option<Localization> = None;
-    let mut damping = true;
+    let mut previous_primary = PrimaryState::Damping;
     let mut epoch_start = status.time;
     loop {
         let deadline = active.as_ref().and_then(Localization::deadline);
         let first = tokio::select! {
             biased;
             v = primary.recv() => {
-                let next_damping = v? == PrimaryState::Damping;
-                if damping && !next_damping {
+                let next_primary = v?;
+                if starts_new_epoch(previous_primary, next_primary) {
                     epoch_start = node.clock().now();
                     active = None;
                     status = LocalizationStatus { time: epoch_start, epoch: status.epoch.wrapping_add(1), generation: 0, state: LocalizationState::Startup, heading: None };
                     statuses.publish(&status).await?;
                 }
-                damping = next_damping;
+                previous_primary = next_primary;
                 continue;
             }
             changed = updates.changed() => {
@@ -212,10 +212,37 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     }
 }
 
+// A new half changes the team-relative Field frame and invalidates its heading reference.
+fn starts_new_epoch(previous: PrimaryState, next: PrimaryState) -> bool {
+    (previous == PrimaryState::Damping && next != PrimaryState::Damping)
+        || (previous == PrimaryState::Finished
+            && matches!(next, PrimaryState::Initial | PrimaryState::Ready))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ros_z::{context::ContextBuilder, time::Time};
+
+    #[test]
+    fn new_half_resets_localization_once_even_if_initial_is_not_observed() {
+        for next in [PrimaryState::Initial, PrimaryState::Ready] {
+            assert!(starts_new_epoch(PrimaryState::Finished, next));
+            assert!(!starts_new_epoch(next, next));
+        }
+        assert!(!starts_new_epoch(
+            PrimaryState::Playing,
+            PrimaryState::Ready
+        ));
+        assert!(!starts_new_epoch(
+            PrimaryState::Finished,
+            PrimaryState::Finished
+        ));
+        assert!(starts_new_epoch(
+            PrimaryState::Damping,
+            PrimaryState::Prepare
+        ));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn rejected_update_preserves_node_revision_and_running_estimator() -> Result<()> {
