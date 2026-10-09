@@ -35,6 +35,7 @@ mod enabled {
         controller: ControllerSource,
         referee: simulate::RefereeMode,
         competition: simulate::Competition,
+        ball: simulate::BallSize,
     }
     impl Default for Settings {
         fn default() -> Self {
@@ -50,6 +51,7 @@ mod enabled {
                 controller: ControllerSource::default(),
                 referee: simulate::RefereeMode::default(),
                 competition: simulate::Competition::default(),
+                ball: simulate::BallSize::default(),
             }
         }
     }
@@ -201,6 +203,88 @@ mod enabled {
         }
     }
     impl SimulatorPanel {
+        /// The HSL division and its Foundation or Advanced configuration.
+        fn competition_ui(&mut self, ui: &mut Ui) {
+            let competition = self.settings.competition;
+            ui.horizontal(|ui| {
+                let mut division = competition.division();
+                egui::ComboBox::from_id_salt("referee_division")
+                    .selected_text(format!("{} division", division.label()))
+                    .show_ui(ui, |ui| {
+                        for option in simulate::Division::ALL {
+                            ui.selectable_value(
+                                &mut division,
+                                option,
+                                format!("{} division", option.label()),
+                            );
+                        }
+                    });
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let mut advanced = competition.advanced();
+                for (value, label) in [(false, "Foundation"), (true, "Advanced")] {
+                    let players = simulate::Competition::new(division, value).players();
+                    if widgets::segment(ui, advanced == value, label)
+                        .on_hover_text(format!("Up to {players} players per team"))
+                        .clicked()
+                    {
+                        advanced = value;
+                    }
+                }
+                self.settings.competition = simulate::Competition::new(division, advanced);
+            });
+            let limit = self.settings.competition.players();
+            if self.settings.robot_count.max(self.settings.opponent_count) > limit {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "{} allows {limit} players per team; higher numbers start as substitutes beside the field.",
+                            self.settings.competition.label()
+                        ))
+                        .size(11.5)
+                        .color(ui.visuals().warn_fg_color),
+                    )
+                    .wrap(),
+                );
+            }
+        }
+
+        /// Ball size is independent of the field, because divisions share field sizes.
+        fn ball_ui(&mut self, ui: &mut Ui) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for ball in simulate::BallSize::ALL {
+                    let hint = match (ball.radius(), ball.division()) {
+                        (Some(radius), Some(division)) => format!(
+                            "FIFA {}, {} cm across; {division}",
+                            ball.label().to_lowercase(),
+                            centimeters(radius)
+                        ),
+                        _ => "The ball defined by the field location".to_owned(),
+                    };
+                    if widgets::segment(ui, self.settings.ball == ball, ball.label())
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        self.settings.ball = ball;
+                    }
+                }
+            });
+            let radius = self.settings.ball.radius().or_else(|| {
+                self.preview
+                    .as_ref()
+                    .filter(|preview| preview.location == self.settings.location)
+                    .and_then(|preview| preview.field.as_ref().ok())
+                    .map(|field| field.dimensions.ball_radius)
+            });
+            if let Some(radius) = radius {
+                ui.label(
+                    RichText::new(format!("{} cm across", centimeters(radius)))
+                        .size(11.5)
+                        .weak(),
+                );
+            }
+        }
+
         fn setup_ui(&mut self, ui: &mut Ui, context: &PanelUiContext<'_>) {
             ui.add_enabled_ui(self.pending.is_none(), |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
@@ -240,9 +324,7 @@ mod enabled {
                     }
                 });
                 if self.settings.referee == simulate::RefereeMode::Automatic {
-                    egui::ComboBox::from_id_salt("referee_competition").selected_text(self.settings.competition.label()).show_ui(ui, |ui| {
-                        for competition in [simulate::Competition::Small,simulate::Competition::Middle,simulate::Competition::Large] { ui.selectable_value(&mut self.settings.competition,competition,competition.label()); }
-                    });
+                    self.competition_ui(ui);
                 }
                 ui.add_space(10.0);
                 ui.label(RichText::new("Field").strong());
@@ -263,6 +345,9 @@ mod enabled {
                     }
                     Err(error) => widgets::error_banner(ui, &format!("Locations: {error:#}")),
                 }
+                ui.add_space(10.0);
+                ui.label(RichText::new("Ball").strong());
+                self.ball_ui(ui);
                 ui.add_space(10.0);
                 ui.label(RichText::new("Profile").strong());
                 widgets::profile_ladder(ui, &mut self.settings.profile);
@@ -395,7 +480,7 @@ mod enabled {
                 &self.settings.parameter_root,
                 &self.settings.location,
             ) {
-                Ok(field) => field,
+                Ok(field) => field.with_ball(self.settings.ball),
                 Err(error) => {
                     self.error = Some(format!("{error:#}"));
                     return;
@@ -434,6 +519,10 @@ mod enabled {
             )));
         }
     }
+    fn centimeters(radius: f32) -> String {
+        format!("{:.1}", radius * 200.0)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -444,16 +533,22 @@ mod enabled {
                 serde_json::from_value(serde_json::json!({"namespace":"/saved/robot"})).unwrap();
             assert_eq!(legacy.profile, Profile::MotionBehavior);
             assert_eq!(legacy.controller, ControllerSource::Local);
+            assert_eq!(legacy.ball, simulate::BallSize::Location);
+            assert_eq!(legacy.competition, simulate::Competition::Middle);
             for profile in Profile::ALL {
                 let settings = Settings {
                     profile,
                     controller: ControllerSource::External,
+                    competition: simulate::Competition::MiddleFoundation,
+                    ball: simulate::BallSize::Size4,
                     ..Settings::default()
                 };
                 let saved: Settings =
                     serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
                 assert_eq!(saved.profile, profile);
                 assert_eq!(saved.controller, ControllerSource::External);
+                assert_eq!(saved.competition, simulate::Competition::MiddleFoundation);
+                assert_eq!(saved.ball, simulate::BallSize::Size4);
             }
         }
     }
