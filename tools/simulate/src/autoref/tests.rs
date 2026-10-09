@@ -649,6 +649,15 @@ fn halftime_waits_for_ball_then_switches_ends_and_observes_full_break() {
     step(&mut e, &s, 1.1);
     assert_eq!(e.core.get_game(false).state, State::Ready);
     assert_eq!(e.core.get_game(false).kicking_side, Some(Side::Away));
+    assert_eq!(e.core.get_game(false).phase, Phase::SecondHalf);
+    step(&mut e, &s, 45.0);
+    assert!(step(&mut e, &s, 2.1).contains(&Effect::Whistle));
+    assert_eq!(e.core.get_game(false).state, State::Playing);
+    step(&mut e, &s, 610.0);
+    assert_eq!(e.core.get_game(false).state, State::Finished);
+    step(&mut e, &s, 610.0);
+    assert_eq!(e.core.get_game(false).phase, Phase::SecondHalf);
+    assert_eq!(e.core.get_game(false).state, State::Finished);
 }
 
 #[tokio::test]
