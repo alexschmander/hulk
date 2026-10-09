@@ -30,12 +30,15 @@ The simulator needs MuJoCo 3.9 and a compatible ONNX Runtime shared library.
 Set `ORT_DYLIB_PATH` to your ONNX Runtime library if it is not available in the loader's search path.
 
 ```sh
-./twix --simulator /1
+./twix --simulator /hulks/1
 ```
 
 The launcher enables Twix's optional `simulator` Cargo feature and configures its MuJoCo library path.
-Robot N uses global Zenoh prefix `hulk_simulator/N` and ROS namespace `/N`, including raw Booster topics, discovery, parameters and RPCs.
-The top-left namespace selector switches Twix and simulator body controls between `/1` through `/5`.
+Robot N uses global Zenoh prefix `hulk_simulator/hulks/N` and ROS namespace `/hulks/N`, including raw Booster topics, discovery, parameters and RPCs.
+The top-left namespace selector switches Twix and simulator body controls between `/hulks/1` through `/hulks/5`.
+The namespace selector autocompletes live graph namespaces, including robots discovered across the simulator scopes.
+Type to filter, use arrow keys and Enter or click a suggestion; Ctrl+Space opens completions without typing.
+Team names identify namespaces; GameController still uses numeric team 24.
 Selecting an absent player dims its name and disables its body controls.
 Without `--router`, simulator mode starts a private loopback router automatically.
 Ordinary Twix builds keep their existing dependencies.
@@ -231,7 +234,7 @@ On the tested Linux environment, dynamically loading ONNX Runtime 1.22.1 caused 
 Preloading the same library made startup, rendering and shutdown succeed:
 
 ```sh
-LD_PRELOAD="$ORT_DYLIB_PATH${LD_PRELOAD:+:$LD_PRELOAD}" ./twix --simulator /1
+LD_PRELOAD="$ORT_DYLIB_PATH${LD_PRELOAD:+:$LD_PRELOAD}" ./twix --simulator /hulks/1
 ```
 
 This is an environment-specific workaround, not a change to motion inference.

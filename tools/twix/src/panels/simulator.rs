@@ -103,12 +103,7 @@ mod enabled {
                 ui.weak("Simulate a HULKs team with the real robotics nodes.");
                 return;
             };
-            if let Ok(number) = context
-                .backend
-                .namespace()
-                .trim_start_matches('/')
-                .parse::<u8>()
-            {
+            if let Some(number) = simulate::robot_number(&context.backend.namespace()) {
                 simulator.select_robot(number);
             }
             if simulator.header(ui) {
@@ -147,7 +142,9 @@ mod enabled {
                                 data.get_temp::<RenderState>(egui::Id::new(RENDER_STATE_ID))
                             });
                             if let Some(renderer) = renderer {
-                                if let Err(error) = context.backend.set_namespace("/1".into()) {
+                                if let Err(error) =
+                                    context.backend.set_namespace(simulate::robot_namespace(1))
+                                {
                                     self.error = Some(format!("{error:#}"));
                                 }
                                 self.simulator = Some(Simulator::new(prepared, renderer));
@@ -362,7 +359,7 @@ mod enabled {
             let configuration = Configuration {
                 parameter_root: self.settings.parameter_root.clone(),
                 model_directory: self.settings.model_directory.clone(),
-                namespace: "/1".into(),
+                namespace: simulate::robot_namespace(1),
                 robot_count: self.settings.robot_count,
                 location: Some(self.settings.location.clone()),
                 field_configuration: Some(field),

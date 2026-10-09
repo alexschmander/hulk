@@ -33,6 +33,7 @@ mod backend;
 mod configuration;
 mod graph;
 mod layout;
+mod namespace_discovery;
 mod panel;
 mod panels;
 mod presets;
@@ -147,21 +148,25 @@ impl TwixApp {
             runtime,
         }
     }
+    fn namespace_completions(&self) -> Vec<String> {
+        #[cfg(feature = "simulator")]
+        if let Some(root) = &self.simulator_router {
+            return root.namespace_completions();
+        }
+        self.backend.namespace_completions()
+    }
+
     #[cfg(feature = "simulator")]
     fn synchronize_simulator_target(&mut self, context: &eframe::egui::Context) {
         let Some(root) = &self.simulator_router else {
             return;
         };
         let namespace = self.backend.namespace();
-        let number = namespace
-            .trim_start_matches('/')
-            .parse::<u8>()
-            .ok()
-            .filter(|n| (1..=5).contains(n));
+        let number = simulate::robot_number(&namespace);
         self.layout.select_simulator_robot(number.unwrap_or(0));
         let scope = number.map_or_else(
             || simulate::ZENOH_NAMESPACE.to_owned(),
-            |number| format!("{}/{number}", simulate::ZENOH_NAMESPACE),
+            simulate::transport_scope,
         );
         if self
             .pending_backend
@@ -220,11 +225,22 @@ impl App for TwixApp {
                         self.namespace_editor = self.backend.namespace();
                     }
                     ui.label("Namespace:");
-                    let namespace_response = ui.text_edit_singleline(&mut self.namespace_editor);
-                    if shortcuts_enabled && context.keybind_pressed(KeybindAction::FocusNamespace) {
-                        namespace_response.request_focus();
+                    let namespaces = self.namespace_completions();
+                    let namespace_response = ui.add(
+                        hulk_widgets::CompletionEdit::new(
+                            ui.id().with("namespace"),
+                            &namespaces,
+                            &mut self.namespace_editor,
+                        )
+                        .request_focus(
+                            shortcuts_enabled
+                                && context.keybind_pressed(KeybindAction::FocusNamespace),
+                        ),
+                    );
+                    if namespace_response.has_focus() {
+                        context.request_repaint_after(std::time::Duration::from_millis(250));
                     }
-                    if namespace_response.lost_focus()
+                    if (namespace_response.changed() || namespace_response.lost_focus())
                         && self.namespace_editor != self.backend.namespace()
                         && let Err(error) =
                             self.backend.set_namespace(self.namespace_editor.clone())
