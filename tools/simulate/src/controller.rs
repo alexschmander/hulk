@@ -66,7 +66,7 @@ impl Controller {
                     member = receiver.recv() => {
                         let Some(member) = member else { break; };
                         let result: Result<Target> = async {
-                            let mut builder = ContextBuilder::default().with_namespace(format!("/{}", member.number))
+                            let mut builder = ContextBuilder::default().with_namespace(crate::team::robot_namespace(member.number))
                                 .with_json("namespace", crate::team::transport_scope(member.number));
                             if let Some(router) = &router { builder = builder.with_router_endpoint(router)?; }
                             let context = Arc::new(builder.build().await?);
