@@ -425,7 +425,9 @@ fn next_filtered_state(
     ) {
         (_, _, true) => State::Stop,
         (State::Stop, game_state, false) => State::from_game_state(game_state),
-        (State::Finished, GameState::Initial, _) => State::Initial,
+        (State::Finished, game_state @ (GameState::Initial | GameState::Ready), _) => {
+            State::from_game_state(game_state)
+        }
         (State::Finished, _, _) => match game_controller_state.game_phase {
             GamePhase::PenaltyShootout { .. } => State::Set,
             _ => State::Finished,
@@ -560,4 +562,61 @@ fn penalty_diff(
             }
             map
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hsl_network_messages::{TeamColor, TeamState};
+    use types::field_dimensions::GlobalFieldSide;
+
+    #[test]
+    fn finished_accepts_ready_when_the_initial_packet_was_missed() {
+        let team = TeamState {
+            team_number: 24,
+            field_player_color: TeamColor::Blue,
+            goal_keeper_color: TeamColor::Yellow,
+            goal_keeper_player_number: Some(PlayerNumber::One),
+            score: 0,
+            penalty_shoot_index: 0,
+            penalty_shoots: Vec::new(),
+            remaining_amount_of_messages: 0,
+            players: Vec::new(),
+        };
+        let mut game = GameControllerState {
+            game_state: GameState::Ready,
+            stopped: false,
+            game_phase: GamePhase::Normal,
+            remaining_time_in_half: std::time::Duration::from_secs(600),
+            kicking_team: Some(Team::Hulks),
+            last_game_state_change: std::time::SystemTime::UNIX_EPOCH,
+            penalties: Default::default(),
+            opponent_penalties: Default::default(),
+            sub_state: None,
+            global_field_side: GlobalFieldSide::Away,
+            hulks_team: team.clone(),
+            opponent_team: team,
+        };
+        let next = |game: &GameControllerState| {
+            next_filtered_state(
+                &Time::zero(),
+                State::Finished,
+                game,
+                false,
+                &GameStateFilterParameters::default(),
+                false,
+                false,
+            )
+        };
+        assert!(matches!(next(&game), State::Ready));
+        game.stopped = true;
+        assert!(matches!(next(&game), State::Stop));
+        game.stopped = false;
+        game.game_state = GameState::Initial;
+        assert!(matches!(next(&game), State::Initial));
+        for state in [GameState::Set, GameState::Playing, GameState::Finished] {
+            game.game_state = state;
+            assert!(matches!(next(&game), State::Finished));
+        }
+    }
 }
