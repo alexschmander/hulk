@@ -97,6 +97,7 @@ pub struct RobotStack {
     pub field: ros_z::cache::Cache<types::field_dimensions::FieldDimensions>,
     default_away: bool,
     game: Arc<ros_z::cache::Cache<FilteredGameControllerState>>,
+    game_state: ros_z::cache::Cache<Option<types::game_controller_state::GameControllerState>>,
     motion: ros_z::cache::Cache<MotionCommand>,
     emergency: ros_z::cache::Cache<()>,
     commands: watch::Receiver<crate::simulated_sdk::Control>,
@@ -267,6 +268,11 @@ impl RobotStack {
                 .build()
                 .await?,
         );
+        let game_state = node
+            .subscriber("game_controller_state")
+            .cache(1)
+            .build()
+            .await?;
         let motion = node
             .subscriber("behavior/motion_command")
             .cache(1)
@@ -387,6 +393,7 @@ impl RobotStack {
             #[cfg(test)]
             field,
             game,
+            game_state,
             motion,
             emergency,
             commands,
@@ -452,6 +459,21 @@ impl RobotStack {
 
     pub fn actuator_control(&self) -> crate::simulated_sdk::Control {
         self.commands.borrow().clone()
+    }
+
+    pub fn jersey_color(&self, player: u8) -> Option<hsl_network_messages::TeamColor> {
+        let state = self.game_state.get_latest()?;
+        let team = &state.as_ref().as_ref()?.hulks_team;
+        Some(
+            if team
+                .goal_keeper_player_number
+                .is_some_and(|number| number as u8 + 1 == player)
+            {
+                team.goal_keeper_color.clone()
+            } else {
+                team.field_player_color.clone()
+            },
+        )
     }
 
     pub fn led_color(&self) -> Option<booster::LedColor> {

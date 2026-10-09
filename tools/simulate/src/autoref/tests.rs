@@ -353,6 +353,8 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
         team::Team,
     };
     use bevy::prelude::*;
+    use coordinate_systems::{Field, Ground};
+    use linear_algebra::Isometry2;
     use ros_z::prelude::*;
     use std::{thread, time::Instant};
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -389,6 +391,7 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
             .unwrap_or(crate::Profile::MotionBehavior),
         controller: crate::ControllerSource::External,
     };
+    let localization = config.profile == crate::Profile::Localization;
     let team = runtime
         .block_on(Team::new(runtime.handle().clone(), config))
         .unwrap();
@@ -398,6 +401,21 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
         e.core.params.competition.set_plays[SetPlay::KickOff].ready_duration =
             Duration::from_secs(2);
         e.core.params.competition.penalties[Penalty::PickedUp].duration = Duration::from_secs(2);
+        e.core.params.game.teams[Side::Home].goalkeeper_color =
+            game_controller_core::types::Color::Yellow;
+        e.core.params.game.teams[Side::Away].goalkeeper_color =
+            game_controller_core::types::Color::Green;
+        for side in [Side::Home, Side::Away] {
+            e.core.apply(
+                game_controller_core::action::VAction::SelectGoalkeeper(
+                    game_controller_core::actions::SelectGoalkeeper {
+                        side,
+                        player: PlayerNumber::new(2),
+                    },
+                ),
+                game_controller_core::types::ActionSource::Network,
+            );
+        }
     }
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
@@ -453,13 +471,45 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
         }
         caches
     });
+    let poses = runtime.block_on(async {
+        let mut caches = Vec::new();
+        for m in &members {
+            let pose =
+                m.io.node()
+                    .subscriber::<Isometry2<Ground, Field>>("ground_to_field")
+                    .cache(1)
+                    .build()
+                    .await
+                    .unwrap();
+            let truth =
+                m.io.node()
+                    .subscriber::<Isometry2<Ground, Field>>("ground_truth/ground_to_field")
+                    .cache(1)
+                    .build()
+                    .await
+                    .unwrap();
+            let status =
+                m.io.node()
+                    .subscriber::<types::localization::LocalizationStatus>("localization/status")
+                    .cache(1)
+                    .build()
+                    .await
+                    .unwrap();
+            caches.push((pose, truth, status));
+        }
+        caches
+    });
     let wait = |label: &str, worker: &mut PhysicsWorker, predicate: &mut dyn FnMut() -> bool| {
         let start = Instant::now();
         while !predicate() {
             assert!(worker.poll().is_none(), "worker failed");
             assert!(
                 start.elapsed() < Duration::from_secs(30),
-                "{label}: condition timeout"
+                "{label}: condition timeout; primary states: {:?}",
+                members
+                    .iter()
+                    .map(|m| (m.id, m.io.primary.get_latest()))
+                    .collect::<Vec<_>>()
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -496,6 +546,23 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
         })
     });
     eprintln!("raw Playing received");
+    wait("received jersey assignments", &mut worker, &mut || {
+        members.iter().all(|member| {
+            use hsl_network_messages::TeamColor;
+            let expected = match (member.id.team, member.id.number) {
+                (crate::TeamId::Hulks, 2) => TeamColor::Yellow,
+                (crate::TeamId::Hulks, _) => TeamColor::Blue,
+                (crate::TeamId::Opponents, 2) => TeamColor::Green,
+                (crate::TeamId::Opponents, _) => TeamColor::Red,
+            };
+            member
+                .io
+                .jersey_color(member.id.number)
+                .is_some_and(|actual| {
+                    std::mem::discriminant(&actual) == std::mem::discriminant(&expected)
+                })
+        })
+    });
     let referee = team.referee().unwrap();
     {
         let mut e = referee.engine.lock().unwrap();
@@ -558,6 +625,67 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
             > 2.8,
         "robot must re-enter under its own control"
     );
+    let epochs: Vec<_> = poses
+        .iter()
+        .map(|(_, _, status)| status.get_latest().map(|s| s.epoch))
+        .collect();
+    {
+        let mut e = referee.engine.lock().unwrap();
+        e.core.params.competition.set_plays[SetPlay::KickOff].ready_duration =
+            Duration::from_secs(45);
+        e.call(Call::FinishHalf).unwrap();
+    }
+    wait("Finished before changing halves", &mut worker, &mut || {
+        members.iter().all(|m| {
+            m.io.primary
+                .get_latest()
+                .is_some_and(|p| *p == types::primary_state::PrimaryState::Finished)
+        })
+    });
+    {
+        let mut e = referee.engine.lock().unwrap();
+        e.call(Call::SecondHalf).unwrap();
+        e.enabled = true;
+    }
+    wait(
+        "second-half Ready without Stop/Resume",
+        &mut worker,
+        &mut || {
+            members.iter().all(|m| {
+                m.io.primary
+                    .get_latest()
+                    .is_some_and(|p| *p == types::primary_state::PrimaryState::Ready)
+            })
+        },
+    );
+    for member in &members {
+        assert_eq!(member.io.away(), member.id.team == crate::TeamId::Hulks);
+    }
+    wait(
+        "second-half pose agrees with the new field frame",
+        &mut worker,
+        &mut || {
+            poses
+                .iter()
+                .zip(&epochs)
+                .all(|((pose, truth, status), epoch)| {
+                    if localization
+                        && !status.get_latest().is_some_and(|s| {
+                            Some(s.epoch) != *epoch
+                                && s.state == types::localization::LocalizationState::Tracking
+                        })
+                    {
+                        return false;
+                    }
+                    let (Some(pose), Some(truth)) = (pose.get_latest(), truth.get_latest()) else {
+                        return false;
+                    };
+                    let error = truth.inner.inverse() * pose.inner;
+                    error.translation.vector.norm() < 0.25 && error.rotation.angle().abs() < 0.15
+                })
+        },
+    );
+    drop(poses);
     drop(worker);
     drop(raw);
     drop(members);
