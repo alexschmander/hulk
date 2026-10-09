@@ -1,6 +1,6 @@
 # Simulator in Twix
 
-The Simulator panel runs one to five K1 robots with independent real motion, inference, fall detection, behavior and HSL message nodes.
+The Simulator panel runs one to five K1 robots per team with independent real motion, inference, fall detection, behavior and HSL message nodes.
 MuJoCo supplies physics and simulated sensor inputs.
 The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did.
 All simulator wiring and hardware substitutes live under `tools/simulate`; robotics crates need no simulator integration code.
@@ -35,10 +35,10 @@ Set `ORT_DYLIB_PATH` to your ONNX Runtime library if it is not available in the 
 
 The launcher enables Twix's optional `simulator` Cargo feature and configures its MuJoCo library path.
 Robot N uses global Zenoh prefix `hulk_simulator/hulks/N` and ROS namespace `/hulks/N`, including raw Booster topics, discovery, parameters and RPCs.
-The top-left namespace selector switches Twix and simulator body controls between `/hulks/1` through `/hulks/5`.
+The top-left namespace selector switches Twix and simulator body controls between `/hulks/1` through `/hulks/5` and `/opponents/1` through `/opponents/5`.
 The namespace selector autocompletes live graph namespaces, including robots discovered across the simulator scopes.
 Type to filter, use arrow keys and Enter or click a suggestion; Ctrl+Space opens completions without typing.
-Team names identify namespaces; GameController still uses numeric team 24.
+Team names identify namespaces; GameController uses team 24 for HULKs and team 5 for opponents.
 Selecting an absent player dims its name and disables its body controls.
 Without `--router`, simulator mode starts a private loopback router automatically.
 Ordinary Twix builds keep their existing dependencies.
@@ -46,8 +46,8 @@ With Cargo directly, enable `--features simulator`, pass `--zenoh-namespace hulk
 The current Nix Twix package builds ordinary Twix; it does not bundle the simulator.
 
 Open the **Simulator** preset or add a **Simulator** panel.
-Select an initial robot count, field location, profile and gamepad source, then press **Start simulator**.
-The field preview draws the selected location's parameter dimensions and the spawn slots for up to five players.
+Select one to five HULKs, zero to five opponents, a field location, profile and gamepad source, then press **Start simulator**.
+The field preview draws the selected location's parameter dimensions and the spawn slots for both teams.
 Parameter and model directories are under **Parameter and model paths**.
 Twix selects the robot's namespace automatically.
 Only one simulator can run per Twix process.
@@ -56,9 +56,9 @@ Restoring a saved layout does not start robotics or bind UDP sockets.
 Robots start upright and paused in **Initial**.
 Initial players alternate between both long touchlines in their own half, starting 0.5 m from the goal line and spaced 0.9 m toward midfield, facing inward.
 **Add robot** starts the next available player, at a vacant slot along the sideline, without moving existing robots.
-Placement follows the known GameController field side and defaults to Home before the first packet.
+Placement follows the known GameController field side, defaulting to Home for HULKs and Away for opponents before the first packet.
 A running match continues during startup; a paused match keeps the existing clock and poses frozen.
-Reset pose returns the selected robot to its original spawn placement.
+Reset pose returns the selected robot to its original spawn slot, mirrored if GameController has changed its field side.
 Floating player numbers use each robot's actual commanded LED color; the selected player's number is ringed.
 Startup uses the real button bridge, handler and safe-pose check to pass through Prepare to Initial.
 While running, the panel header is the toolbar.
@@ -135,7 +135,7 @@ Neural policies and contacts still need validation against hardware.
 ## GameController
 
 Use [RoboCup-HumanoidSoccerLeague/GameController](https://github.com/RoboCup-HumanoidSoccerLeague/GameController).
-Start an actual game for team 24 with up to five players.
+Start an actual game for team 24 with up to five players, and team 5 when opponents are enabled.
 A simulator-owned UDP relay receives state on UDP 3838 and forwards the original bytes to each production endpoint on a separate private port.
 Every robot parses the message, applies its own player number and emits a real return message, which the relay sends to the external sender on UDP 3939.
 Simulated teammates broadcast on an ephemeral shared port over loopback.
@@ -196,6 +196,30 @@ This tool hosts selected unchanged node entry points in Twix; it does not launch
 Image rendering/transport, neural detection and actual stereo VO are deferred to a later profile.
 See the [UI and multiple-robot audit](AUDIT.md) for the process boundary.
 
+## Self-play
+
+Set the opponent count above zero before starting, or choose **opponents** from **Add robot** during a session.
+Both teams run the same selected profile and share the ball, contacts, field and simulation clock.
+Each side uses player numbers 1 through 5 and starts on its own half's sidelines.
+Dynamic additions use the team's current GameController field side and skip occupied slots.
+Badges show H1–H5 or O1–O5 with the robot's actual LED color; hovering shows its namespace.
+Select `/opponents/N` in Twix to inspect or control an opponent, including the body buttons and local gamepad.
+Switching robots requires releasing and pressing Start again before gamepad input reaches the new robot.
+
+Run the external HSL GameController with teams 24 and 5, matching the simulator's field class and player count.
+Use its normal controls for kickoff, penalties, goals and side assignment.
+There is no automatic referee or scoring detection.
+Before receiving GameController data, HULKs defaults to the home side and opponents to away.
+Changing sides through GameController changes the robots' field interpretation; reposition robots with the gizmo or reset pose as needed.
+
+The unmodified production protocol hardcodes HULKs' team number as 24.
+The simulator adapts opponents' incoming protocol-20 packets by exchanging team identifiers 24 and 5, including the kicking team, while preserving team order and all other fields.
+It rewrites opponents' protocol-4 return team identifier to 5; poses remain in the production team's coordinate frame.
+Each team has a separate private UDP teammate channel, with copies forwarded to GameController ports 10024 and 10005 for message accounting.
+Opponent adaptation rejects unsupported packet versions and other team pairings.
+All raw Booster and ROS traffic is scoped under `hulk_simulator/hulks/N` or `hulk_simulator/opponents/N`.
+No robotics source changes are required.
+
 ## Verify
 
 ```sh
@@ -206,17 +230,18 @@ cargo test -p twix --features simulator --bin twix
 # With ONNX Runtime/models available and no simulator using the GameController ports:
 cargo test -p simulate startup_pause_resume_and_scene_edits_preserve_time -- --ignored
 SIMULATOR_TEST_PROFILE=localization cargo test -p simulate five_players_dynamic -- --ignored
-SIMULATOR_TEST_ADD_RUNNING=1 cargo test -p simulate five_players_dynamic -- --ignored
+SIMULATOR_TEST_OPPONENTS=2 SIMULATOR_TEST_ADD_RUNNING=1 cargo test -p simulate five_players_dynamic -- --ignored
 
 git clone https://github.com/RoboCup-HumanoidSoccerLeague/GameController /tmp/hsl-game-controller
-HSL_PLAYERS=5 HSL_TEST_FILTER=five_players_dynamic tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
+HSL_PLAYERS=5 SIMULATOR_TEST_ROBOTS=5 SIMULATOR_TEST_OPPONENTS=5 HSL_TEST_FILTER=five_players_dynamic tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
 ```
 
 The last test requires Linux user/network namespaces, `ip`, Python 3, and the upstream Rust build dependencies including libclang.
 It compiles the upstream `game_controller_runtime` used by the GUI, drives its normal action API, and connects it to HULK's production message nodes in the same private network.
-It checks Ready, a pickup penalty, penalty removal, accepted return messages, and a whistle-in-Set transition through the real state filters while upstream still reports Set.
+It checks ten accepted return streams, team-specific pickup penalties and removal, kickoff ownership, opposing field sides, production walking commands, and a whistle-in-Set transition through the real state filters while upstream still reports Set.
 It then verifies that the upstream match countdown advances while robotics time is frozen, return messages stop, and connection status recovers after resume.
 No synthetic GameController packets are used in this test.
+The multi-robot runtime test also sends distinct teammate markers through the real message handlers and filters, requiring same-team delivery and rejecting cross-team delivery.
 The GUI itself is not driven.
 Tested against upstream commit `af7d12962c671b631dee7b293df70e6f7b8bb491`, protocol 20, return protocol 4.
 

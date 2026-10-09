@@ -16,7 +16,7 @@ mod field;
 mod network;
 mod team;
 pub use field::FieldConfiguration;
-pub use team::{robot_namespace, robot_number, transport_scope};
+pub use team::{RobotId, TeamId, robot_id, robot_namespace, transport_scope};
 mod behavior_inputs;
 mod bevy_mujoco;
 mod buttons;
@@ -95,8 +95,8 @@ pub struct Simulator {
     viewport: viewport::Viewport,
     error: Option<String>,
     pending_robot: Option<tokio_util::task::AbortOnDropHandle<()>>,
-    added_robot: Option<std::sync::mpsc::Receiver<Result<u8, String>>>,
-    selected: u8,
+    added_robot: Option<std::sync::mpsc::Receiver<Result<RobotId, String>>>,
+    selected: Option<RobotId>,
     started: ros_z::time::Time,
 }
 
@@ -172,12 +172,12 @@ impl Simulator {
             error: None,
             pending_robot: None,
             added_robot: None,
-            selected: 1,
+            selected: Some(RobotId::FIRST),
             started,
         }
     }
 
-    pub fn select_robot(&mut self, number: u8) {
+    pub fn select_robot(&mut self, number: Option<RobotId>) {
         let team = self.widget.bevy_app.world().resource::<team::Team>();
         if number != self.selected {
             if let Some(member) = team.selected()
@@ -288,20 +288,32 @@ impl Simulator {
                 );
             });
         }
-        let full = team.members().len() >= 5;
-        let add = ui
-            .add_enabled_ui(!full && self.pending_robot.is_none() && ready, |ui| {
-                widgets::action(ui, icons::ICON_PERSON_ADD.codepoint, "Add robot", compact)
-            })
-            .inner
-            .on_hover_text("Start the next free player at a vacant sideline slot")
-            .on_disabled_hover_text(if full {
-                "All five players are running"
-            } else {
-                "Available once the current robots are ready"
-            });
-        if add.clicked() {
-            let selected = team.selected().expect("team always has a selected player");
+        let mut add_team = None;
+        ui.add_enabled_ui(self.pending_robot.is_none() && ready, |ui| {
+            ui.menu_button(
+                format!("{} Add robot", icons::ICON_PERSON_ADD.codepoint),
+                |ui| {
+                    for side in TeamId::ALL {
+                        let count = team
+                            .members()
+                            .iter()
+                            .filter(|member| member.id.team == side)
+                            .count();
+                        if ui
+                            .add_enabled(
+                                count < 5,
+                                egui::Button::new(format!("{} ({count}/5)", side.name())),
+                            )
+                            .clicked()
+                        {
+                            add_team = Some(side);
+                            ui.close();
+                        }
+                    }
+                },
+            );
+        });
+        if let Some(side) = add_team {
             let occupied = {
                 let physics = world.resource::<SharedPhysics>().lock();
                 physics
@@ -313,7 +325,7 @@ impl Simulator {
             let field = world
                 .resource::<parameters::CurrentSimulatorParameters>()
                 .field_dimensions;
-            if let Some(pose) = team::vacant_spawn(&field, &occupied, selected.io.away()) {
+            if let Some(pose) = team::vacant_spawn(&field, &occupied, team.away(side)) {
                 let (sender, receiver) = std::sync::mpsc::channel();
                 self.added_robot = Some(receiver);
                 let team = team.clone();
@@ -322,7 +334,7 @@ impl Simulator {
                 self.pending_robot = Some(tokio_util::task::AbortOnDropHandle::new(
                     runtime.clone().spawn_blocking(move || {
                         let result = runtime
-                            .block_on(team.add(pose))
+                            .block_on(team.add(side, pose))
                             .map_err(|error| format!("{error:#}"));
                         let _ = sender.send(result);
                         repaint.request_repaint();
@@ -343,14 +355,19 @@ impl Simulator {
             .resource::<team::Team>()
             .selected()
             .expect("team always has a selected player");
-        let exists = selected.number == self.selected;
-        let name = RichText::new(format!("Player {}", self.selected));
+        let exists = Some(selected.id) == self.selected;
+        let name = RichText::new(format!(
+            "Player {}",
+            self.selected
+                .map_or_else(|| "No robot".into(), |id| id.to_string())
+        ));
         if exists {
             ui.label(name.strong());
         } else {
             ui.label(name.weak()).on_hover_text(format!(
                 "No robot runs as player {}. Add robot starts the next free player.",
                 self.selected
+                    .map_or_else(|| "No robot".into(), |id| id.to_string())
             ));
         }
         let led = exists.then(|| selected.io.led_color()).flatten();
