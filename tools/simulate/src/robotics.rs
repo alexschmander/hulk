@@ -27,6 +27,8 @@ use types::time_wrapper::TimeWrapper;
 
 #[derive(Clone)]
 pub struct Configuration {
+    pub referee: crate::RefereeMode,
+    pub competition: crate::Competition,
     pub parameter_root: PathBuf,
     pub model_directory: PathBuf,
     pub router: Option<String>,

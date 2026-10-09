@@ -140,6 +140,7 @@ pub struct MujocoWorld {
     objects: HashMap<Entity, ObjectBinding>,
     pub generation: u64,
     pub motion_epoch: u64,
+    object_epochs: HashMap<Entity, u64>,
 }
 
 impl Default for MujocoWorld {
@@ -156,6 +157,7 @@ impl Default for MujocoWorld {
             objects: HashMap::new(),
             generation: 0,
             motion_epoch: 0,
+            object_epochs: HashMap::new(),
         }
     }
 }
@@ -214,12 +216,17 @@ impl MujocoWorld {
             .element_mut_pointer();
         unsafe { spec.delete_element(element) }.map_err(|error| error.to_string())?;
         self.objects.remove(&entity);
+        self.object_epochs.remove(&entity);
         self.balls.retain(|ball| *ball != entity);
         self.robots.retain(|robot| *robot != entity);
         Ok(true)
     }
 
+    pub fn object_epoch(&self, entity: Entity) -> u64 {
+        self.object_epochs.get(&entity).copied().unwrap_or_default()
+    }
     pub fn set_object_pose(&mut self, entity: Entity, transform: Transform) -> Result<(), String> {
+        *self.object_epochs.entry(entity).or_default() += 1;
         if self.robots.contains(&entity) {
             self.motion_epoch += 1;
         }

@@ -41,7 +41,20 @@ pub(crate) struct Network {
 }
 impl Network {
     pub async fn new(port: u16, return_port: u16) -> Result<Self> {
-        let socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
+        Self::create(("0.0.0.0", port), return_port, None).await
+    }
+    pub async fn automatic(endpoints: crate::autoref::transport::Endpoints) -> Result<Self> {
+        Self::create(("127.0.0.1", 0), endpoints.returns, Some(endpoints)).await
+    }
+    pub fn address(&self) -> Result<SocketAddr> {
+        Ok(self.socket.local_addr()?)
+    }
+    async fn create(
+        bind: (&str, u16),
+        return_port: u16,
+        automatic: Option<crate::autoref::transport::Endpoints>,
+    ) -> Result<Self> {
+        let socket = Arc::new(UdpSocket::bind(bind).await?);
         let clients = Arc::new(Mutex::new(Vec::<(u16, TeamId)>::new()));
         let source = Arc::new(Mutex::new(None));
         let mut team_ports = BTreeMap::new();
@@ -64,6 +77,7 @@ impl Network {
             team_ports.insert(team, team_socket.local_addr()?.port());
             team_sockets.push((team, team_socket));
         }
+        let allowed = automatic.as_ref().map(|config| config.source);
         let task = {
             let socket = socket.clone();
             let clients = clients.clone();
@@ -71,6 +85,9 @@ impl Network {
             tokio::spawn(async move {
                 let mut buffer = [0; 65536];
                 while let Ok((size, from)) = socket.recv_from(&mut buffer).await {
+                    if allowed.is_some_and(|source| source != from) {
+                        continue;
+                    }
                     *source.lock().unwrap() = Some(from);
                     let ports = clients.lock().unwrap().clone();
                     for (port, team) in ports {
@@ -88,16 +105,18 @@ impl Network {
         let mut tasks = vec![task];
         for (team, team_socket) in team_sockets {
             let team_source = source.clone();
+            let budget_port = automatic
+                .as_ref()
+                .map_or(10000 + u16::from(team.wire_number()), |config| {
+                    config.budgets[&team]
+                });
             tasks.push(tokio::spawn(async move {
                 let mut buffer = [0; 65536];
                 while let Ok((size, _)) = team_socket.recv_from(&mut buffer).await {
                     let destination = *team_source.lock().unwrap();
                     if let Some(destination) = destination
                         && let Err(error) = team_socket
-                            .send_to(
-                                &buffer[..size],
-                                (destination.ip(), 10000 + u16::from(team.wire_number())),
-                            )
+                            .send_to(&buffer[..size], (destination.ip(), budget_port))
                             .await
                     {
                         log::warn!("Simulator team packet to GameController: {error}");
@@ -165,7 +184,7 @@ impl Drop for Network {
 
 // Production runs on Twix's multithreaded runtime; drain aborted tasks before
 // releasing the simulator lease so an immediate restart can bind the sockets.
-fn drain<'a>(
+pub(crate) fn drain<'a>(
     runtime: &tokio::runtime::Handle,
     tasks: impl Iterator<Item = &'a mut JoinHandle<()>>,
 ) {

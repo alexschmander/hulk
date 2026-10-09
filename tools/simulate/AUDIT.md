@@ -10,7 +10,7 @@ The panel starts a configured team and adds controlled robots and balls with too
 | --- | --- |
 | Body/head motion command form, inject/clear | Twix Parameter panel, `behavior_node.control.injected_motion_command` |
 | Parameter groups, snapshots, apply/discard, validation | Twix Parameter panel and the nodes' real parameter services |
-| Game state, penalties, field side | External HSL GameController over the real network pipeline |
+| Game state, penalties, field side | External HSL GameController or embedded upstream core, both over the real network pipeline |
 | Motion/actuator/behavior readouts | Twix Text, Plot and Behavior tree panels |
 | Robot and ball palette | One to five controlled robots per team; Add robot and Add ball in the simulator |
 | Pause, reset and object placement | Simulator toolbar; ball dragging and robot translation/rotation gizmo |
@@ -79,4 +79,18 @@ This implements in-process multi-robot profiles, not separate full `hulk_ros_z` 
 Full executable support still needs device substitutes, a perception strategy, child-process supervision and end-to-end validation.
 Self-play adapts the hardcoded production team number at the simulator UDP boundary, preserving all robotics code.
 The default external identities are HULKs 24 and opponents 5; namespaces use their names.
-Removing individual robots and automatic refereeing remain outside the implementation.
+Removing individual robots remains outside the implementation.
+Automatic refereeing is tool-owned under `src/autoref`, using the pinned upstream HSL core and private UDP transport.
+See README for its supported rules and discretionary calls that still require a human.
+
+## Automatic referee validation
+
+The upstream core is pinned to `39a617c8746708b7acc7df53b2a88252cd75250e` and remains the only owner of match transitions, scores, timers and penalty durations.
+The simulator owns geometric judgments, contact history, handling effects and private UDP transport.
+The test suite passes 58 simulator tests and 127 Twix tests, including 16 referee rule, preset and UDP tests.
+The ignored automatic-referee roundtrip test passed separately in all four profiles with two robots per team.
+It checks both teams' real return streams, delayed Playing packets, physical penalty placement and release, pause timing and isolation of other robots' motion history.
+A native Twix run completed the normal Ready/Set/whistle sequence, accepted a corner call, automatically called a goal kick and scored a goal, and handled a pickup penalty and expiry.
+Stopping and immediately starting another automatic match succeeded.
+Clippy with warnings denied and formatting checks pass.
+No robotics source under `crates/` changed for this feature.
