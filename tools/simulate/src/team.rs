@@ -66,6 +66,7 @@ impl Team {
             .as_ref()
             .ok_or_else(|| eyre!("Missing field configuration"))?;
         field.validate().map_err(|error| eyre!(error))?;
+        let clock = Clock::logical(Clock::wallclock().now());
         let mut referee = if configuration.referee == crate::RefereeMode::Automatic {
             Some(crate::autoref::AutoRef::new(&configuration).await?)
         } else {
@@ -73,7 +74,7 @@ impl Team {
         };
         let network = if let Some(referee) = &mut referee {
             let network = Network::automatic(referee.network()).await?;
-            referee.connect(network.address()?);
+            referee.connect(network.address()?, clock.clone());
             network
         } else {
             Network::new(3838, 3939).await?
@@ -82,7 +83,7 @@ impl Team {
             cancelled,
             _lease: lease,
             runtime,
-            clock: Clock::logical(Clock::wallclock().now()),
+            clock,
             network: tokio::sync::Mutex::new(network),
             referee,
             members: Mutex::new(BTreeMap::new()),

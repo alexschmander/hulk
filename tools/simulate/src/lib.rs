@@ -283,6 +283,29 @@ impl Simulator {
         }
         ui.label(RichText::new(clock(team.now().duration_since(self.started))).monospace())
             .on_hover_text("Simulation time since start; it stops while paused");
+        let mut speed = self.physics.speed();
+        let speed_picker = egui::ComboBox::from_id_salt("simulation_speed")
+            .width(64.0)
+            .selected_text(format!("{} speed", speed.label()))
+            .show_ui(ui, |ui| {
+                for option in simulation::Speed::ALL {
+                    ui.selectable_value(&mut speed, option, option.label());
+                }
+            });
+        speed_picker.response.on_hover_text(
+            "Physics, robotics and the automatic GameController run at the selected speed. Faster targets depend on available compute.",
+        );
+        self.physics.set_speed(speed);
+        let actual = self.physics.actual_speed();
+        if !paused && actual > 0.0 {
+            ui.weak(format!("{actual:.2}× actual")).on_hover_text(
+                "Simulated seconds per real second, measured over the last half second",
+            );
+        }
+        if team.referee().is_none() && speed != simulation::Speed::Normal {
+            ui.weak("External GC stays at 1×")
+                .on_hover_text("The external GameController owns its clock; speed changes apply to physics and robotics only");
+        }
         if !ready {
             ui.spinner();
             ui.weak("Initializing robot…");
