@@ -100,6 +100,8 @@ pub struct Simulator {
     added_robot: Option<std::sync::mpsc::Receiver<Result<RobotId, String>>>,
     selected: Option<RobotId>,
     started: ros_z::time::Time,
+    desk: bool,
+    selection: Option<RobotId>,
 }
 
 impl Drop for Simulator {
@@ -176,6 +178,8 @@ impl Simulator {
             added_robot: None,
             selected: Some(RobotId::FIRST),
             started,
+            desk: true,
+            selection: None,
         }
     }
 
@@ -208,8 +212,13 @@ impl Simulator {
         };
     }
 
-    /// Controls for Twix's panel header: the whole simulation first, then the selected player.
-    /// Returns whether Stop simulator was pressed.
+    /// A player chosen inside the panel, for Twix to select its namespace.
+    pub fn take_selection(&mut self) -> Option<RobotId> {
+        self.selection.take()
+    }
+
+    /// Controls for Twix's panel header: the match, the whole simulation, then the selected
+    /// player. Returns whether Stop simulator was pressed.
     pub fn header(&mut self, ui: &mut Ui) -> bool {
         let compact = ui.available_width() < 640.0;
         // Do not touch physics after a worker panic may have poisoned its mutex.
@@ -224,7 +233,7 @@ impl Simulator {
                     .resource::<team::Team>()
                     .referee()
             {
-                referee.scoreboard(ui);
+                referee.match_strip(ui, &mut self.desk, compact);
             }
             ui.horizontal_wrapped(|ui| {
                 if !failed {
@@ -260,7 +269,10 @@ impl Simulator {
                 widgets::primary(ui, icon, label)
             })
             .inner
-            .on_hover_text("Space also toggles while the Simulator is focused")
+            .on_hover_text(
+                "Run or pause physics, robotics and match clocks (Space).\n\
+                 Stop play is the referee's call and keeps the simulation running.",
+            )
             .clicked()
         {
             world.resource::<SharedPhysics>().lock().mode = if paused {
@@ -276,28 +288,24 @@ impl Simulator {
             ui.weak("Initializing robot…");
         }
         ui.separator();
-        if let Some(referee) = team.referee() {
-            referee.ui(ui, self.selected);
-        }
-        if widgets::action(ui, icons::ICON_SPORTS.codepoint, "Whistle", compact)
-            .on_hover_text("Send a whistle detection to every robot")
-            .clicked()
+        // With the embedded referee, its Whistle call starts play and it owns the one match ball.
+        if team.referee().is_none()
+            && widgets::action(ui, icons::ICON_SPORTS.codepoint, "Whistle", compact)
+                .on_hover_text("Send a whistle detection to every robot")
+                .clicked()
         {
-            if let Some(referee) = team.referee() {
-                referee.engine.lock().unwrap().manual_whistle = true;
-            } else {
-                for member in team.members() {
-                    member.io.whistle();
-                }
+            for member in team.members() {
+                member.io.whistle();
             }
         }
-        if ui
-            .add_enabled_ui(ready && team.referee().is_none(), |ui| {
-                widgets::action(ui, icons::ICON_SPORTS_SOCCER.codepoint, "Add ball", compact)
-            })
-            .inner
-            .on_hover_text("Place a ball one meter from the center")
-            .clicked()
+        if team.referee().is_none()
+            && ui
+                .add_enabled_ui(ready, |ui| {
+                    widgets::action(ui, icons::ICON_SPORTS_SOCCER.codepoint, "Add ball", compact)
+                })
+                .inner
+                .on_hover_text("Place a ball one meter from the center")
+                .clicked()
         {
             world.resource_scope(|world, assets: Mut<scene::visual::ObjectVisualAssets>| {
                 scene::ball::spawn(
@@ -375,18 +383,23 @@ impl Simulator {
             .selected()
             .expect("team always has a selected player");
         let exists = Some(selected.id) == self.selected;
-        let name = RichText::new(format!(
-            "Player {}",
-            self.selected
-                .map_or_else(|| "No robot".into(), |id| id.to_string())
-        ));
+        let referee = world.resource::<team::Team>().referee().is_some();
+        let name = self
+            .selected
+            .map_or_else(|| "No robot".into(), autoref::short);
+        ui.weak("Player");
         if exists {
-            ui.label(name.strong());
+            ui.label(
+                RichText::new(name)
+                    .strong()
+                    .color(autoref::team_color(ui.visuals(), selected.id.team)),
+            )
+            .on_hover_text(robot_namespace(selected.id));
         } else {
-            ui.label(name.weak()).on_hover_text(format!(
-                "No robot runs as player {}. Add robot starts the next free player.",
+            ui.label(RichText::new(name).weak()).on_hover_text(format!(
+                "No robot runs as {}. Add robot starts the next free player.",
                 self.selected
-                    .map_or_else(|| "No robot".into(), |id| id.to_string())
+                    .map_or_else(|| "this player".into(), robot_namespace)
             ));
         }
         let led = exists.then(|| selected.io.led_color()).flatten();
@@ -418,6 +431,12 @@ impl Simulator {
                 simulation::reset(world);
             }
         });
+        if referee && exists {
+            ui.separator();
+            if let Some(referee) = world.resource::<team::Team>().referee() {
+                referee.player_calls(ui, selected.id);
+            }
+        }
     }
 
     pub fn ui(&mut self, ui: &mut Ui) {
@@ -460,15 +479,122 @@ impl Simulator {
             widgets::error_banner(ui, error);
             ui.add_space(4.0);
         }
+        let team = self
+            .widget
+            .bevy_app
+            .world()
+            .resource::<team::Team>()
+            .clone();
+        if let Some(referee) = team.referee() {
+            self.referee_keys(ui, referee);
+            if self.desk {
+                self.desk_ui(ui, &team, referee);
+            }
+        }
         let rect = ui.available_rect_before_wrap();
         self.viewport
             .input(ui, rect, self.widget.bevy_app.world_mut());
         self.widget.ui(ui);
         self.viewport
             .paint(ui, rect, self.widget.bevy_app.world_mut(), self.selected);
+        if let Some(id) = self.viewport.take_selection() {
+            self.selection = Some(id);
+        }
+        let paused = self
+            .widget
+            .bevy_app
+            .world()
+            .resource::<SharedPhysics>()
+            .lock()
+            .mode
+            == SimulationMode::Paused;
+        if paused && self.physics.ready() && !self.viewport.captured() {
+            paused_chip(ui, rect);
+        }
+        if let Some(referee) = team.referee() {
+            referee.toast(ui, rect);
+        }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(16));
     }
+
+    /// Referee shortcuts while the pointer is over the panel: Shift+Space stops or resumes
+    /// play, N takes the next match step and R toggles the desk.
+    fn referee_keys(&mut self, ui: &mut Ui, referee: &autoref::AutoRef) {
+        if !ui.rect_contains_pointer(ui.max_rect())
+            || ui.ctx().text_edit_focused()
+            || egui::Popup::is_any_open(ui.ctx())
+            || self.viewport.captured()
+        {
+            return;
+        }
+        let (stop, next, desk) = ui.input_mut(|input| {
+            (
+                input.consume_key(egui::Modifiers::SHIFT, egui::Key::Space),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::N),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::R),
+            )
+        });
+        if desk {
+            self.desk = !self.desk;
+        }
+        referee.shortcut(stop, next);
+    }
+
+    fn desk_ui(&mut self, ui: &mut Ui, team: &team::Team, referee: &autoref::AutoRef) {
+        let robots: Vec<_> = team.members().iter().map(|member| member.id).collect();
+        let frame = egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(10, 8));
+        let content = |ui: &mut Ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| referee.desk(ui, &robots, self.selected))
+                .inner
+        };
+        // Beside the scene when there is room, below it in narrow panels.
+        let selection = if ui.available_width() >= 760.0 {
+            egui::Panel::right("simulator_referee_desk")
+                .frame(frame)
+                .default_size(310.0)
+                .size_range(260.0..=480.0)
+                .show(ui, content)
+                .inner
+        } else {
+            egui::Panel::bottom("simulator_referee_desk_narrow")
+                .frame(frame)
+                .resizable(true)
+                .default_size(240.0)
+                .size_range(120.0..=(ui.available_height() * 0.6).max(140.0))
+                .show(ui, content)
+                .inner
+        };
+        if selection.is_some() {
+            self.selection = selection;
+        }
+    }
+}
+
+/// Marks a paused simulation in the scene, where its stillness is otherwise ambiguous.
+fn paused_chip(ui: &Ui, rect: egui::Rect) {
+    egui::Area::new(ui.id().with("paused_chip"))
+        .pivot(egui::Align2::LEFT_TOP)
+        .fixed_pos(rect.left_top() + egui::vec2(10.0, 10.0))
+        .constrain_to(rect)
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            ui.style_mut().interaction.selectable_labels = false;
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.label(RichText::new(icons::ICON_PAUSE.codepoint).strong());
+                    ui.label(RichText::new("Simulation paused").strong());
+                    ui.add_space(4.0);
+                    widgets::keycap(ui, "Space");
+                    ui.weak("to run");
+                });
+            });
+        });
 }
 
 fn clock(elapsed: std::time::Duration) -> String {
