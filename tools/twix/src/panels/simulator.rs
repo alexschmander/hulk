@@ -165,6 +165,11 @@ mod enabled {
             }
             if let Some(simulator) = &mut self.simulator {
                 simulator.ui(ui);
+                if let Some(id) = simulator.take_selection()
+                    && let Err(error) = context.backend.set_namespace(simulate::robot_namespace(id))
+                {
+                    self.error = Some(format!("{error:#}"));
+                }
                 return;
             }
             egui::ScrollArea::vertical()

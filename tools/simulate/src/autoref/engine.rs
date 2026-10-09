@@ -1,4 +1,8 @@
-use super::{Competition, side};
+use super::{
+    Competition,
+    calls::{self, Call},
+    side,
+};
 use crate::{FieldConfiguration, RobotId, TeamId};
 use enum_map::enum_map;
 use game_controller_core::{
@@ -50,6 +54,23 @@ struct Restart {
     taken: bool,
     started: f64,
 }
+/// Who made a referee decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    Automatic,
+    Operator,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct Event {
+    /// Core time, which advances with simulation time.
+    pub time: Duration,
+    pub origin: Origin,
+    /// Whether the core accepted the decision.
+    pub accepted: bool,
+    pub text: String,
+    /// Wall time, so the panel can briefly mark a new decision.
+    pub logged: std::time::Instant,
+}
 #[derive(Clone, Copy)]
 enum Handling {
     Waiting(f64),
@@ -60,12 +81,15 @@ enum Handling {
 pub(crate) struct Engine {
     pub core: GameController,
     pub enabled: bool,
-    pub commands: Vec<VAction>,
-    pub manual_whistle: bool,
-    pub restarts: Vec<(SetPlay, Side)>,
-    pub events: VecDeque<String>,
+    pub events: VecDeque<Event>,
     pub returns: BTreeMap<(u8, u8), Duration>,
     field: FieldConfiguration,
+    // Operator calls apply immediately, also while paused, against the last physics
+    // observation; their physical effects follow on the next simulation step.
+    snapshot: Snapshot,
+    pending: Vec<Effect>,
+    operator: bool,
+    whistle: bool,
     restart: Option<Restart>,
     placement: Option<([f64; 2], f64)>,
     resume_at: Option<f64>,
@@ -102,12 +126,13 @@ impl Engine {
         Ok(Self {
             core: GameController::new(params, Box::new(NullLogger)),
             enabled: true,
-            commands: Vec::new(),
-            manual_whistle: false,
-            restarts: Vec::new(),
             events: VecDeque::new(),
             returns: BTreeMap::new(),
             field,
+            snapshot: Snapshot::default(),
+            pending: Vec::new(),
+            operator: false,
+            whistle: false,
             restart: None,
             placement: None,
             resume_at: None,
@@ -131,24 +156,185 @@ impl Engine {
     fn now(&self) -> f64 {
         self.core.get_time().as_secs_f64()
     }
-    fn event(&mut self, message: impl AsRef<str>) {
-        self.events
-            .push_back(format!("{:07.2}  {}", self.now(), message.as_ref()));
+    fn log(&mut self, accepted: bool, text: String) {
+        self.events.push_back(Event {
+            time: self.core.get_time(),
+            origin: if self.operator {
+                Origin::Operator
+            } else {
+                Origin::Automatic
+            },
+            accepted,
+            text,
+            logged: std::time::Instant::now(),
+        });
         while self.events.len() > 128 {
             self.events.pop_front();
         }
     }
+    fn event(&mut self, message: impl Into<String>) {
+        self.log(true, message.into());
+    }
     fn apply(&mut self, action: VAction) -> bool {
-        let description = format!("{action:?}");
         // Referee actions need no core undo history: undoing a game state alone
         // cannot undo physical robot/ball handling. Keep the bounded event log.
-        let accepted = self.core.apply(action, ActionSource::Network);
-        self.event(if accepted {
-            description
-        } else {
-            format!("Rejected {description}")
-        });
+        let accepted = self.core.apply(action.clone(), ActionSource::Network);
+        let text = calls::describe(&action, self.core.get_game(false));
+        self.log(accepted, text);
+        if accepted {
+            self.observe();
+        }
         accepted
+    }
+    /// Records state changes as they happen, so several transitions between two physics
+    /// steps still each restart their grace periods and place the ball on entering Set.
+    fn observe(&mut self) {
+        let now = self.now();
+        let game = self.core.get_game(false);
+        let (stopped, state) = (game.stopped, game.state);
+        if stopped != self.stopped {
+            self.stopped = stopped;
+            self.stopped_since = now;
+            self.violations.clear();
+        }
+        if state != self.state {
+            self.state = state;
+            self.state_since = now;
+            self.violations.clear();
+            if state == State::Set {
+                let position = self.restart.as_ref().map_or([0.0; 2], |r| r.position);
+                self.pending.push(Effect::Ball(position));
+                self.last_ball = None;
+            }
+        }
+    }
+    /// Whether the core currently accepts an operator call.
+    pub fn allowed(&mut self, call: Call) -> bool {
+        if matches!(call, Call::Restart(..)) && self.core.get_game(false).state == State::Playing {
+            // A new restart first ends the running set play, as in begin_restart.
+            let mut game = self.core.get_game(false).clone();
+            game.set_play = SetPlay::NoSetPlay;
+            game.kicking_side = None;
+            let action = call.action(&game);
+            return action.is_legal(&game_controller_core::action::ActionContext::new(
+                &mut game,
+                &self.core.params,
+                None,
+                None,
+            ));
+        }
+        let action = call.action(self.core.get_game(false));
+        action.is_legal(&self.core.get_context(false))
+    }
+    /// Applies an operator call now, with the same physical handling as automatic decisions.
+    pub fn call(&mut self, call: Call) -> Result<(), String> {
+        self.operator = true;
+        if !self.allowed(call) {
+            let reason = call.refusal(self.core.get_game(false));
+            self.log(false, format!("{}: {reason}", call.label()));
+            self.operator = false;
+            return Err(reason);
+        }
+        let snapshot = std::mem::take(&mut self.snapshot);
+        let now = self.now();
+        match call {
+            Call::Kickoff => {
+                let owner = self.core.get_game(false).kicking_side;
+                self.begin_restart(SetPlay::KickOff, owner, [0.0; 2], &snapshot);
+            }
+            Call::Restart(team, kind) => {
+                let position = self.restart_position(team, kind, &snapshot);
+                self.begin_restart(kind, Some(side(team)), position, &snapshot);
+            }
+            Call::Whistle => {
+                self.free_set_play(&snapshot, &mut Vec::new());
+            }
+            Call::BallFree => {
+                // The set play ended without a kick; its touch restrictions no longer apply.
+                if self.apply(call.action(self.core.get_game(false))) {
+                    self.restart = None;
+                }
+            }
+            Call::Goal(_) | Call::DroppedBall => {
+                if self.apply(call.action(self.core.get_game(false))) {
+                    self.kickoff_after_goal(&snapshot);
+                }
+            }
+            Call::FinishHalf => self.finish_half(now),
+            Call::SecondHalf => {
+                if self.apply(call.action(self.core.get_game(false))) {
+                    self.next_half_at = now;
+                }
+            }
+            _ => {
+                self.apply(call.action(self.core.get_game(false)));
+            }
+        }
+        self.operator = false;
+        self.snapshot = snapshot;
+        Ok(())
+    }
+    fn kickoff_after_goal(&mut self, snapshot: &Snapshot) {
+        let game = self.core.get_game(false);
+        if game.state == State::Ready {
+            self.record_restart(SetPlay::KickOff, game.kicking_side, [0.0; 2], snapshot);
+        }
+    }
+    fn finish_half(&mut self, now: f64) {
+        let first = self.core.get_game(false).phase == Phase::FirstHalf;
+        self.next_half_at = now
+            + self
+                .core
+                .params
+                .competition
+                .half_time_break_duration
+                .as_secs_f64();
+        if self.apply(VAction::FinishHalf(FinishHalf)) {
+            for i in 0..if first { 2 } else { 3 } {
+                self.whistles.push_back(now + i as f64);
+            }
+        }
+    }
+    fn free_set_play(&mut self, snapshot: &Snapshot, effects: &mut Vec<Effect>) {
+        if !self.apply(VAction::FreeSetPlay(FreeSetPlay)) {
+            return;
+        }
+        let owner = self.restart.as_ref().and_then(|r| r.side);
+        let players = snapshot
+            .robots
+            .iter()
+            .filter(|r| Some(side(r.id.team)) == owner && self.penalty(r.id) == Penalty::NoPenalty)
+            .count();
+        if let Some(restart) = &mut self.restart {
+            restart.players = players;
+        }
+        if self.operator {
+            self.pending.push(Effect::Whistle);
+        } else {
+            effects.push(Effect::Whistle);
+        }
+    }
+    fn restart_position(&self, team: TeamId, kind: SetPlay, snapshot: &Snapshot) -> [f64; 2] {
+        let f = self.field.dimensions;
+        let ball = snapshot.ball.as_ref().map_or([0.0; 3], |b| b.position);
+        let own = if self.away(team) { 1.0 } else { -1.0 };
+        let y = if ball[1] >= 0.0 { 1.0 } else { -1.0 };
+        match kind {
+            SetPlay::GoalKick => [
+                own * (f.length / 2.0 - f.goal_box_area_length) as f64,
+                y * f.goal_box_area_width as f64 / 2.0,
+            ],
+            SetPlay::CornerKick => [-own * f.length as f64 / 2.0, y * f.width as f64 / 2.0],
+            SetPlay::ThrowIn => [
+                ball[0].clamp(-f.length as f64 / 2.0, f.length as f64 / 2.0),
+                y * f.width as f64 / 2.0,
+            ],
+            SetPlay::PenaltyKick => [
+                -own * (f.length / 2.0 - f.penalty_marker_distance) as f64,
+                0.0,
+            ],
+            _ => [ball[0], ball[1]],
+        }
     }
     fn away(&self, team: TeamId) -> bool {
         (team == TeamId::Opponents)
@@ -176,7 +362,10 @@ impl Engine {
         {
             self.apply(VAction::FinishSetPlay(FinishSetPlay));
         }
-        let accepted = if kind == SetPlay::KickOff && owner.is_none() {
+        let accepted = if kind == SetPlay::KickOff
+            && owner.is_none()
+            && self.core.get_game(false).state == State::Playing
+        {
             self.apply(VAction::GlobalGameStuck(GlobalGameStuck))
         } else {
             self.apply(VAction::StartSetPlay(StartSetPlay {
@@ -223,47 +412,11 @@ impl Engine {
     }
     pub(super) fn update(&mut self, snapshot: &Snapshot, dt: Duration) -> Vec<Effect> {
         self.core.seek(dt);
+        self.observe();
+        self.snapshot = snapshot.clone();
         let now = self.now();
-        let mut effects = Vec::new();
-        for action in std::mem::take(&mut self.commands) {
-            let goal = matches!(action, VAction::Goal(_));
-            let dropped = matches!(action, VAction::GlobalGameStuck(_));
-            if self.apply(action) && (goal || dropped) {
-                let game = self.core.get_game(false);
-                if game.state == State::Ready {
-                    self.record_restart(SetPlay::KickOff, game.kicking_side, [0.0; 2], snapshot);
-                }
-            }
-        }
-        for (kind, owner) in std::mem::take(&mut self.restarts) {
-            let f = self.field.dimensions;
-            let ball = snapshot.ball.as_ref().map_or([0.0; 3], |b| b.position);
-            let own = if self.away(super::team(owner)) {
-                1.0
-            } else {
-                -1.0
-            };
-            let y = if ball[1] >= 0.0 { 1.0 } else { -1.0 };
-            let position = match kind {
-                SetPlay::GoalKick => [
-                    own * (f.length / 2.0 - f.goal_box_area_length) as f64,
-                    y * f.goal_box_area_width as f64 / 2.0,
-                ],
-                SetPlay::CornerKick => [-own * f.length as f64 / 2.0, y * f.width as f64 / 2.0],
-                SetPlay::ThrowIn => [
-                    ball[0].clamp(-f.length as f64 / 2.0, f.length as f64 / 2.0),
-                    y * f.width as f64 / 2.0,
-                ],
-                _ => [ball[0], ball[1]],
-            };
-            self.begin_restart(kind, Some(owner), position, snapshot);
-        }
+        let mut effects = std::mem::take(&mut self.pending);
         let game = self.core.get_game(false).clone();
-        if game.stopped != self.stopped {
-            self.stopped = game.stopped;
-            self.stopped_since = now;
-            self.violations.clear();
-        }
         if game.sides != self.mapping {
             self.mapping = game.sides;
             for robot in &snapshot.robots {
@@ -285,24 +438,22 @@ impl Engine {
             self.handlers.clear();
             self.event("Teams changed ends");
         }
-        if game.state != self.state {
-            self.state = game.state;
-            self.state_since = now;
-            self.violations.clear();
-            if game.state == State::Set {
-                let position = self.restart.as_ref().map_or([0.0; 2], |r| r.position);
-                effects.push(Effect::Ball(position));
-                self.last_ball = None;
-            }
-        }
         self.handle_penalties(snapshot, &mut effects);
         if self.enabled {
-            if game.state == State::Initial && now >= self.next_half_at && snapshot.ball.is_some() {
+            let break_over = match game.state {
+                State::Initial => now >= self.next_half_at,
+                State::Timeout => {
+                    game.secondary_timer.get_remaining()
+                        <= game_controller_core::timer::SignedDuration::ZERO
+                }
+                _ => false,
+            };
+            if break_over && snapshot.ball.is_some() {
                 self.begin_restart(SetPlay::KickOff, game.kicking_side, [0.0; 2], snapshot);
             }
             self.check_positions(snapshot);
             if game.state == State::Set && now - self.state_since >= 2.0 {
-                self.manual_whistle = true;
+                self.whistle = true;
             }
         }
         // Physical handling follows accepted calls even with automatic judgments off.
@@ -323,20 +474,8 @@ impl Engine {
             self.apply(VAction::StopPlay(StopPlay { resume: true }));
             self.resume_at = None;
         }
-        if std::mem::take(&mut self.manual_whistle) && self.apply(VAction::FreeSetPlay(FreeSetPlay))
-        {
-            let owner = self.restart.as_ref().and_then(|r| r.side);
-            let players = snapshot
-                .robots
-                .iter()
-                .filter(|r| {
-                    Some(side(r.id.team)) == owner && self.penalty(r.id) == Penalty::NoPenalty
-                })
-                .count();
-            if let Some(restart) = &mut self.restart {
-                restart.players = players;
-            }
-            effects.push(Effect::Whistle);
+        if std::mem::take(&mut self.whistle) {
+            self.free_set_play(snapshot, &mut effects);
         }
         if self.enabled
             && self.core.get_game(false).state == State::Playing
@@ -353,19 +492,7 @@ impl Engine {
                     .as_ref()
                     .is_none_or(|b| length(b.velocity) < 0.02 || self.outside(b.position))
             {
-                let first = game.phase == Phase::FirstHalf;
-                self.next_half_at = now
-                    + self
-                        .core
-                        .params
-                        .competition
-                        .half_time_break_duration
-                        .as_secs_f64();
-                if self.apply(VAction::FinishHalf(FinishHalf)) {
-                    for i in 0..if first { 2 } else { 3 } {
-                        self.whistles.push_back(now + i as f64);
-                    }
-                }
+                self.finish_half(now);
             }
         }
         while self.whistles.front().is_some_and(|time| now >= *time) {
@@ -452,7 +579,7 @@ impl Engine {
                     );
             }
             if second_touch {
-                self.event(format!("Second touch by {id}"));
+                self.event(format!("Second touch by {}", calls::short(id)));
                 self.begin_restart(
                     SetPlay::IndirectFreeKick,
                     Some(-side(id.team)),
@@ -532,10 +659,7 @@ impl Engine {
             let scorer = -defender;
             let valid = self.goal_allowed(scorer);
             if valid && self.apply(VAction::Goal(Goal { side: scorer })) {
-                let game = self.core.get_game(false);
-                if game.state == State::Ready {
-                    self.record_restart(SetPlay::KickOff, game.kicking_side, [0.0; 2], snapshot);
-                }
+                self.kickoff_after_goal(snapshot);
                 return;
             }
             self.event("Goal disallowed by restart touch restrictions");
@@ -694,16 +818,19 @@ impl Engine {
             } else if (game.state == State::Set && now - self.state_since > 1.0)
                 || (game.state == State::Playing && game.set_play == SetPlay::KickOff)
             {
+                let kickoff = game.set_play == SetPlay::KickOff;
                 if game.state == State::Set && !robot.fallen && robot.leg_speed > 0.4 {
                     call = Some(PenaltyCall::MotionInSet);
-                } else if !in_field
-                    || (!in_own_half
-                        && !(game.kicking_side == Some(side(robot.id.team)) && near_circle))
-                    || (game.kicking_side != Some(side(robot.id.team)) && near_circle)
+                } else if kickoff
+                    && (!in_field
+                        || (!in_own_half
+                            && !(game.kicking_side == Some(side(robot.id.team)) && near_circle))
+                        || (game.kicking_side != Some(side(robot.id.team)) && near_circle))
                 {
                     call = Some(PenaltyCall::IllegalPosition);
                 }
-                if game.kicking_side == Some(side(robot.id.team))
+                if kickoff
+                    && game.kicking_side == Some(side(robot.id.team))
                     && !in_own_half
                     && near_circle
                     && forward_kicker.replace(robot.id).is_some()
@@ -796,7 +923,10 @@ impl Engine {
                                 Handling::Placed(now + 0.3)
                             },
                         );
-                        self.event(format!("Placed {} outside its own penalty mark", robot.id));
+                        self.event(format!(
+                            "{} placed beside the field",
+                            calls::short(robot.id)
+                        ));
                     }
                 }
                 Handling::Placed(after) if now >= after => {
