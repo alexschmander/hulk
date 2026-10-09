@@ -48,6 +48,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
                 namespace: "/simulator/startup_test".into(),
                 location: None,
                 robot_count: 1,
+                opponent_count: 0,
                 field_configuration: None,
                 profile,
                 controller: crate::ControllerSource::External,

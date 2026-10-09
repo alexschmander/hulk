@@ -33,6 +33,7 @@ pub struct Configuration {
     pub namespace: String,
     pub location: Option<String>,
     pub robot_count: u8,
+    pub opponent_count: u8,
     pub field_configuration: Option<crate::FieldConfiguration>,
     pub profile: Profile,
     pub controller: ControllerSource,
@@ -47,6 +48,7 @@ impl std::ops::Deref for Robotics {
     }
 }
 pub(crate) struct RobotSettings {
+    pub default_away: bool,
     pub player: hsl_network_messages::PlayerNumber,
     pub scope: String,
     pub clock: Clock,
@@ -91,6 +93,7 @@ pub struct RobotStack {
     pub safe_pose: ros_z::cache::Cache<bool>,
     #[cfg(test)]
     pub field: ros_z::cache::Cache<types::field_dimensions::FieldDimensions>,
+    default_away: bool,
     game: Arc<ros_z::cache::Cache<FilteredGameControllerState>>,
     motion: ros_z::cache::Cache<MotionCommand>,
     emergency: ros_z::cache::Cache<()>,
@@ -104,6 +107,9 @@ impl RobotStack {
         configuration: Configuration,
         settings: Option<RobotSettings>,
     ) -> Result<Self> {
+        let default_away = settings
+            .as_ref()
+            .is_some_and(|settings| settings.default_away);
         let overrides = tempfile::tempdir()?;
         // Twix can write this last layer without changing the robot parameter files.
         std::fs::write(
@@ -316,7 +322,11 @@ impl RobotStack {
                     let side = game_cache
                         .get_latest()
                         .map(|game| game.global_field_side)
-                        .unwrap_or(types::field_dimensions::GlobalFieldSide::Home);
+                        .unwrap_or(if default_away {
+                            types::field_dimensions::GlobalFieldSide::Away
+                        } else {
+                            types::field_dimensions::GlobalFieldSide::Home
+                        });
                     behavior
                         .publish(
                             frame.sample.ground_to_world,
@@ -363,6 +373,7 @@ impl RobotStack {
             parameters,
             field_dimensions,
             profile: configuration.profile,
+            default_away,
             controller_unavailable: Mutex::new(false),
             whistle,
             frames,
@@ -446,7 +457,7 @@ impl RobotStack {
     }
 
     pub fn away(&self) -> bool {
-        self.game.get_latest().is_some_and(|game| {
+        self.game.get_latest().map_or(self.default_away, |game| {
             game.global_field_side == types::field_dimensions::GlobalFieldSide::Away
         })
     }

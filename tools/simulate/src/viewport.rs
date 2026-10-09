@@ -1,3 +1,4 @@
+use crate::RobotId;
 use bevy::{
     camera::primitives::Aabb,
     camera_controller::pan_orbit_camera::prelude::PanOrbitCamera,
@@ -339,18 +340,18 @@ impl Viewport {
             world.resource::<SharedPhysics>().lock().mode = drag.resume;
         }
     }
-    pub fn paint(&self, ui: &Ui, rect: Rect, world: &mut World, selected: u8) {
+    pub fn paint(&self, ui: &Ui, rect: Rect, world: &mut World, selected: Option<RobotId>) {
         self.paint_scene(ui, rect, world, selected);
         if self.captured.is_some() {
             capture_legend(ui, rect);
         }
     }
-    fn paint_scene(&self, ui: &Ui, rect: Rect, world: &mut World, selected: u8) {
+    fn paint_scene(&self, ui: &Ui, rect: Rect, world: &mut World, selected: Option<RobotId>) {
         if let Some(view) = CameraView::new(world, rect) {
             let members = world.resource::<crate::team::Team>().members();
             let mut heads =
                 world.query_filtered::<(&ObjectPart, &Aabb, &GlobalTransform), With<RobotHead>>();
-            let label_size = egui::vec2(30.0, 28.0);
+            let label_size = egui::vec2(46.0, 28.0);
             for (part, bounds, transform) in heads.iter(world) {
                 let Some(member) = members.iter().find(|member| member.entity == Some(part.0))
                 else {
@@ -359,7 +360,12 @@ impl Viewport {
                 if let Some(head) = view.project_bounds(bounds, transform) {
                     // Keep a four-point gap below the selection rim, regardless of
                     // camera distance, viewing angle, or the robot's head pose.
-                    let clearance = 4.0 + if member.number == selected { 5.0 } else { 0.0 };
+                    let clearance = 4.0
+                        + if Some(member.id) == selected {
+                            5.0
+                        } else {
+                            0.0
+                        };
                     let position =
                         egui::pos2(head.center().x, head.top() - clearance - label_size.y / 2.0);
                     let color = member
@@ -370,7 +376,7 @@ impl Viewport {
                     let painter = ui
                         .painter()
                         .with_clip_rect(rect.intersect(view.rect).expand(5.0));
-                    if member.number == selected {
+                    if Some(member.id) == selected {
                         painter.rect_stroke(
                             rect.expand(3.0),
                             7.0,
@@ -378,6 +384,8 @@ impl Viewport {
                             egui::StrokeKind::Outside,
                         );
                     }
+                    ui.interact(rect, ui.id().with(member.id), egui::Sense::hover())
+                        .on_hover_text(crate::robot_namespace(member.id));
                     painter.rect_filled(rect, 5.0, color);
                     // A dark rim keeps light LED colors legible against field lines and goals.
                     painter.rect_stroke(
@@ -396,7 +404,15 @@ impl Viewport {
                     painter.text(
                         position,
                         egui::Align2::CENTER_CENTER,
-                        member.number.to_string(),
+                        format!(
+                            "{}{}",
+                            if member.id.team == crate::TeamId::Hulks {
+                                "H"
+                            } else {
+                                "O"
+                            },
+                            member.id.number
+                        ),
                         egui::FontId::proportional(20.0),
                         text,
                     );

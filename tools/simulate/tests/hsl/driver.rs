@@ -45,7 +45,9 @@ async fn main() -> Result<()> {
     .await?;
     runtime.ui_notify.notify_one();
     let players: Vec<usize> = if std::env::var("HSL_PLAYERS").as_deref() == Ok("5") { (0..5).collect() } else { vec![2] };
-    let all_good = |state: &serde_json::Value| players.iter().all(|&player| state["connectionStatus"]["home"][player] == 2);
+    let selfplay = std::env::var("SIMULATOR_TEST_OPPONENTS").is_ok_and(|n| n != "0");
+    let sides = if selfplay { vec!["home", "away"] } else { vec!["home"] };
+    let all_good = |state: &serde_json::Value| sides.iter().all(|side| players.iter().all(|&player| state["connectionStatus"][*side][player] == 2));
     let result: Result<()> = async {
         runtime
             .action_sender
@@ -53,7 +55,7 @@ async fn main() -> Result<()> {
                 side: Some(Side::Home),
                 set_play: SetPlay::KickOff,
             }))?;
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 receiver.changed().await?;
                 if all_good(&receiver.borrow()) {
@@ -63,9 +65,12 @@ async fn main() -> Result<()> {
             Ok::<_, anyhow::Error>(())
         })
         .await??;
-        println!("GameController accepted all configured HULKs return messages (connection=Good)");
-        for stage in ["ready", "penalized", "unpenalized", "whistle_in_set", "paused_clock"] {
-            tokio::time::timeout(Duration::from_secs(20), async {
+        println!("GameController accepted all configured return messages (connection=Good)");
+        let mut stages = vec!["ready", "penalized", "unpenalized"];
+        if selfplay { stages.extend(["opponent_penalized", "opponent_unpenalized"]); }
+        stages.extend(["whistle_in_set", "paused_clock"]);
+        for stage in stages {
+            tokio::time::timeout(Duration::from_secs(60), async {
                 while !exchange.join(stage).exists() {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
@@ -82,7 +87,13 @@ async fn main() -> Result<()> {
                     player: PlayerNumber::new(3),
                     force: true,
                 }))?,
-                "unpenalized" => runtime.action_sender.send(VAction::WaitForSetPlay(WaitForSetPlay))?,
+                "unpenalized" if selfplay => runtime.action_sender.send(VAction::Penalize(Penalize {
+                    side: Side::Away, player: PlayerNumber::new(3), call: PenaltyCall::RequestForPickUp,
+                }))?,
+                "opponent_penalized" => runtime.action_sender.send(VAction::Unpenalize(Unpenalize {
+                    side: Side::Away, player: PlayerNumber::new(3), force: true,
+                }))?,
+                "unpenalized" | "opponent_unpenalized" => runtime.action_sender.send(VAction::WaitForSetPlay(WaitForSetPlay))?,
                 "whistle_in_set" => runtime.action_sender.send(VAction::FreeSetPlay(FreeSetPlay))?,
                 _ => {}
             }
@@ -110,6 +121,9 @@ async fn main() -> Result<()> {
             all_good(&receiver.borrow()),
             "robot stopped returning status"
         );
+        for side in &sides {
+            ensure!(receiver.borrow()["game"]["teams"][*side]["messageBudget"].as_u64().is_some_and(|budget| budget < 12000), "GameController did not account for {side} teammate traffic");
+        }
         println!("Upstream HSL runtime roundtrip passed: Ready, penalty, removal, whistle in Set, independent match clock while robotics paused, resumed returns");
         Ok(())
     }
