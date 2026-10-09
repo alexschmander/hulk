@@ -81,6 +81,7 @@ struct Arguments {
 struct TwixApp {
     layout: TwixLayout,
     namespace_editor: String,
+    namespace_focused: bool,
     visual: Visuals,
     backend: Arc<RobotBackend>,
     runtime: tokio::runtime::Runtime,
@@ -143,6 +144,7 @@ impl TwixApp {
             pending_backend: None,
             layout,
             namespace_editor,
+            namespace_focused: false,
             visual,
             backend,
             runtime,
@@ -221,7 +223,9 @@ impl App for TwixApp {
         EguiPanel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    if !ui.memory(|memory| memory.focused().is_some()) {
+                    // Follow namespace changes made elsewhere, e.g. by selecting a simulated
+                    // robot, unless the operator is editing the namespace.
+                    if !self.namespace_focused {
                         self.namespace_editor = self.backend.namespace();
                     }
                     ui.label("Namespace:");
@@ -237,7 +241,8 @@ impl App for TwixApp {
                                 && context.keybind_pressed(KeybindAction::FocusNamespace),
                         ),
                     );
-                    if namespace_response.has_focus() {
+                    self.namespace_focused = namespace_response.has_focus();
+                    if self.namespace_focused {
                         context.request_repaint_after(std::time::Duration::from_millis(250));
                     }
                     if (namespace_response.changed() || namespace_response.lost_focus())

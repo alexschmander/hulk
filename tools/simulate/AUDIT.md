@@ -94,3 +94,18 @@ A native Twix run completed the normal Ready/Set/whistle sequence, accepted a co
 Stopping and immediately starting another automatic match succeeded.
 Clippy with warnings denied and formatting checks pass.
 No robotics source under `crates/` changed for this feature.
+
+## Running referee UI
+
+Operator calls map one to one to upstream core actions, and the core's own legality checks enable or disable them.
+The audit of the pinned core added restarts for penalty kicks, team and referee timeouts, finishing a half, skipping halftime, ending Ready early, freeing the ball and adding a minute.
+Every penalty call of the upstream GameController is available per player, including cards.
+Undo, goalkeeper selection, substitutions, extra time and penalty shootouts are not offered.
+Undo would rewind core state without reversing ball placement or robot handling.
+Calls apply immediately with the last physics observation, so they also work while the simulation is paused.
+The engine now records every state change when it happens, so several transitions between two physics steps still place the ball on entering Set.
+Kickoff positioning checks no longer apply to other set plays in Set, such as a penalty kick.
+The test suite passes 61 simulator tests and 127 Twix tests, including referee call, penalty-kick and halftime/timeout tests.
+The ignored automatic-referee roundtrip passed again in the motion and behavior profile.
+A native Twix run exercised the next-step sequence, Shift+Space stop and resume, an awarded corner, a pushing penalty and release, ending the first half, the second half and robot selection from the desk and from scene labels.
+A split tile exercised the narrow layout with the desk below the scene.
