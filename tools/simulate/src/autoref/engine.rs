@@ -657,12 +657,14 @@ impl Engine {
             && p[2] + (f.ball_radius as f64) < self.field.goal_height as f64;
         if in_goal {
             let scorer = -defender;
-            let valid = self.goal_allowed(scorer);
-            if valid && self.apply(VAction::Goal(Goal { side: scorer })) {
+            if let Some(reason) = self.goal_disallowed_reason(scorer) {
+                self.event(reason);
+            } else if self.apply(VAction::Goal(Goal { side: scorer })) {
                 self.kickoff_after_goal(snapshot);
                 return;
+            } else {
+                self.event("Goal rejected by GameController");
             }
-            self.event("Goal disallowed by restart touch restrictions");
         }
         let Some(last) = self.last_touch else {
             self.begin_restart(SetPlay::KickOff, None, [0.0; 2], snapshot);
@@ -690,32 +692,28 @@ impl Engine {
             );
         }
     }
-    fn goal_allowed(&self, scorer: Side) -> bool {
-        let Some(r) = &self.restart else {
-            return true;
-        };
-        let Some(owner) = r.side else {
-            return true;
-        };
-        let Some(kicker) = r.kicker else {
-            return true;
-        };
+    fn goal_disallowed_reason(&self, scorer: Side) -> Option<&'static str> {
+        let r = self.restart.as_ref()?;
+        let owner = r.side?;
+        let kicker = r.kicker?;
         if r.touched.len() == 1 && scorer != owner {
-            return false;
-        } // Direct own goal.
+            return Some("Goal disallowed: restart went directly into own goal");
+        }
         if scorer != owner {
-            return true;
+            return None;
         }
         match r.kind {
-            SetPlay::KickOff => {
-                if r.players >= 3 {
-                    r.touched.iter().filter(|id| id.team == kicker.team).count() >= 2
-                } else {
-                    r.outside_circle
-                }
+            SetPlay::KickOff if r.players >= 3 => {
+                (r.touched.iter().filter(|id| id.team == kicker.team).count() < 2).then_some(
+                    "Goal disallowed: a second teammate must touch the ball after kickoff",
+                )
             }
-            SetPlay::ThrowIn | SetPlay::IndirectFreeKick => r.touched.len() >= 2,
-            _ => true,
+            SetPlay::KickOff => (!r.outside_circle).then_some(
+                "Goal disallowed: kickoff taker has not touched the ball outside the center circle",
+            ),
+            SetPlay::ThrowIn | SetPlay::IndirectFreeKick => (r.touched.len() < 2)
+                .then_some("Goal disallowed: indirect free kick went directly into goal"),
+            _ => None,
         }
     }
     fn check_stuck(&mut self, snapshot: &Snapshot) {
