@@ -6,6 +6,11 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+game_controller_core = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "39a617c8746708b7acc7df53b2a88252cd75250e" }
+game_controller_msgs = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "39a617c8746708b7acc7df53b2a88252cd75250e" }
+bytes = "1"
+enum-map = "2.7"
+serde_yaml = "0.9"
 json5 = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }

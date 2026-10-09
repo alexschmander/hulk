@@ -17,11 +17,13 @@ mod network;
 mod team;
 pub use field::FieldConfiguration;
 pub use team::{RobotId, TeamId, robot_id, robot_namespace, transport_scope};
+mod autoref;
 mod behavior_inputs;
 mod bevy_mujoco;
 mod buttons;
 mod observations;
 mod parameters;
+pub use autoref::{Competition, RefereeMode};
 mod profiles;
 mod readiness;
 mod reference;
@@ -264,16 +266,23 @@ impl Simulator {
             ui.weak("Initializing robot…");
         }
         ui.separator();
+        if let Some(referee) = team.referee() {
+            referee.ui(ui, self.selected);
+        }
         if widgets::action(ui, icons::ICON_SPORTS.codepoint, "Whistle", compact)
             .on_hover_text("Send a whistle detection to every robot")
             .clicked()
         {
-            for member in team.members() {
-                member.io.whistle();
+            if let Some(referee) = team.referee() {
+                referee.engine.lock().unwrap().manual_whistle = true;
+            } else {
+                for member in team.members() {
+                    member.io.whistle();
+                }
             }
         }
         if ui
-            .add_enabled_ui(ready, |ui| {
+            .add_enabled_ui(ready && team.referee().is_none(), |ui| {
                 widgets::action(ui, icons::ICON_SPORTS_SOCCER.codepoint, "Add ball", compact)
             })
             .inner

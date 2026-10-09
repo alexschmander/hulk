@@ -29,6 +29,7 @@ struct Inner {
     runtime: Handle,
     configuration: Configuration,
     clock: Clock,
+    referee: Option<crate::autoref::AutoRef>,
     network: tokio::sync::Mutex<Network>,
     members: Mutex<BTreeMap<RobotId, Member>>,
     selected: Mutex<RobotId>,
@@ -65,12 +66,25 @@ impl Team {
             .as_ref()
             .ok_or_else(|| eyre!("Missing field configuration"))?;
         field.validate().map_err(|error| eyre!(error))?;
+        let mut referee = if configuration.referee == crate::RefereeMode::Automatic {
+            Some(crate::autoref::AutoRef::new(&configuration).await?)
+        } else {
+            None
+        };
+        let network = if let Some(referee) = &mut referee {
+            let network = Network::automatic(referee.network()).await?;
+            referee.connect(network.address()?);
+            network
+        } else {
+            Network::new(3838, 3939).await?
+        };
         let team = Self(Arc::new(Inner {
             cancelled,
             _lease: lease,
             runtime,
             clock: Clock::logical(Clock::wallclock().now()),
-            network: tokio::sync::Mutex::new(Network::new(3838, 3939).await?),
+            network: tokio::sync::Mutex::new(network),
+            referee,
             members: Mutex::new(BTreeMap::new()),
             selected: Mutex::new(RobotId::FIRST),
             controller: Mutex::new(None),
@@ -100,7 +114,13 @@ impl Team {
         }
         Ok(team)
     }
+    pub fn referee(&self) -> Option<&crate::autoref::AutoRef> {
+        self.0.referee.as_ref()
+    }
     pub fn poll_controller(&self) -> Option<String> {
+        if let Some(error) = self.referee().and_then(|r| r.poll()) {
+            return Some(error);
+        }
         self.0
             .controller
             .lock()
@@ -623,6 +643,8 @@ mod runtime_tests {
             .map(|name| serde_json::from_value(serde_json::Value::String(name)).unwrap())
             .unwrap_or(crate::Profile::MotionBehavior);
         let configuration = Configuration {
+            referee: crate::RefereeMode::External,
+            competition: crate::Competition::default(),
             field_configuration: Some(
                 crate::FieldConfiguration::load(&parameter_root, "incheon_small").unwrap(),
             ),
