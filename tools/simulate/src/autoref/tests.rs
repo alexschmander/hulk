@@ -514,8 +514,10 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
             thread::sleep(Duration::from_millis(10));
         }
     };
+    // Exercise real UDP delays, penalty expiry and halftime under accelerated playback.
+    worker.set_speed(crate::simulation::Speed::Double);
     physics.lock().mode = SimulationMode::Running;
-    eprintln!("started physics");
+    eprintln!("started physics at 2x");
     wait("start", &mut worker, &mut || {
         team.referee()
             .unwrap()
@@ -685,6 +687,53 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
                 })
         },
     );
+    // Change speed on the live four-robot stack, including while paused.
+    // Every clock must measure the same simulated interval, regardless of wall pacing.
+    let mut rates = Vec::new();
+    for speed in crate::simulation::Speed::ALL {
+        physics.lock().mode = SimulationMode::Paused;
+        thread::sleep(Duration::from_millis(50));
+        let before = (
+            physics.lock().data().time(),
+            team.now(),
+            referee.engine.lock().unwrap().core.get_time(),
+        );
+        worker.set_speed(speed);
+        thread::sleep(Duration::from_millis(60));
+        assert_eq!(physics.lock().data().time(), before.0);
+        assert_eq!(team.now(), before.1);
+        assert_eq!(referee.engine.lock().unwrap().core.get_time(), before.2);
+        let wall = Instant::now();
+        physics.lock().mode = SimulationMode::Running;
+        thread::sleep(Duration::from_millis(750));
+        physics.lock().mode = SimulationMode::Paused;
+        let elapsed = wall.elapsed().as_secs_f64();
+        thread::sleep(Duration::from_millis(50));
+        let physical = physics.lock().data().time() - before.0;
+        let robotics = team.now().duration_since(before.1).as_secs_f64();
+        let controller = (referee.engine.lock().unwrap().core.get_time() - before.2).as_secs_f64();
+        assert!((physical - robotics).abs() < 0.003);
+        assert!((controller - robotics).abs() < 0.003);
+        for member in &members {
+            assert_eq!(member.io.now(), team.now());
+        }
+        let rate = physical / elapsed;
+        assert!(
+            rate > 0.05 && rate < speed.factor() * 1.1,
+            "{}: achieved {rate}",
+            speed.label()
+        );
+        assert!(worker.poll().is_none());
+        eprintln!(
+            "speed {}: {rate:.2}x actual; physics, robotics and controller agree",
+            speed.label()
+        );
+        rates.push(rate);
+    }
+    assert!(
+        rates[4] > rates[0] * 2.0,
+        "fast playback must outperform slow playback: {rates:?}"
+    );
     drop(poses);
     drop(worker);
     drop(raw);
@@ -812,7 +861,11 @@ async fn private_controller_rejects_foreign_packets_and_accounts_both_teams() {
             .await
             .is_err()
     );
-    transport.connect(network.address().unwrap(), e.clone());
+    transport.connect(
+        network.address().unwrap(),
+        e.clone(),
+        ros_z::time::Clock::wallclock(),
+    );
     let (n, _) = timeout(Duration::from_secs(2), robot.recv_from(&mut buffer))
         .await
         .unwrap()
@@ -1035,4 +1088,62 @@ fn manual_half_end_and_timeout_resume_through_kickoff() {
     assert_eq!(e.core.get_game(false).state, State::Timeout);
     step(&mut e, &s, 1.1);
     assert_eq!(e.core.get_game(false).state, State::Ready);
+}
+
+#[tokio::test]
+async fn controller_packets_follow_simulation_time_and_heartbeat_while_paused() {
+    use ros_z::time::{Clock, Time};
+    use std::sync::{Arc, Mutex};
+    use tokio::{net::UdpSocket, time::timeout};
+    let (mut engine, snapshot) = fixture();
+    playing(&mut engine, &snapshot);
+    engine.enabled = false;
+    let engine = Arc::new(Mutex::new(engine));
+    let clock = Clock::logical(Time::zero());
+    let mut transport = transport::Transport::new(engine.clone()).await.unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    transport.connect(
+        receiver.local_addr().unwrap(),
+        engine.clone(),
+        clock.clone(),
+    );
+    let receive = || async {
+        let mut buffer = [0; 2048];
+        let (size, _) = timeout(Duration::from_secs(2), receiver.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        hsl_network_messages::GameControllerStateMessage::try_from(&buffer[..size]).unwrap()
+    };
+    assert_eq!(
+        receive().await.game_state,
+        hsl_network_messages::GameState::Set
+    );
+    let wall = std::time::Instant::now();
+    for _ in 0..10 {
+        engine.lock().unwrap().core.seek(Duration::from_millis(100));
+        clock.advance(Duration::from_millis(100)).unwrap();
+        assert_eq!(
+            receive().await.game_state,
+            hsl_network_messages::GameState::Set
+        );
+    }
+    assert!(
+        wall.elapsed() < Duration::from_millis(500),
+        "packet delivery remained tied to the wall-time heartbeat"
+    );
+    engine.lock().unwrap().core.seek(Duration::from_secs(10));
+    clock.advance(Duration::from_secs(10)).unwrap();
+    let playing = receive().await;
+    assert_eq!(playing.game_state, hsl_network_messages::GameState::Playing);
+    let frozen = engine.lock().unwrap().core.get_time();
+    for _ in 0..2 {
+        let heartbeat = receive().await;
+        assert_eq!(
+            heartbeat.remaining_time_in_half,
+            playing.remaining_time_in_half
+        );
+        assert_eq!(engine.lock().unwrap().core.get_time(), frozen);
+        assert_eq!(heartbeat.game_state, playing.game_state);
+    }
 }

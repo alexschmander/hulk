@@ -138,8 +138,9 @@ impl AutoRef {
     pub fn network(&self) -> transport::Endpoints {
         self.transport.endpoints()
     }
-    pub fn connect(&mut self, destination: std::net::SocketAddr) {
-        self.transport.connect(destination, self.engine.clone());
+    pub fn connect(&mut self, destination: std::net::SocketAddr, clock: ros_z::time::Clock) {
+        self.transport
+            .connect(destination, self.engine.clone(), clock);
     }
     pub fn poll(&self) -> Option<String> {
         self.transport.poll()
