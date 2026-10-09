@@ -827,6 +827,12 @@ dependencies = [
 
 [[package]]
 name = "base64"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
+
+[[package]]
+name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -871,7 +877,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_derive",
- "serde_with",
+ "serde_with 3.24.0",
  "serde_yaml",
  "shell-words",
  "syntect",
@@ -2130,6 +2136,29 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
+version = "0.69.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "271383c67ccabffb7381723dea0672a673f292304fcb45c01cc648c7a8d58088"
+dependencies = [
+ "bitflags 2.13.2",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.12.1",
+ "lazy_static",
+ "lazycell",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 1.1.0",
+ "shlex 1.3.0",
+ "syn 2.0.119",
+ "which",
+]
+
+[[package]]
+name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
@@ -3098,6 +3127,16 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "darling"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
+dependencies = [
+ "darling_core 0.20.11",
+ "darling_macro 0.20.11",
+]
+
+[[package]]
+name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9cdf337090841a411e2a7f3deb9187445851f91b309c0c0a29e05f74a00a48c0"
@@ -3114,6 +3153,20 @@ checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
 dependencies = [
  "darling_core 0.24.1",
  "darling_macro 0.24.1",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e"
+dependencies = [
+ "fnv",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3140,6 +3193,17 @@ dependencies = [
  "quote",
  "strsim",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
+dependencies = [
+ "darling_core 0.20.11",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3795,6 +3859,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6866f3bfdf8207509a033af1a75a7b08abda06bbaaeae6669323fd5a097df2e9"
 dependencies = [
  "enum-map-derive",
+ "serde",
 ]
 
 [[package]]
@@ -4495,6 +4560,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_controller_core"
+version = "7.0.0"
+source = "git+https://github.com/RoboCup-HumanoidSoccerLeague/GameController?rev=39a617c8746708b7acc7df53b2a88252cd75250e#39a617c8746708b7acc7df53b2a88252cd75250e"
+dependencies = [
+ "enum-map",
+ "serde",
+ "serde_with 2.3.3",
+ "time",
+ "trait_enum",
+]
+
+[[package]]
 name = "game_controller_filter"
 version = "0.1.0"
 dependencies = [
@@ -4504,6 +4581,17 @@ dependencies = [
  "ros-z-streams",
  "serde",
  "types",
+]
+
+[[package]]
+name = "game_controller_msgs"
+version = "7.0.0"
+source = "git+https://github.com/RoboCup-HumanoidSoccerLeague/GameController?rev=39a617c8746708b7acc7df53b2a88252cd75250e#39a617c8746708b7acc7df53b2a88252cd75250e"
+dependencies = [
+ "anyhow",
+ "bindgen 0.69.5",
+ "bytes",
+ "game_controller_core",
 ]
 
 [[package]]
@@ -5510,7 +5598,7 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "bincode 1.3.3",
- "bindgen",
+ "bindgen 0.71.1",
  "color-eyre",
  "coordinate_systems",
  "linear_algebra",
@@ -6082,6 +6170,15 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
@@ -6474,6 +6571,12 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 dependencies = [
  "spin 0.9.9",
 ]
+
+[[package]]
+name = "lazycell"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "leb128"
@@ -7787,6 +7890,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -10503,6 +10615,22 @@ dependencies = [
 
 [[package]]
 name = "serde_with"
+version = "2.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07ff71d2c147a7b57362cead5e22f772cd52f6ab31cfcd9edcd7f6aeb2a0afbe"
+dependencies = [
+ "base64 0.13.1",
+ "chrono",
+ "hex",
+ "indexmap 1.9.3",
+ "serde",
+ "serde_json",
+ "serde_with_macros 2.3.3",
+ "time",
+]
+
+[[package]]
+name = "serde_with"
 version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df9adc193c780ef8f159aee8b61e2d5801aaa555e6eb0947fe45530ec506296f"
@@ -10518,8 +10646,20 @@ dependencies = [
  "schemars 1.2.2",
  "serde_core",
  "serde_json",
- "serde_with_macros",
+ "serde_with_macros 3.24.0",
  "time",
+]
+
+[[package]]
+name = "serde_with_macros"
+version = "2.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "881b6f881b17d13214e5d494c939ebab463d01264ce1811e9d4ac3a882e7695f"
+dependencies = [
+ "darling 0.20.11",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -10726,6 +10866,7 @@ dependencies = [
  "booster",
  "button_event_bridge",
  "button_event_handler",
+ "bytes",
  "camera_matrix_calculator",
  "cdr",
  "color-eyre",
@@ -10734,9 +10875,12 @@ dependencies = [
  "eframe",
  "egui_bevy",
  "egui_material_icons",
+ "enum-map",
  "fall_detection",
  "field_mark_association",
+ "game_controller_core",
  "game_controller_filter",
+ "game_controller_msgs",
  "game_controller_state_filter",
  "geometry",
  "global_parameter_provider",
@@ -10774,6 +10918,7 @@ dependencies = [
  "search_suggestor",
  "serde",
  "serde_json",
+ "serde_yaml",
  "socket2 0.6.5",
  "support_foot_estimator",
  "team_ball_filter",
@@ -11509,7 +11654,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -11957,6 +12104,12 @@ dependencies = [
  "tracing-subscriber",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "trait_enum"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "130dd741d3c71f76d031e58caffff3624eaaa2db9bd8c4b05406a71885300fc7"
 
 [[package]]
 name = "transpose"
@@ -13040,6 +13193,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "which"
+version = "4.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87ba24419a2078cd2b0f2ede2691b6c66d8e47836da3b6db8265ebad47afbfc7"
+dependencies = [
+ "either",
+ "home",
+ "once_cell",
+ "rustix 0.38.44",
+]
+
+[[package]]
 name = "whistle_detection"
 version = "0.1.0"
 dependencies = [
@@ -14002,7 +14167,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "serde_with",
+ "serde_with 3.24.0",
  "serde_yaml",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
