@@ -161,7 +161,7 @@ impl Team {
             hsl_network_messages::PlayerNumber::Five,
         ][usize::from(number - 1)];
         let mut configuration = self.0.configuration.clone();
-        configuration.namespace = format!("/{number}");
+        configuration.namespace = robot_namespace(number);
         configuration.controller = crate::ControllerSource::External;
         let connection = Arc::new(network.add_robot().await?);
         let io = Robotics::new_robot(
@@ -190,8 +190,21 @@ impl Team {
         Ok(number)
     }
 }
+pub fn robot_namespace(number: u8) -> String {
+    format!("/hulks/{number}")
+}
+
+pub fn robot_number(namespace: &str) -> Option<u8> {
+    namespace
+        .trim_start_matches('/')
+        .strip_prefix("hulks/")?
+        .parse::<u8>()
+        .ok()
+        .filter(|number| (1..=5).contains(number))
+}
+
 pub fn transport_scope(number: u8) -> String {
-    format!("{}/{number}", crate::ZENOH_NAMESPACE)
+    format!("{}{}", crate::ZENOH_NAMESPACE, robot_namespace(number))
 }
 
 pub(crate) fn spawn_pose(field: &types::field_dimensions::FieldDimensions, index: u8) -> Transform {
@@ -435,7 +448,7 @@ mod runtime_tests {
             parameter_root,
             model_directory: root.join("../../etc/neural_networks"),
             router: Some(endpoint),
-            namespace: "/1".into(),
+            namespace: robot_namespace(1),
             location: Some("incheon_small".into()),
             robot_count: std::env::var("SIMULATOR_TEST_ROBOTS")
                 .ok()

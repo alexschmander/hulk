@@ -32,7 +32,7 @@ The simulator retains ball dragging and robot translation/rotation gizmos.
 ## Current process boundary
 
 Twix owns one robotics context and SDK substitute per player, plus a shared physics worker and logical clock.
-Robot N uses the Zenoh session scope `hulk_simulator/N/` and ROS namespace `/N`.
+Robot N uses the Zenoh session scope `hulk_simulator/hulks/N/` and ROS namespace `/hulks/N`.
 The panel requires that scope before it can start.
 Closing the panel cancels pending additions, drains the physics worker and node tasks, and releases their sockets.
 The simulator lease stays owned by the team until teardown completes.

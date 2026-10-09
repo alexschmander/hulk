@@ -16,6 +16,7 @@ mod field;
 mod network;
 mod team;
 pub use field::FieldConfiguration;
+pub use team::{robot_namespace, robot_number, transport_scope};
 mod behavior_inputs;
 mod bevy_mujoco;
 mod buttons;
