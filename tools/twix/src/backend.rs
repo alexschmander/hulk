@@ -14,6 +14,7 @@ pub struct RobotBackend {
     #[cfg_attr(not(feature = "simulator"), allow(dead_code))]
     router: Option<String>,
     transport_scope: Option<String>,
+    namespace_discovery: Option<crate::namespace_discovery::NamespaceDiscovery>,
     context: Arc<Context>,
     node: Arc<Node>,
     observer: TopicObserver,
@@ -92,6 +93,11 @@ impl RobotBackend {
         } else {
             router
         };
+        let namespace_discovery = if transport_scope.as_deref() == Some("hulk_simulator") {
+            Some(crate::namespace_discovery::NamespaceDiscovery::new(context.session()).await?)
+        } else {
+            None
+        };
         let node_name = twix_node_name();
         let node = Arc::new(
             context
@@ -109,6 +115,7 @@ impl RobotBackend {
             runtime_handle,
             router,
             transport_scope,
+            namespace_discovery,
             context,
             node,
             observer,
@@ -141,6 +148,20 @@ impl RobotBackend {
 
     pub fn observer(&self) -> &TopicObserver {
         &self.observer
+    }
+
+    pub fn namespace_completions(&self) -> Vec<String> {
+        if let Some(discovery) = &self.namespace_discovery {
+            return discovery.namespaces();
+        }
+        self.graph()
+            .lock()
+            .nodes()
+            .filter(|node| !node.namespace.starts_with("/_"))
+            .map(|node| node.namespace.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     pub fn namespace(&self) -> String {
@@ -209,5 +230,63 @@ fn sanitize_node_component(value: &str) -> String {
         "unknown-host".to_string()
     } else {
         sanitized
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completions_use_node_namespaces_and_remove_departed_nodes() {
+        let router = ContextBuilder::default()
+            .with_mode("router")
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(["tcp/127.0.0.1:0"])
+            .build()
+            .await
+            .unwrap();
+        let endpoint = router.session().info().locators().await[0].to_string();
+        let backend = RobotBackend::new(Handle::current(), Some(endpoint), "/42".into())
+            .await
+            .unwrap();
+        let a = router
+            .create_node("motion")
+            .with_namespace("/42")
+            .build()
+            .await
+            .unwrap();
+        let b = router
+            .create_node("behavior")
+            .with_namespace("/42")
+            .build()
+            .await
+            .unwrap();
+        let c = router
+            .create_node("motion")
+            .with_namespace("/team/43")
+            .build()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.namespace_completions() != ["/42", "/team/43"] {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(c);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.namespace_completions() != ["/42"] {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop((a, b));
+        drop(backend);
+        router.shutdown().unwrap();
     }
 }

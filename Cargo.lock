@@ -12057,6 +12057,7 @@ dependencies = [
  "rhai",
  "ros-z",
  "ros-z-debug",
+ "ros-z-protocol",
  "ros2",
  "serde",
  "serde_json",
@@ -12069,6 +12070,7 @@ dependencies = [
  "twix_visualization",
  "types",
  "uuid",
+ "zenoh",
 ]
 
 [[package]]
