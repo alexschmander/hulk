@@ -5,6 +5,9 @@ use bevy::{asset::RenderAssetUsages, mesh::PrimitiveTopology, prelude::*};
 use super::object::ObjectPart;
 use crate::bevy_mujoco::{MjcfObject, MujocoBody};
 
+#[derive(Component)]
+pub(crate) struct RobotHead;
+
 const ROBOT_MJCF: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/k1_robot.xml");
 const MESH_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/meshes");
 
@@ -222,7 +225,7 @@ pub fn spawn(commands: &mut Commands, assets: &RobotAssets, transform: Transform
         .id();
 
     for link in LINKS {
-        commands.spawn((
+        let mut part = commands.spawn((
             Name::new(link.mesh),
             ObjectPart(owner),
             MujocoBody::new(owner, link.body),
@@ -231,6 +234,9 @@ pub fn spawn(commands: &mut Commands, assets: &RobotAssets, transform: Transform
             Transform::default(),
             Visibility::Hidden,
         ));
+        if link.body == "Head_2" {
+            part.insert(RobotHead);
+        }
     }
 
     owner
