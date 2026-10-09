@@ -121,14 +121,20 @@ Blue arrows show commanded translation, green shows yaw rate, amber shows kicks.
 
 The physics worker advances a shared ROS-Z logical clock independently of the visible panel and repaint rate.
 Each running physics step advances robotics time by the MuJoCo timestep, and every sensor view of that step shares its timestamp.
-Pause and scene recompilation freeze both clocks and sensor sampling.
+The speed selector beside Run/Pause offers ¼×, ½×, 1×, 2× and 4×, and can be changed while running or paused.
+Speed changes wall pacing, keeping the physics timestep fixed.
+The achieved rate shows simulated seconds per real second; available compute may limit faster targets.
+Physics, robotics and all automatic GameController match timers advance together.
+Automatic GameController packets follow simulation time, with a real-time heartbeat retained during pauses and slow playback.
+Pause and scene recompilation freeze simulation time and sensor sampling.
 Resume continues from that time without catching up elapsed wall time; pose resets and scene edits never rewind the clock.
 A new robot initializes from stationary sensor samples at the shared clock time, then joins the common physics scene in Initial.
 Camera frames use simulation time at approximately 30 Hz.
 `diagnostics/camera_frames` reports capture/publication times and cumulative overwritten queued snapshots.
 A whistle clicked while paused is retained for resume; its 750 ms pulse uses simulation time.
 
-The external GameController keeps its own match clock, and incoming packets, Twix parameters and body buttons remain live while paused.
+The external GameController keeps its own real-time match clock at every simulation speed, and incoming packets, Twix parameters and body buttons remain live while paused.
+The toolbar explicitly indicates this clock difference when External mode uses a speed other than 1×.
 Behavior-generated return messages pause with behavior, so the GameController may mark the robot disconnected during a long pause.
 Local gamepad capture and its source timestamps use wall time, matching external gamepads and the existing behavior freshness check.
 LED blinking, transport deadlines and UI button holds also retain their existing wall-time behavior.

@@ -86,13 +86,17 @@ impl Transport {
     pub fn endpoints(&self) -> Endpoints {
         self.endpoints.clone()
     }
-    pub fn connect(&mut self, destination: SocketAddr, engine: Arc<Mutex<Engine>>) {
+    pub fn connect(
+        &mut self,
+        destination: SocketAddr,
+        engine: Arc<Mutex<Engine>>,
+        clock: ros_z::time::Clock,
+    ) {
         let socket = self.socket.clone();
         self.tasks.push(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            let period = Duration::from_millis(100);
             let mut sequence = 0;
             loop {
-                interval.tick().await;
                 let packet: Bytes = {
                     let engine = engine.lock().unwrap();
                     ControlMessage::new(
@@ -107,6 +111,12 @@ impl Transport {
                     break;
                 }
                 sequence = sequence.wrapping_add(1);
+                // Scale packet cadence with robotics time, retaining a wall-time heartbeat
+                // while paused or slow. Rebase after each send instead of bursting on resume.
+                tokio::select! {
+                    _ = clock.sleep(period) => {},
+                    _ = tokio::time::sleep(period) => {},
+                }
             }
         }));
     }
