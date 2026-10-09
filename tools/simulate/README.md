@@ -46,7 +46,7 @@ With Cargo directly, enable `--features simulator`, pass `--zenoh-namespace hulk
 The current Nix Twix package builds ordinary Twix; it does not bundle the simulator.
 
 Open the **Simulator** preset or add a **Simulator** panel.
-Select one to five HULKs, zero to five opponents, a field location, profile and gamepad source, then press **Start simulator**.
+Select one to five HULKs, zero to five opponents, a field location, ball, profile and gamepad source, then press **Start simulator**.
 The field preview draws the selected location's parameter dimensions and the spawn slots for both teams.
 Parameter and model directories are under **Parameter and model paths**.
 Twix selects the robot's namespace automatically.
@@ -170,6 +170,11 @@ The location selector discovers all directories under the chosen parameter root'
 Field dimensions load from layered `global.json5` files and are passed to every robot's real global parameter provider.
 Goal height loads from the location's `simulator.json5` file.
 The added `hsl_small`, `hsl_middle` and `hsl_large` locations contain the exemplary 2026 HSL v1.1.1 fields of 9×6 m, 14×9 m and 22×14 m.
+Their balls follow the rules' Table 4: a FIFA mini ball of 14.6 cm for Small, size 4 for Middle and size 5 for Large.
+**Ball** keeps the location's ball or replaces it with a FIFA mini ball or size 3, 4 or 5, because divisions share field sizes.
+The chosen size reaches every robot's field dimensions, the physics scene and the referee alike.
+The rules do not give a mini ball diameter; 14.6 cm is the middle of the usual 43–48 cm circumference.
+Ball mass stays at `simulator.ball.mass`, editable in the Parameter panel.
 Add another location directory to make it available without changing simulator code.
 Field geometry is shared and selected before startup; edit the location files and restart to change it.
 Runtime goal-height edits are rejected, and changing a robot's global field dimensions stops the worker with an error to prevent divergent worlds.
@@ -269,8 +274,11 @@ This is an environment-specific workaround, not a change to motion inference.
 
 ## Automatic referee
 
-Select **Auto referee** before starting, then choose the HSL competition preset independently of the field location.
-The Small, Middle and Large presets are the upstream Advanced competition parameters, including player limits, durations and message budgets.
+Select **Auto referee** before starting, then choose the HSL division and its Foundation or Advanced configuration independently of the field location and ball.
+All six presets are the upstream competition parameters, including player limits, durations and message budgets.
+Foundation and Advanced differ only in players per team: 4 or 7 in Small, and 3 or 5 in Middle and Large.
+Players numbered above the limit start as substitutes and are placed beside the field; the setup page warns before starting.
+Layouts saved before Foundation existed keep their Advanced preset.
 External GameController remains the default for saved layouts and existing workflows.
 Automatic mode embeds the [HSL GameController core](https://github.com/RoboCup-HumanoidSoccerLeague/GameController/tree/39a617c8746708b7acc7df53b2a88252cd75250e) at revision `39a617c8746708b7acc7df53b2a88252cd75250e`.
 Its copied competition YAML files retain the upstream MIT license in `src/autoref/LICENSE.upstream`.

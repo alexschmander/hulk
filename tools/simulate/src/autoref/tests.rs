@@ -740,16 +740,33 @@ async fn private_controller_rejects_foreign_packets_and_accounts_both_teams() {
 #[test]
 fn all_upstream_competition_presets_parse() {
     let (_, s) = fixture();
-    for preset in [Competition::Small, Competition::Middle, Competition::Large] {
-        let field = crate::FieldConfiguration::load(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../etc/parameters"),
-            "hsl_small",
-        )
-        .unwrap();
-        let mut e = Engine::new(preset, field).unwrap();
-        step(&mut e, &s, 0.01);
-        assert_eq!(e.core.get_game(false).state, State::Ready);
+    for division in super::Division::ALL {
+        for advanced in [false, true] {
+            let preset = Competition::new(division, advanced);
+            assert_eq!((preset.division(), preset.advanced()), (division, advanced));
+            let field = crate::FieldConfiguration::load(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../etc/parameters"),
+                "hsl_small",
+            )
+            .unwrap();
+            let mut e = Engine::new(preset, field).unwrap();
+            assert_eq!(e.core.params.competition.players_per_team, preset.players());
+            step(&mut e, &s, 0.01);
+            assert_eq!(e.core.get_game(false).state, State::Ready);
+            let team = &e.core.get_game(false).teams[Side::Home];
+            assert_eq!(
+                team[PlayerNumber::new(preset.players())].penalty,
+                Penalty::NoPenalty
+            );
+            assert_eq!(
+                team[PlayerNumber::new(preset.players() + 1)].penalty,
+                Penalty::Substitute
+            );
+        }
     }
+    // Layouts saved before Foundation existed keep their Advanced preset.
+    let saved: Competition = serde_json::from_str("\"middle\"").unwrap();
+    assert_eq!(saved, Competition::Middle);
 }
 
 #[test]
