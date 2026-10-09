@@ -10,7 +10,7 @@ pub(crate) use engine::{Ball, Engine, Robot, Snapshot};
 use game_controller_core::{
     action::VAction,
     actions::*,
-    types::{PenaltyCall, SetPlay, Side},
+    types::{PenaltyCall, Phase, SetPlay, Side, State},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -98,16 +98,99 @@ impl AutoRef {
             .unwrap()
             .update(&mut self.engine.lock().unwrap(), world, members, dt)
     }
+    pub fn scoreboard(&self, ui: &mut eframe::egui::Ui) {
+        use eframe::egui::{Color32, RichText};
+        let engine = self.engine.lock().unwrap();
+        let game = engine.core.get_game(false);
+        let halftime = (game.phase == Phase::FirstHalf && game.state == State::Finished)
+            || (game.phase == Phase::SecondHalf
+                && game.state == State::Initial
+                && game.secondary_timer.get_remaining().is_positive());
+        let period = if halftime {
+            "Halftime"
+        } else {
+            match game.phase {
+                Phase::FirstHalf => "1st half",
+                Phase::SecondHalf => "2nd half",
+                Phase::FirstExtraHalf => "Extra time · 1st half",
+                Phase::SecondExtraHalf => "Extra time · 2nd half",
+                Phase::PenaltyShootout => "Shootout",
+            }
+        };
+        let seconds = if halftime {
+            &game.secondary_timer
+        } else {
+            &game.primary_timer
+        }
+        .get_remaining()
+        .whole_seconds();
+        let time = format!(
+            "{}{:02}:{:02}",
+            if seconds < 0 { "−" } else { "" },
+            seconds.abs() / 60,
+            seconds.abs() % 60
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("HULKs")
+                    .strong()
+                    .color(Color32::from_rgb(100, 180, 255)),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "{} : {}",
+                    game.teams[Side::Home].score,
+                    game.teams[Side::Away].score
+                ))
+                .size(20.0)
+                .strong(),
+            );
+            ui.label(
+                RichText::new("Opponents")
+                    .strong()
+                    .color(Color32::from_rgb(255, 120, 120)),
+            );
+            ui.separator();
+            ui.label(period);
+            ui.label(RichText::new(time).monospace())
+                .on_hover_text(if halftime {
+                    "Time until the second half"
+                } else {
+                    "GameController match time remaining"
+                });
+            if !halftime {
+                ui.separator();
+                ui.label(if game.state == State::Finished {
+                    "Full time".to_owned()
+                } else if game.stopped {
+                    "Stopped".to_owned()
+                } else {
+                    format!("{:?}", game.state)
+                });
+                let restart = match game.set_play {
+                    SetPlay::NoSetPlay => None,
+                    SetPlay::KickOff => Some("Kickoff"),
+                    SetPlay::DirectFreeKick => Some("Direct free kick"),
+                    SetPlay::IndirectFreeKick => Some("Indirect free kick"),
+                    SetPlay::PenaltyKick => Some("Penalty kick"),
+                    SetPlay::ThrowIn => Some("Kick-in"),
+                    SetPlay::GoalKick => Some("Goal kick"),
+                    SetPlay::CornerKick => Some("Corner kick"),
+                };
+                if let Some(restart) = restart {
+                    let owner = match game.kicking_side {
+                        Some(Side::Home) => "HULKs",
+                        Some(Side::Away) => "Opponents",
+                        None => "Neutral",
+                    };
+                    ui.weak(format!("{restart} · {owner}"));
+                }
+            }
+        });
+    }
     pub fn ui(&self, ui: &mut eframe::egui::Ui, selected: Option<RobotId>) {
         let mut engine = self.engine.lock().unwrap();
-        let game = engine.core.get_game(false);
-        let label = format!(
-            "Referee · {}–{} · {:?}",
-            game.teams[Side::Home].score,
-            game.teams[Side::Away].score,
-            game.state
-        );
-        ui.menu_button(label, |ui| {
+        ui.menu_button("Referee", |ui| {
             ui.checkbox(&mut engine.enabled, "Automatic decisions");
             ui.label("Manual calls run on the next simulation step.");
             if ui.button("Stop / resume play").clicked() {

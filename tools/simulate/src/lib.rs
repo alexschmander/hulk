@@ -216,6 +216,16 @@ impl Simulator {
         let failed = self.physics.poll().is_some();
         let mut stop = false;
         ui.vertical(|ui| {
+            if !failed
+                && let Some(referee) = self
+                    .widget
+                    .bevy_app
+                    .world()
+                    .resource::<team::Team>()
+                    .referee()
+            {
+                referee.scoreboard(ui);
+            }
             ui.horizontal_wrapped(|ui| {
                 if !failed {
                     self.simulation_controls(ui, compact);
