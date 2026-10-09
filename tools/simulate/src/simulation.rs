@@ -10,7 +10,7 @@ use std::{
     f32::consts::FRAC_PI_2,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -126,7 +126,95 @@ pub(crate) fn bootstrap(io: &Robotics, cancelled: &AtomicBool) -> color_eyre::Re
     })
 }
 
+/// Playback changes wall pacing, never the physics timestep or robotics time per step.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Speed {
+    Quarter,
+    Half,
+    #[default]
+    Normal,
+    Double,
+    Quadruple,
+}
+impl Speed {
+    pub const ALL: [Self; 5] = [
+        Self::Quarter,
+        Self::Half,
+        Self::Normal,
+        Self::Double,
+        Self::Quadruple,
+    ];
+    pub fn factor(self) -> f64 {
+        match self {
+            Self::Quarter => 0.25,
+            Self::Half => 0.5,
+            Self::Normal => 1.0,
+            Self::Double => 2.0,
+            Self::Quadruple => 4.0,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Quarter => "¼×",
+            Self::Half => "½×",
+            Self::Normal => "1×",
+            Self::Double => "2×",
+            Self::Quadruple => "4×",
+        }
+    }
+}
+struct Playback {
+    speed: AtomicU8,
+    actual: AtomicU32,
+}
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            speed: AtomicU8::new(Speed::Normal as u8),
+            actual: AtomicU32::new(0),
+        }
+    }
+}
+impl Playback {
+    fn speed(&self) -> Speed {
+        Speed::ALL[self.speed.load(Ordering::Relaxed) as usize]
+    }
+}
+struct Pacing {
+    measured_at: Instant,
+    simulated: Duration,
+}
+impl Pacing {
+    fn new() -> Self {
+        Self {
+            measured_at: Instant::now(),
+            simulated: Duration::ZERO,
+        }
+    }
+    fn finish(&mut self, started: Instant, step: Duration, advanced: bool, playback: &Playback) {
+        if advanced {
+            self.simulated += step;
+        }
+        let elapsed = self.measured_at.elapsed();
+        if elapsed >= Duration::from_millis(500) {
+            let actual = self.simulated.as_secs_f32() / elapsed.as_secs_f32();
+            playback.actual.store(actual.to_bits(), Ordering::Relaxed);
+            self.measured_at = Instant::now();
+            self.simulated = Duration::ZERO;
+        }
+        let budget = if advanced {
+            step.div_f64(playback.speed().factor())
+        } else {
+            step
+        };
+        // Rebase each step on wall time: never catch up a pause, rebuild, or overloaded frame.
+        thread::sleep(budget.saturating_sub(started.elapsed()));
+    }
+}
+
 pub struct PhysicsWorker {
+    playback: Arc<Playback>,
     stop: Arc<AtomicBool>,
     failure: Option<String>,
     ready: Arc<AtomicBool>,
@@ -138,7 +226,10 @@ impl PhysicsWorker {
         let stopped = stop.clone();
         let ready = Arc::new(AtomicBool::new(false));
         let initialized = ready.clone();
+        let playback = Arc::new(Playback::default());
+        let pacing_settings = playback.clone();
         let thread = thread::spawn(move || {
+            let mut pacing = Pacing::new();
             struct State {
                 binding: RobotBinding,
                 controller: crate::simulated_sdk::Controller,
@@ -292,16 +383,27 @@ impl PhysicsWorker {
                         io.publish_frame(frame);
                     }
                 }
-                thread::sleep(period.saturating_sub(started.elapsed()));
+                pacing.finish(started, period, advanced, &pacing_settings);
             }
             Ok(())
         });
         Self {
+            playback,
             stop,
             ready,
             failure: None,
             thread: Some(thread),
         }
+    }
+
+    pub(crate) fn speed(&self) -> Speed {
+        self.playback.speed()
+    }
+    pub(crate) fn set_speed(&self, speed: Speed) {
+        self.playback.speed.store(speed as u8, Ordering::Relaxed);
+    }
+    pub(crate) fn actual_speed(&self) -> f32 {
+        f32::from_bits(self.playback.actual.load(Ordering::Relaxed))
     }
 
     pub fn ready(&self) -> bool {
@@ -329,7 +431,10 @@ impl PhysicsWorker {
         let stopped = stop.clone();
         let ready = Arc::new(AtomicBool::new(false));
         let initialized = ready.clone();
+        let playback = Arc::new(Playback::default());
+        let pacing_settings = playback.clone();
         let thread = thread::spawn(move || {
+            let mut pacing = Pacing::new();
             let mut startup = crate::buttons::Startup::default();
             let mut placed = false;
             let mut generation = None;
@@ -432,6 +537,7 @@ impl PhysicsWorker {
                         }
                     }
                 }
+                let advanced = sample.is_some();
                 if let Some((sample, time)) = sample {
                     // Make the sensors available before waking robotics timers.
                     io.publish_observation(&sample, time)
@@ -455,11 +561,12 @@ impl PhysicsWorker {
                     return Err(format!("Simulator startup timed out: {}", io.status()));
                 }
                 // No burst of stale catch-up samples after rendering or model recompilation.
-                thread::sleep(period.saturating_sub(started.elapsed()));
+                pacing.finish(started, period, advanced, &pacing_settings);
             }
             Ok(())
         });
         Self {
+            playback,
             stop,
             failure: None,
             ready,
