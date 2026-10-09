@@ -162,8 +162,8 @@ impl TwixApp {
             return;
         };
         let namespace = self.backend.namespace();
-        let number = simulate::robot_number(&namespace);
-        self.layout.select_simulator_robot(number.unwrap_or(0));
+        let number = simulate::robot_id(&namespace);
+        self.layout.select_simulator_robot(number);
         let scope = number.map_or_else(
             || simulate::ZENOH_NAMESPACE.to_owned(),
             simulate::transport_scope,
