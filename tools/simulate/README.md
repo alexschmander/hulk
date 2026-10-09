@@ -59,7 +59,7 @@ Initial players alternate between both long touchlines in their own half, starti
 Placement follows the known GameController field side, defaulting to Home for HULKs and Away for opponents before the first packet.
 A running match continues during startup; a paused match keeps the existing clock and poses frozen.
 Reset pose returns the selected robot to its original spawn slot, mirrored if GameController has changed its field side.
-Floating player numbers use each robot's actual commanded LED color; the selected player's number is ringed.
+Floating player numbers use the GameController's field-player or goalkeeper jersey color, with the commanded LED color as a small highlight; the selected player's number is ringed.
 Click a number to select that robot in Twix.
 Startup uses the real button bridge, handler and safe-pose check to pass through Prepare to Initial.
 While running, the panel header is the toolbar.
@@ -210,7 +210,7 @@ Set the opponent count above zero before starting, or choose **opponents** from 
 Both teams run the same selected profile and share the ball, contacts, field and simulation clock.
 Each side uses player numbers 1 through 5 and starts on its own half's sidelines.
 Dynamic additions use the team's current GameController field side and skip occupied slots.
-Badges show H1–H5 or O1–O5 with the robot's actual LED color; hovering shows its namespace.
+Badges show H1–H5 or O1–O5 in the received jersey color, with an LED accent; hovering shows its namespace.
 Select `/opponents/N` in Twix to inspect or control an opponent, including the body buttons and local gamepad.
 Switching robots requires releasing and pressing Start again before gamepad input reaches the new robot.
 
@@ -316,6 +316,7 @@ It docks beside the scene, or below it in narrow panels.
 Calls the core does not accept in the current state stay visible but disabled, and their tooltip explains why.
 Click a player's badge to select that robot in Twix.
 While the pointer is over the panel, **Shift+Space** stops or resumes play, **N** takes the next step and **R** toggles the desk.
+Each shortcut requires a fresh key press; holding it does not repeat the action.
 Calls apply immediately, also while paused; ball placement, whistles and robot handling follow once the simulation runs.
 Accepted calls are confirmed over the scene and marked in the log, which also lists automatic decisions and actions the core did not apply.
 There is no undo, because undoing core state cannot reverse physical ball and robot handling.
@@ -331,6 +332,8 @@ Judgments that depend on intent or a robot being pushed into an illegal position
 
 Run the referee rule and private-UDP tests with `cargo test -p simulate autoref::tests`.
 With the motion models, MuJoCo and ONNX Runtime configured, the ignored roundtrip test starts two robots on each team, checks all return streams and delayed state packets, physically removes a penalized robot, checks pause timing and waits for penalty expiry.
+It also verifies received field-player and goalkeeper colors, second-half Ready without Stop/Resume, and pose agreement with the new field frame.
+In the Localization profile it requires a fresh tracking epoch after halftime.
 
 ```sh
 for profile in motion_behavior filtering body_state_odometry localization; do

@@ -530,9 +530,9 @@ impl Simulator {
         }
         let (stop, next, desk) = ui.input_mut(|input| {
             (
-                input.consume_key(egui::Modifiers::SHIFT, egui::Key::Space),
-                input.consume_key(egui::Modifiers::NONE, egui::Key::N),
-                input.consume_key(egui::Modifiers::NONE, egui::Key::R),
+                consume_fresh_key(input, egui::Modifiers::SHIFT, egui::Key::Space),
+                consume_fresh_key(input, egui::Modifiers::NONE, egui::Key::N),
+                consume_fresh_key(input, egui::Modifiers::NONE, egui::Key::R),
             )
         });
         if desk {
@@ -614,5 +614,57 @@ pub fn configure_renderer(options: &mut eframe::NativeOptions) {
                 .max_storage_buffers_per_shader_stage = 9;
             descriptor
         });
+    }
+}
+
+fn consume_fresh_key(
+    input: &mut egui::InputState,
+    modifiers: egui::Modifiers,
+    key: egui::Key,
+) -> bool {
+    let fresh = input.events.iter().any(|event| matches!(event,
+        egui::Event::Key { key: event_key, modifiers: event_modifiers, pressed: true, repeat: false, .. }
+            if *event_key == key && event_modifiers.matches_logically(modifiers)));
+    // Consume repeats too, so another handler cannot interpret them as a fresh action.
+    input.consume_key(modifiers, key);
+    fresh
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+    #[test]
+    fn next_requires_release_before_another_press() {
+        let context = egui::Context::default();
+        let press = |pressed: bool, repeat: bool| {
+            let raw = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::N,
+                    physical_key: None,
+                    pressed,
+                    repeat,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let mut advance = false;
+            let _ = context.run_ui(raw, |ctx| {
+                advance = ctx.input_mut(|input| {
+                    consume_fresh_key(input, egui::Modifiers::NONE, egui::Key::N)
+                });
+            });
+            advance
+        };
+        assert!(press(true, false));
+        assert!(
+            !press(true, true),
+            "OS key repeat must not advance the referee"
+        );
+        assert!(
+            !press(true, false),
+            "egui must also detect an unmarked held-key repeat"
+        );
+        assert!(!press(false, false));
+        assert!(press(true, false));
     }
 }
