@@ -16,7 +16,7 @@ use tokio::runtime::Handle;
 
 #[derive(Clone)]
 pub(crate) struct Member {
-    pub number: u8,
+    pub id: RobotId,
     pub io: Robotics,
     pub entity: Option<Entity>,
     pub pose: Transform,
@@ -30,8 +30,8 @@ struct Inner {
     configuration: Configuration,
     clock: Clock,
     network: tokio::sync::Mutex<Network>,
-    members: Mutex<BTreeMap<u8, Member>>,
-    selected: std::sync::atomic::AtomicU8,
+    members: Mutex<BTreeMap<RobotId, Member>>,
+    selected: Mutex<RobotId>,
     controller: Mutex<Option<crate::controller::Controller>>,
     _lease: Option<crate::Lease>,
 }
@@ -56,6 +56,10 @@ impl Team {
             (1..=5).contains(&configuration.robot_count),
             "Choose one to five robots"
         );
+        ensure!(
+            configuration.opponent_count <= 5,
+            "Choose zero to five opponents"
+        );
         let field = configuration
             .field_configuration
             .as_ref()
@@ -68,15 +72,24 @@ impl Team {
             clock: Clock::logical(Clock::wallclock().now()),
             network: tokio::sync::Mutex::new(Network::new(3838, 3939).await?),
             members: Mutex::new(BTreeMap::new()),
-            selected: std::sync::atomic::AtomicU8::new(1),
+            selected: Mutex::new(RobotId::FIRST),
             controller: Mutex::new(None),
             configuration: configuration.clone(),
         }));
-        for index in 0..configuration.robot_count {
-            team.add(spawn_pose(&field.dimensions, index)).await?;
+        for (side, count) in [
+            (TeamId::Hulks, configuration.robot_count),
+            (TeamId::Opponents, configuration.opponent_count),
+        ] {
+            for index in 0..count {
+                team.add(
+                    side,
+                    on_field_side(spawn_pose(&field.dimensions, index), side.default_away()),
+                )
+                .await?;
+            }
         }
-        if team.members().iter().any(|member| member.io.away()) {
-            for member in team.0.members.lock().unwrap().values_mut() {
+        for member in team.0.members.lock().unwrap().values_mut() {
+            if member.io.away() != member.id.team.default_away() {
                 member.pose = on_field_side(member.pose, true);
             }
         }
@@ -121,29 +134,30 @@ impl Team {
             .members
             .lock()
             .unwrap()
-            .get(&self.0.selected.load(std::sync::atomic::Ordering::Relaxed))
+            .get(&*self.0.selected.lock().unwrap())
             .cloned()
     }
-    pub fn select(&self, number: u8) {
+    pub fn select(&self, id: Option<RobotId>) {
         if let Some(controller) = self.0.controller.lock().unwrap().as_ref() {
-            controller.select(number);
+            controller.select(id);
         }
-        if self.0.members.lock().unwrap().contains_key(&number) {
-            self.0
-                .selected
-                .store(number, std::sync::atomic::Ordering::Relaxed);
+        if let Some(id) = id.filter(|id| self.0.members.lock().unwrap().contains_key(id)) {
+            *self.0.selected.lock().unwrap() = id;
         }
     }
-    pub fn bind(&self, number: u8, entity: Entity) {
-        self.0
-            .members
-            .lock()
-            .unwrap()
-            .get_mut(&number)
-            .unwrap()
-            .entity = Some(entity);
+    pub fn away(&self, side: TeamId) -> bool {
+        let members = self.members();
+        members
+            .iter()
+            .find(|member| member.id.team == side)
+            .map(|member| member.io.away())
+            .or_else(|| members.first().map(|member| !member.io.away()))
+            .unwrap_or(side.default_away())
     }
-    pub async fn add(&self, pose: Transform) -> Result<u8> {
+    pub fn bind(&self, id: RobotId, entity: Entity) {
+        self.0.members.lock().unwrap().get_mut(&id).unwrap().entity = Some(entity);
+    }
+    pub async fn add(&self, side: TeamId, pose: Transform) -> Result<RobotId> {
         ensure!(
             !self.0.cancelled.load(std::sync::atomic::Ordering::Acquire),
             "Simulator stopped"
@@ -151,8 +165,14 @@ impl Team {
         // Serializes allocation and startup, including dynamic additions.
         let mut network = self.0.network.lock().await;
         let number = (1..=5)
-            .find(|number| !self.0.members.lock().unwrap().contains_key(number))
+            .find(|number| {
+                !self.0.members.lock().unwrap().contains_key(&RobotId {
+                    team: side,
+                    number: *number,
+                })
+            })
             .ok_or_else(|| eyre!("All five player numbers are in use"))?;
+        let id = RobotId { team: side, number };
         let player = [
             hsl_network_messages::PlayerNumber::One,
             hsl_network_messages::PlayerNumber::Two,
@@ -161,15 +181,16 @@ impl Team {
             hsl_network_messages::PlayerNumber::Five,
         ][usize::from(number - 1)];
         let mut configuration = self.0.configuration.clone();
-        configuration.namespace = robot_namespace(number);
+        configuration.namespace = robot_namespace(id);
         configuration.controller = crate::ControllerSource::External;
-        let connection = Arc::new(network.add_robot().await?);
+        let connection = Arc::new(network.add_robot(side).await?);
         let io = Robotics::new_robot(
             self.0.runtime.clone(),
             configuration,
             RobotSettings {
                 player,
-                scope: transport_scope(number),
+                default_away: side.default_away(),
+                scope: transport_scope(id),
                 clock: self.0.clock.clone(),
                 ports: connection.ports,
             },
@@ -177,7 +198,7 @@ impl Team {
         .await?;
         crate::simulation::bootstrap(&io, &self.0.cancelled)?;
         let member = Member {
-            number,
+            id,
             io,
             entity: None,
             pose,
@@ -186,25 +207,67 @@ impl Team {
         if let Some(controller) = self.0.controller.lock().unwrap().as_ref() {
             controller.add(member.clone());
         }
-        self.0.members.lock().unwrap().insert(number, member);
-        Ok(number)
+        self.0.members.lock().unwrap().insert(id, member);
+        Ok(id)
     }
 }
-pub fn robot_namespace(number: u8) -> String {
-    format!("/hulks/{number}")
+/// A team keeps its wire identity separate from its readable transport namespace.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TeamId {
+    #[default]
+    Hulks,
+    Opponents,
 }
-
-pub fn robot_number(namespace: &str) -> Option<u8> {
-    namespace
-        .trim_start_matches('/')
-        .strip_prefix("hulks/")?
+impl TeamId {
+    pub const ALL: [Self; 2] = [Self::Hulks, Self::Opponents];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Hulks => "hulks",
+            Self::Opponents => "opponents",
+        }
+    }
+    pub fn wire_number(self) -> u8 {
+        match self {
+            Self::Hulks => 24,
+            Self::Opponents => 5,
+        }
+    }
+    pub fn default_away(self) -> bool {
+        self == Self::Opponents
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RobotId {
+    pub team: TeamId,
+    pub number: u8,
+}
+impl RobotId {
+    pub const FIRST: Self = Self {
+        team: TeamId::Hulks,
+        number: 1,
+    };
+}
+impl std::fmt::Display for RobotId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.team.name(), self.number)
+    }
+}
+pub fn robot_namespace(id: RobotId) -> String {
+    format!("/{id}")
+}
+pub fn robot_id(namespace: &str) -> Option<RobotId> {
+    let (team, number) = namespace.trim_start_matches('/').split_once('/')?;
+    let team = TeamId::ALL
+        .into_iter()
+        .find(|candidate| candidate.name() == team)?;
+    let number = number
         .parse::<u8>()
         .ok()
-        .filter(|number| (1..=5).contains(number))
+        .filter(|number| (1..=5).contains(number))?;
+    Some(RobotId { team, number })
 }
-
-pub fn transport_scope(number: u8) -> String {
-    format!("{}{}", crate::ZENOH_NAMESPACE, robot_namespace(number))
+pub fn transport_scope(id: RobotId) -> String {
+    format!("{}{}", crate::ZENOH_NAMESPACE, robot_namespace(id))
 }
 
 pub(crate) fn spawn_pose(field: &types::field_dimensions::FieldDimensions, index: u8) -> Transform {
@@ -216,7 +279,7 @@ pub(crate) fn spawn_pose(field: &types::field_dimensions::FieldDimensions, index
     )
     .with_rotation(Quat::from_rotation_y(side * std::f32::consts::FRAC_PI_2))
 }
-fn on_field_side(mut pose: Transform, away: bool) -> Transform {
+pub(crate) fn on_field_side(mut pose: Transform, away: bool) -> Transform {
     if away {
         pose.translation.x = -pose.translation.x;
         pose.translation.z = -pose.translation.z;
@@ -299,7 +362,7 @@ mod runtime_tests {
                     member.pose,
                 ))
                 .id();
-            team.bind(member.number, entity);
+            team.bind(member.id, entity);
         }
         app.update();
     }
@@ -313,6 +376,80 @@ mod runtime_tests {
             assert!(Instant::now() < deadline, "condition timed out");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+    fn validate_team_channels(runtime: &tokio::runtime::Runtime, members: &[Member]) {
+        use hsl_network_messages::{HulkMessage, PlayerNumber, StateMessage};
+        use types::{
+            messages::{IncomingMessage, OutgoingMessage},
+            time_wrapper::TimeWrapper,
+        };
+        runtime.block_on(async {
+            let mut readers = tokio::task::JoinSet::new();
+            let mut publishers = Vec::new();
+            for member in members {
+                let node = member.io.node();
+                let subscriber = node
+                    .subscriber::<TimeWrapper<IncomingMessage>>("filtered_message")
+                    .build()
+                    .await
+                    .unwrap();
+                let id = member.id;
+                readers.spawn(async move {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+                    let mut received = 0;
+                    while let Ok(Ok(message)) =
+                        tokio::time::timeout_at(deadline, subscriber.recv()).await
+                    {
+                        if let IncomingMessage::Hsl(HulkMessage::State(state)) = message.inner
+                            && state.head_yaw.abs() == 1.234
+                        {
+                            assert_ne!(
+                                id.number, 1,
+                                "production filter must discard its own player number"
+                            );
+                            assert_eq!(
+                                state.head_yaw > 0.0,
+                                id.team == TeamId::Hulks,
+                                "cross-team message at {id}"
+                            );
+                            received += 1;
+                        }
+                    }
+                    if id.number != 1 {
+                        assert!(received > 0, "{id} missed teammate messages");
+                    }
+                });
+                if id.number == 1 {
+                    publishers.push((
+                        id.team,
+                        node.publisher::<OutgoingMessage>("outputs/message")
+                            .build()
+                            .await
+                            .unwrap(),
+                    ));
+                }
+            }
+            for _ in 0..10 {
+                for (side, publisher) in &publishers {
+                    publisher
+                        .publish(&OutgoingMessage::Hsl(HulkMessage::State(StateMessage {
+                            player_number: PlayerNumber::One,
+                            head_yaw: if *side == TeamId::Hulks {
+                                1.234
+                            } else {
+                                -1.234
+                            },
+                            ..Default::default()
+                        })))
+                        .await
+                        .unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            while let Some(result) = readers.join_next().await {
+                result.unwrap();
+            }
+        });
     }
     fn validate_game_controller(
         runtime: &tokio::runtime::Runtime,
@@ -334,34 +471,61 @@ mod runtime_tests {
             observations
         });
         physics.lock().mode = SimulationMode::Running;
-        for (stage, penalized) in [
-            ("ready", false),
-            ("penalized", true),
-            ("unpenalized", false),
-        ] {
+        let selfplay = members
+            .iter()
+            .any(|member| member.id.team == TeamId::Opponents);
+        let mut stages = vec![
+            ("ready", None),
+            ("penalized", Some(TeamId::Hulks)),
+            ("unpenalized", None),
+        ];
+        if selfplay {
+            stages.extend([
+                ("opponent_penalized", Some(TeamId::Opponents)),
+                ("opponent_unpenalized", None),
+            ]);
+        }
+        for (stage, penalized) in stages {
             wait(worker, || {
-                observations.iter().all(|(state, _)| {
-                    state.get_latest().is_some_and(|state| {
-                        state.game_state == FilteredGameState::Ready
-                            && state.penalties[hsl_network_messages::PlayerNumber::Three].is_some()
-                                == penalized
+                observations
+                    .iter()
+                    .zip(&members)
+                    .all(|((state, _), member)| {
+                        state.get_latest().is_some_and(|state| {
+                            state.game_state == FilteredGameState::Ready
+                                && state.penalties[hsl_network_messages::PlayerNumber::Three]
+                                    .is_some()
+                                    == (penalized == Some(member.id.team))
+                        })
                     })
-                })
             });
-            if stage == "penalized" {
+            if let Some(side) = penalized {
                 wait(worker, || {
-                    members[2].io.primary.get_latest().is_some_and(|state| {
-                        *state == types::primary_state::PrimaryState::Penalized
+                    members.iter().all(|member| {
+                        member.io.primary.get_latest().is_some_and(|state| {
+                            (*state == types::primary_state::PrimaryState::Penalized)
+                                == (member.id.team == side && member.id.number == 3)
+                        })
                     })
                 });
-                for member in [&members[0], &members[1], &members[3], &members[4]] {
-                    assert_ne!(
-                        *member.io.primary.get_latest().unwrap(),
-                        types::primary_state::PrimaryState::Penalized
-                    );
-                }
             }
-            std::fs::write(exchange.join(stage), "observed by five robots").unwrap();
+            for (member, (_, raw)) in members.iter().zip(&observations) {
+                let state = raw.get_latest().unwrap();
+                let state = state.as_ref().as_ref().unwrap();
+                assert_eq!(
+                    state.global_field_side == types::field_dimensions::GlobalFieldSide::Away,
+                    member.id.team == TeamId::Opponents
+                );
+                assert_eq!(
+                    state.kicking_team,
+                    Some(if member.id.team == TeamId::Hulks {
+                        hsl_network_messages::Team::Hulks
+                    } else {
+                        hsl_network_messages::Team::Opponent
+                    })
+                );
+            }
+            std::fs::write(exchange.join(stage), "observed by all robots").unwrap();
         }
         wait(worker, || {
             observations.iter().all(|(state, _)| {
@@ -389,6 +553,23 @@ mod runtime_tests {
                     })
                 })
             })
+        });
+        wait(worker, || {
+            TeamId::ALL
+                .into_iter()
+                .filter(|side| *side == TeamId::Hulks || selfplay)
+                .all(|side| {
+                    members
+                        .iter()
+                        .filter(|member| member.id.team == side)
+                        .any(|member| {
+                            matches!(
+                                member.io.active_motion(),
+                                types::motion_command::MotionCommand::Walk { .. }
+                                    | types::motion_command::MotionCommand::WalkWithVelocity { .. }
+                            )
+                        })
+                })
         });
         physics.lock().mode = SimulationMode::Paused;
         thread::sleep(Duration::from_millis(50));
@@ -448,8 +629,12 @@ mod runtime_tests {
             parameter_root,
             model_directory: root.join("../../etc/neural_networks"),
             router: Some(endpoint),
-            namespace: robot_namespace(1),
+            namespace: robot_namespace(RobotId::FIRST),
             location: Some("incheon_small".into()),
+            opponent_count: std::env::var("SIMULATOR_TEST_OPPONENTS")
+                .ok()
+                .map(|n| n.parse().unwrap())
+                .unwrap_or(0),
             robot_count: std::env::var("SIMULATOR_TEST_ROBOTS")
                 .ok()
                 .map(|n| n.parse().unwrap())
@@ -462,6 +647,21 @@ mod runtime_tests {
             .unwrap();
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
+        if std::env::var_os("HSL_EXCHANGE").is_some() {
+            let member = &team.members()[0];
+            let parameters = member.io.parameters.snapshot().typed().ball.clone();
+            let radius = f64::from(member.io.field_dimensions.ball_radius);
+            app.world_mut().spawn((
+                MjcfObject::from_factory(
+                    move || crate::scene::ball::ball_spec(radius, &parameters),
+                    "ball",
+                )
+                .with_free_joint("ball_free_joint")
+                .grounded(),
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                crate::scene::ball::Ball,
+            ));
+        }
         bind_scene(&mut app, &team);
         let physics = app.world().resource::<SharedPhysics>().clone();
         physics.lock().mode = SimulationMode::Paused;
@@ -477,41 +677,63 @@ mod runtime_tests {
         if add_while_running {
             physics.lock().mode = SimulationMode::Running;
         }
-        for number in team.members().len() as u8 + 1..=5 {
-            let occupied = {
-                let world = physics.lock();
-                world
-                    .robots
-                    .iter()
-                    .filter_map(|id| world.object_pose(*id))
-                    .collect::<Vec<_>>()
-            };
-            let pose =
-                vacant_spawn(&team.members()[0].io.field_dimensions, &occupied, false).unwrap();
-            assert_eq!(runtime.block_on(team.add(pose)).unwrap(), number);
-            bind_scene(&mut app, &team);
-            thread::sleep(Duration::from_millis(100));
-            wait(&mut worker, || {
-                team.members().iter().all(|member| member.entity.is_some())
-            });
-            if !add_while_running {
-                assert_eq!(
-                    team.now(),
-                    time,
-                    "Adding a robot must not advance a paused simulation"
-                );
-                assert!(
-                    physics
-                        .lock()
-                        .object_pose(first)
-                        .unwrap()
-                        .translation
-                        .distance(initial_pose.translation)
-                        < 1e-6
-                );
+        let selfplay = team.configuration().opponent_count > 0;
+        for side in TeamId::ALL {
+            if side == TeamId::Opponents && !selfplay {
+                continue;
             }
+            let count = team
+                .members()
+                .iter()
+                .filter(|member| member.id.team == side)
+                .count() as u8;
+            for number in count + 1..=5 {
+                let occupied = {
+                    let world = physics.lock();
+                    world
+                        .robots
+                        .iter()
+                        .filter_map(|id| world.object_pose(*id))
+                        .collect::<Vec<_>>()
+                };
+                let pose = vacant_spawn(
+                    &team.members()[0].io.field_dimensions,
+                    &occupied,
+                    team.away(side),
+                )
+                .unwrap();
+                assert_eq!(
+                    runtime.block_on(team.add(side, pose)).unwrap().number,
+                    number
+                );
+                bind_scene(&mut app, &team);
+                thread::sleep(Duration::from_millis(100));
+                wait(&mut worker, || {
+                    team.members().iter().all(|member| member.entity.is_some())
+                });
+                if !add_while_running {
+                    assert_eq!(
+                        team.now(),
+                        time,
+                        "Adding a robot must not advance a paused simulation"
+                    );
+                    assert!(
+                        physics
+                            .lock()
+                            .object_pose(first)
+                            .unwrap()
+                            .translation
+                            .distance(initial_pose.translation)
+                            < 1e-6
+                    );
+                }
+            }
+            assert!(
+                runtime
+                    .block_on(team.add(side, Transform::default()))
+                    .is_err()
+            );
         }
-        assert!(runtime.block_on(team.add(Transform::default())).is_err());
         let members = team.members();
         let ids = runtime.block_on(async {
             let mut ids = Vec::new();
@@ -534,7 +756,15 @@ mod runtime_tests {
             }
             ids
         });
-        assert_eq!(ids, ["1", "2", "3", "4", "5"]);
+        let expected: Vec<_> = (0..if selfplay { 2 } else { 1 })
+            .flat_map(|_| (1..=5).map(|number| number.to_string()))
+            .collect();
+        assert_eq!(ids, expected);
+        for member in &members {
+            assert_eq!(robot_id(&robot_namespace(member.id)), Some(member.id));
+            assert_eq!(member.pose.translation.x > 0.0, member.io.away());
+        }
+        validate_team_channels(&runtime, &members);
         if let Ok(exchange) = std::env::var("HSL_EXCHANGE") {
             validate_game_controller(
                 &runtime,
@@ -550,7 +780,7 @@ mod runtime_tests {
                     *member.io.primary.get_latest().unwrap(),
                     types::primary_state::PrimaryState::Initial,
                     "player {}: {}",
-                    member.number,
+                    member.id,
                     member.io.status()
                 );
                 assert_eq!(member.io.field_dimensions.length, 8.95);
@@ -612,7 +842,10 @@ mod runtime_tests {
                     );
                 }
             }
-            eprintln!("Five {profile:?} players ready; running additions: {add_while_running}");
+            eprintln!(
+                "{} {profile:?} players ready; running additions: {add_while_running}",
+                members.len()
+            );
             members[0]
                 .io
                 .button_event(0, booster::ButtonEventType::PressDown)
@@ -639,7 +872,7 @@ mod runtime_tests {
                     *member.io.primary.get_latest().unwrap(),
                     types::primary_state::PrimaryState::Initial,
                     "player {}: {}",
-                    member.number,
+                    member.id,
                     member.io.status()
                 );
             }

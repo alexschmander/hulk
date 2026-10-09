@@ -12,7 +12,7 @@ The panel starts a configured team and adds controlled robots and balls with too
 | Parameter groups, snapshots, apply/discard, validation | Twix Parameter panel and the nodes' real parameter services |
 | Game state, penalties, field side | External HSL GameController over the real network pipeline |
 | Motion/actuator/behavior readouts | Twix Text, Plot and Behavior tree panels |
-| Robot and ball palette | One to five controlled robots; Add robot and Add ball in the simulator |
+| Robot and ball palette | One to five controlled robots per team; Add robot and Add ball in the simulator |
 | Pause, reset and object placement | Simulator toolbar; ball dragging and robot translation/rotation gizmo |
 | Walk/kick arrows and camera | Simulator scene |
 | Reset robot and stack | Reset pose; Stop/Start for a new stack |
@@ -32,7 +32,7 @@ The simulator retains ball dragging and robot translation/rotation gizmos.
 ## Current process boundary
 
 Twix owns one robotics context and SDK substitute per player, plus a shared physics worker and logical clock.
-Robot N uses the Zenoh session scope `hulk_simulator/hulks/N/` and ROS namespace `/hulks/N`.
+Each robot uses a team-name scope, `hulk_simulator/hulks/N` or `hulk_simulator/opponents/N`, and matching ROS namespace `/hulks/N` or `/opponents/N`.
 The panel requires that scope before it can start.
 Closing the panel cancels pending additions, drains the physics worker and node tasks, and releases their sockets.
 The simulator lease stays owned by the team until teardown completes.
@@ -67,8 +67,8 @@ References: [Zenoh namespace introduction](https://zenoh.io/blog/2025-04-14-zeno
 Players 1 through 5 now have independent SDK controllers, raw sensor/button streams, node stacks, writable parameters and observation publishers.
 Adding a robot rebuilds MuJoCo while preserving existing state and SDK controller modes.
 Private UDP state/return ports avoid production endpoint collisions without changing the robotics nodes.
-An ephemeral loopback team channel keeps physical teammate broadcasts out of the simulation, while forwarding copies of simulated team messages to GameController for accounting.
-The upstream GameController runtime has accepted all five return streams and delivered a player-3 penalty through the unchanged production filters.
+Separate ephemeral loopback channels isolate the teams and keep physical teammate broadcasts out of the simulation, while forwarding copies to GameController ports 10024 and 10005 for accounting.
+The upstream GameController runtime has accepted all ten return streams and delivered independent player-3 penalties for both teams through the unchanged production filters.
 
 Twix recreates inspection panels on a scoped backend switch while retaining the Simulator panel and scene.
 Relative topic and node names follow the selected player; intentionally absolute inspection paths remain absolute.
@@ -77,4 +77,6 @@ The remote-enabled state is read from the real behavior blackboard rather than i
 
 This implements in-process multi-robot profiles, not separate full `hulk_ros_z` processes.
 Full executable support still needs device substitutes, a perception strategy, child-process supervision and end-to-end validation.
-Opposing teams and removing individual robots are outside the current one-team implementation.
+Self-play adapts the hardcoded production team number at the simulator UDP boundary, preserving all robotics code.
+The default external identities are HULKs 24 and opponents 5; namespaces use their names.
+Removing individual robots and automatic refereeing remain outside the implementation.

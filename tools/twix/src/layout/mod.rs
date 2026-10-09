@@ -34,7 +34,7 @@ pub struct TwixLayout {
 
 impl TwixLayout {
     #[cfg(feature = "simulator")]
-    pub fn select_simulator_robot(&mut self, number: u8) {
+    pub fn select_simulator_robot(&mut self, number: Option<simulate::RobotId>) {
         for (_, tile) in self.tree.tiles.iter_mut() {
             if let egui_tiles::Tile::Pane(SelectablePanel::SimulatorPanel(panel)) = tile {
                 panel.select_robot(number);

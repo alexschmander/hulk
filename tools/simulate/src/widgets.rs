@@ -209,6 +209,7 @@ pub fn field_preview(
     ui: &mut Ui,
     field: &FieldConfiguration,
     robots: u8,
+    opponents: u8,
     max_height: f32,
 ) -> Response {
     let dimensions = &field.dimensions;
@@ -300,43 +301,53 @@ pub fn field_preview(
     }
 
     let radius = (0.3 * scale).clamp(7.0, 11.0);
-    for index in 0..5 {
-        let pose = crate::team::spawn_pose(dimensions, index);
-        let center = at(pose.translation.x, -pose.translation.z);
-        let forward = pose.rotation * bevy::math::Vec3::X;
-        let heading = egui::vec2(forward.x, forward.z).normalized();
-        let number = (index + 1).to_string();
-        if index < robots {
-            painter.line_segment(
-                [center + heading * radius, center + heading * (radius + 5.0)],
-                Stroke::new(2.0, chalk),
-            );
-            painter.circle_filled(center, radius, Color32::WHITE);
-            painter.circle_stroke(
-                center,
-                radius,
-                Stroke::new(1.5, Color32::from_black_alpha(140)),
-            );
-            painter.text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                number,
-                egui::FontId::proportional(radius * 1.25),
-                Color32::BLACK,
-            );
-        } else {
-            painter.circle_stroke(
-                center,
-                radius - 1.0,
-                Stroke::new(1.25, Color32::from_white_alpha(150)),
-            );
-            painter.text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                number,
-                egui::FontId::proportional(radius * 1.15),
-                Color32::from_white_alpha(170),
-            );
+    for (away, count) in [(false, robots), (true, opponents)] {
+        for index in 0..5 {
+            let pose = crate::team::on_field_side(crate::team::spawn_pose(dimensions, index), away);
+            let center = at(pose.translation.x, -pose.translation.z);
+            let forward = pose.rotation * bevy::math::Vec3::X;
+            let heading = egui::vec2(forward.x, forward.z).normalized();
+            let number = (index + 1).to_string();
+            if index < count {
+                painter.line_segment(
+                    [center + heading * radius, center + heading * (radius + 5.0)],
+                    Stroke::new(2.0, chalk),
+                );
+                painter.circle_filled(
+                    center,
+                    radius,
+                    if away {
+                        Color32::from_rgb(255, 170, 95)
+                    } else {
+                        Color32::WHITE
+                    },
+                );
+                painter.circle_stroke(
+                    center,
+                    radius,
+                    Stroke::new(1.5, Color32::from_black_alpha(140)),
+                );
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    number,
+                    egui::FontId::proportional(radius * 1.25),
+                    Color32::BLACK,
+                );
+            } else {
+                painter.circle_stroke(
+                    center,
+                    radius - 1.0,
+                    Stroke::new(1.25, Color32::from_white_alpha(150)),
+                );
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    number,
+                    egui::FontId::proportional(radius * 1.15),
+                    Color32::from_white_alpha(170),
+                );
+            }
         }
     }
     response.widget_info(|| {
@@ -344,7 +355,7 @@ pub fn field_preview(
             WidgetType::Other,
             true,
             format!(
-                "{} × {} m field with {robots} starting positions",
+                "{} × {} m field with {robots} HULKs and {opponents} opponents",
                 meters(dimensions.length),
                 meters(dimensions.width)
             ),

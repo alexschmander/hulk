@@ -44,7 +44,7 @@ fn spawn_robot(
         }
         let robot = robot::spawn(&mut commands, &assets.robot, member.pose);
         commands.entity(robot).insert(ControlledRobot);
-        team.bind(member.number, robot);
+        team.bind(member.id, robot);
     }
 }
 
@@ -132,7 +132,7 @@ impl PhysicsWorker {
                 binding: RobotBinding,
                 controller: crate::simulated_sdk::Controller,
             }
-            let mut states = std::collections::BTreeMap::<u8, State>::new();
+            let mut states = std::collections::BTreeMap::<crate::RobotId, State>::new();
             let mut placed = std::collections::HashSet::new();
             let mut generation = None;
             let mut last_frame = None;
@@ -145,7 +145,7 @@ impl PhysicsWorker {
                 let members = team.members();
                 for member in &members {
                     if let Some(error) = member.io.poll() {
-                        return Err(format!("Player {}: {error}", member.number));
+                        return Err(format!("Player {}: {error}", member.id));
                     }
                 }
                 let mut period = Duration::from_millis(2);
@@ -164,18 +164,18 @@ impl PhysicsWorker {
                                     &format!("object_{}_", entity.to_bits()),
                                 )
                                 .map_err(|error| {
-                                    format!("Player {} binding: {error:#}", member.number)
+                                    format!("Player {} binding: {error:#}", member.id)
                                 })?;
-                                if placed.insert(member.number) {
+                                if placed.insert(member.id) {
                                     binding.reset_joints(world.data_mut());
                                     world.ground_object(entity, member.pose)?;
                                 }
                                 states.insert(
-                                    member.number,
+                                    member.id,
                                     State {
                                         binding,
                                         controller: previous
-                                            .remove(&member.number)
+                                            .remove(&member.id)
                                             .map(|state| state.controller)
                                             .unwrap_or_default(),
                                     },
@@ -192,7 +192,7 @@ impl PhysicsWorker {
                         let time = team.now();
                         if running {
                             for member in &members {
-                                if let Some(state) = states.get_mut(&member.number) {
+                                if let Some(state) = states.get_mut(&member.id) {
                                     state.controller.apply(
                                         &state.binding,
                                         world.data_mut(),
@@ -208,7 +208,7 @@ impl PhysicsWorker {
                             .iter()
                             .filter_map(|member| {
                                 let mut observation =
-                                    states.get(&member.number)?.binding.observe(world.data());
+                                    states.get(&member.id)?.binding.observe(world.data());
                                 if !running {
                                     observation.stationary();
                                 }
@@ -229,7 +229,7 @@ impl PhysicsWorker {
                             let frame = if frame_due {
                                 let others = observations
                                     .iter()
-                                    .filter(|(other, _)| other.number != member.number)
+                                    .filter(|(other, _)| other.id != member.id)
                                     .map(|(_, other)| {
                                         let p = other.ground_to_world.translation.vector;
                                         [p.x, p.y, p.z]
@@ -472,7 +472,13 @@ pub fn reset(world: &mut World) {
             .expect("controlled robot joints");
         binding.reset_joints(physics.data_mut());
         physics
-            .ground_object(robot, member.pose)
+            .ground_object(
+                robot,
+                crate::team::on_field_side(
+                    member.pose,
+                    (member.pose.translation.x > 0.0) != member.io.away(),
+                ),
+            )
             .expect("reset controlled robot");
     }
 }
