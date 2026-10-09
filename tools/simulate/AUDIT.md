@@ -109,3 +109,10 @@ The test suite passes 61 simulator tests and 127 Twix tests, including referee c
 The ignored automatic-referee roundtrip passed again in the motion and behavior profile.
 A native Twix run exercised the next-step sequence, Shift+Space stop and resume, an awarded corner, a pushing penalty and release, ending the first half, the second half and robot selection from the desk and from scene labels.
 A split tile exercised the narrow layout with the desk below the scene.
+
+## Competition and ball
+
+The Foundation presets are copied unchanged from the pinned GameController revision; they differ from Advanced only in players per team.
+`hsl_small` previously used a 10 cm ball, smaller than the FIFA mini ball required for the Small division, and now uses 14.6 cm.
+The ball size selector overrides only `field_dimensions.ball_radius` in the shared field configuration before start.
+A native run on `hsl_small` with Middle Foundation, four HULKs and a size 4 ball started H4 as a substitute beside the field.
