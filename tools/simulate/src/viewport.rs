@@ -311,7 +311,6 @@ impl Viewport {
                 self.selected = pick(world, ray);
                 if let Some(entity) = self.selected
                     && world.get::<Ball>(entity).is_some()
-                    && world.resource::<crate::team::Team>().referee().is_none()
                 {
                     self.start_drag(world, entity, Handle::Ball, ray);
                 }
@@ -389,7 +388,8 @@ impl Viewport {
                         };
                     let position =
                         egui::pos2(head.center().x, head.top() - clearance - label_size.y / 2.0);
-                    let color = member
+                    let color = crate::widgets::jersey_color(member, ui.visuals());
+                    let led = member
                         .io
                         .led_color()
                         .map_or(Color32::GRAY, |led| Color32::from_rgb(led.r, led.g, led.b));
@@ -416,7 +416,7 @@ impl Viewport {
                             ));
                     }
                     painter.rect_filled(rect, 5.0, color);
-                    // A dark rim keeps light LED colors legible against field lines and goals.
+                    // Keep white jerseys legible against field lines and goals.
                     painter.rect_stroke(
                         rect,
                         5.0,
@@ -430,8 +430,14 @@ impl Viewport {
                     } else {
                         Color32::WHITE
                     };
+                    let accent = Rect::from_min_max(
+                        egui::pos2(rect.left() + 5.0, rect.bottom() - 5.0),
+                        egui::pos2(rect.right() - 5.0, rect.bottom() - 2.0),
+                    );
+                    painter.rect_filled(accent.expand(1.0), 2.0, Color32::from_black_alpha(180));
+                    painter.rect_filled(accent, 1.0, led);
                     painter.text(
-                        position,
+                        position - egui::vec2(0.0, 2.0),
                         egui::Align2::CENTER_CENTER,
                         crate::autoref::short(member.id),
                         egui::FontId::proportional(20.0),

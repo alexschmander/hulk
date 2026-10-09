@@ -368,3 +368,21 @@ pub fn meters(value: f32) -> String {
     let rounded = (value * 100.0).round() / 100.0;
     format!("{rounded}")
 }
+
+/// Use the received jersey assignment for both teams, including the designated goalkeeper.
+pub(crate) fn jersey_color(member: &crate::team::Member, visuals: &egui::Visuals) -> Color32 {
+    use hsl_network_messages::TeamColor;
+    match member.io.jersey_color(member.id.number) {
+        Some(TeamColor::Blue) => Color32::from_rgb(35, 105, 220),
+        Some(TeamColor::Red) => Color32::from_rgb(210, 45, 45),
+        Some(TeamColor::Yellow) => Color32::from_rgb(245, 210, 35),
+        Some(TeamColor::Black) => Color32::from_rgb(25, 25, 25),
+        Some(TeamColor::White) => Color32::from_rgb(240, 240, 240),
+        Some(TeamColor::Green) => Color32::from_rgb(35, 170, 75),
+        Some(TeamColor::Orange) => Color32::from_rgb(240, 135, 35),
+        Some(TeamColor::Purple) => Color32::from_rgb(145, 70, 190),
+        Some(TeamColor::Brown) => Color32::from_rgb(130, 85, 50),
+        Some(TeamColor::Gray) => Color32::from_gray(145),
+        None => crate::autoref::team_color(visuals, member.id.team),
+    }
+}
