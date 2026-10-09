@@ -42,6 +42,8 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         .block_on(Robotics::new(
             runtime.handle().clone(),
             Configuration {
+                referee: crate::RefereeMode::External,
+                competition: crate::Competition::default(),
                 parameter_root: root.join("../../etc/parameters"),
                 model_directory: root.join("../../etc/neural_networks"),
                 router: Some(endpoint),

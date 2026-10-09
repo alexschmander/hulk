@@ -23,8 +23,19 @@ pub struct ControlledRobot;
 pub struct MotionSimulationPlugin;
 impl Plugin for MotionSimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreUpdate, spawn_robot);
+        app.add_systems(PreUpdate, (spawn_robot, spawn_match_ball));
     }
+}
+fn spawn_match_ball(
+    mut commands: Commands,
+    assets: Res<ObjectVisualAssets>,
+    team: Res<crate::team::Team>,
+    mut done: Local<bool>,
+) {
+    if !*done && team.referee().is_some() {
+        crate::scene::ball::spawn(&mut commands, &assets.ball, Transform::default());
+    }
+    *done = true;
 }
 fn initial_pose(field: &FieldDimensions) -> Transform {
     // Localization's prior is (-length/2, -width/2, yaw +90°) in field coordinates.
@@ -204,6 +215,9 @@ impl PhysicsWorker {
                             advanced = true;
                         }
                         world.data_mut().forward();
+                        if running && let Some(referee) = team.referee() {
+                            referee.update(&mut world, &members, period)?;
+                        }
                         let observations: Vec<_> = members
                             .iter()
                             .filter_map(|member| {
@@ -251,7 +265,7 @@ impl PhysicsWorker {
                                 Some(crate::observations::Frame {
                                     time,
                                     sequence,
-                                    epoch: world.motion_epoch,
+                                    epoch: world.object_epoch(member.entity.unwrap()),
                                     sample: observation.clone(),
                                     balls: balls.clone(),
                                     robots: others,
