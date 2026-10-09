@@ -33,6 +33,8 @@ mod enabled {
         location: String,
         profile: Profile,
         controller: ControllerSource,
+        referee: simulate::RefereeMode,
+        competition: simulate::Competition,
     }
     impl Default for Settings {
         fn default() -> Self {
@@ -46,6 +48,8 @@ mod enabled {
                 location: "incheon_small".into(),
                 profile: Profile::default(),
                 controller: ControllerSource::default(),
+                referee: simulate::RefereeMode::default(),
+                competition: simulate::Competition::default(),
             }
         }
     }
@@ -224,6 +228,18 @@ mod enabled {
                     }
                 });
                 ui.add_space(10.0);
+                ui.label(RichText::new("Referee").strong());
+                ui.horizontal(|ui| {
+                    for (mode,label) in [(simulate::RefereeMode::External,"External GameController"),(simulate::RefereeMode::Automatic,"Auto referee")] {
+                        if widgets::segment(ui,self.settings.referee == mode,label).clicked() { self.settings.referee = mode; }
+                    }
+                });
+                if self.settings.referee == simulate::RefereeMode::Automatic {
+                    egui::ComboBox::from_id_salt("referee_competition").selected_text(self.settings.competition.label()).show_ui(ui, |ui| {
+                        for competition in [simulate::Competition::Small,simulate::Competition::Middle,simulate::Competition::Large] { ui.selectable_value(&mut self.settings.competition,competition,competition.label()); }
+                    });
+                }
+                ui.add_space(10.0);
                 ui.label(RichText::new("Field").strong());
                 match FieldConfiguration::locations(&self.settings.parameter_root) {
                     Ok(locations) => {
@@ -314,9 +330,15 @@ mod enabled {
             ui.add_space(6.0);
             ui.add(
                 egui::Label::new(
-                    RichText::new("Game state comes from an external HSL GameController.")
-                        .size(11.5)
-                        .weak(),
+                    RichText::new(
+                        if self.settings.referee == simulate::RefereeMode::External {
+                            "Game state comes from an external HSL GameController."
+                        } else {
+                            "HSL rules with automatic restarts and penalty placement."
+                        },
+                    )
+                    .size(11.5)
+                    .weak(),
                 )
                 .wrap(),
             );
@@ -385,6 +407,8 @@ mod enabled {
                 router: context.backend.router().map(str::to_owned),
                 profile: self.settings.profile,
                 controller: self.settings.controller,
+                referee: self.settings.referee,
+                competition: self.settings.competition,
             };
             let runtime = context.backend.runtime_handle().clone();
             let (sender, receiver) = mpsc::channel();

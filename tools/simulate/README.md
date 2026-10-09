@@ -134,7 +134,7 @@ Neural policies and contacts still need validation against hardware.
 
 ## GameController
 
-Use [RoboCup-HumanoidSoccerLeague/GameController](https://github.com/RoboCup-HumanoidSoccerLeague/GameController).
+In External mode, use [RoboCup-HumanoidSoccerLeague/GameController](https://github.com/RoboCup-HumanoidSoccerLeague/GameController).
 Start an actual game for team 24 with up to five players, and team 5 when opponents are enabled.
 A simulator-owned UDP relay receives state on UDP 3838 and forwards the original bytes to each production endpoint on a separate private port.
 Every robot parses the message, applies its own player number and emits a real return message, which the relay sends to the external sender on UDP 3939.
@@ -144,7 +144,7 @@ The relay forwards a copy to GameController on UDP 10024 for accounting; ordinar
 The simulator runs `message_handler`, `message_filter`, `game_controller_filter`, `game_controller_state_filter`, `primary_state_filter`, `player_states_receiver` and `team_ball_filter`.
 Behavior sends the real return and team messages through that handler.
 The simulator does not publish fabricated filtered game or primary states.
-Use GameController for game phases, penalties, scores, sides and restarts.
+In External mode, use GameController for game phases, penalties, scores, sides and restarts.
 
 GameController and Twix can run on the same machine, in either startup order.
 Select a GameController network interface that can broadcast to the simulator host.
@@ -206,9 +206,9 @@ Badges show H1–H5 or O1–O5 with the robot's actual LED color; hovering shows
 Select `/opponents/N` in Twix to inspect or control an opponent, including the body buttons and local gamepad.
 Switching robots requires releasing and pressing Start again before gamepad input reaches the new robot.
 
-Run the external HSL GameController with teams 24 and 5, matching the simulator's field class and player count.
+For External mode, run the HSL GameController with teams 24 and 5, matching the simulator's field class and player count.
 Use its normal controls for kickoff, penalties, goals and side assignment.
-There is no automatic referee or scoring detection.
+Select Auto referee to use automatic scoring and referee decisions without an external controller.
 Before receiving GameController data, HULKs defaults to the home side and opponents to away.
 Changing sides through GameController changes the robots' field interpretation; reposition robots with the gizmo or reset pose as needed.
 
@@ -263,3 +263,53 @@ LD_PRELOAD="$ORT_DYLIB_PATH${LD_PRELOAD:+:$LD_PRELOAD}" ./twix --simulator /hulk
 ```
 
 This is an environment-specific workaround, not a change to motion inference.
+
+## Automatic referee
+
+Select **Auto referee** before starting, then choose the HSL competition preset independently of the field location.
+The Small, Middle and Large presets are the upstream Advanced competition parameters, including player limits, durations and message budgets.
+External GameController remains the default for saved layouts and existing workflows.
+Automatic mode embeds the [HSL GameController core](https://github.com/RoboCup-HumanoidSoccerLeague/GameController/tree/39a617c8746708b7acc7df53b2a88252cd75250e) at revision `39a617c8746708b7acc7df53b2a88252cd75250e`.
+Its copied competition YAML files retain the upstream MIT license in `src/autoref/LICENSE.upstream`.
+The message crate's build requires libclang, as does the upstream build.
+
+The core owns match state, clocks, scores, penalty durations, delayed Playing packets, halftime and message accounting.
+Simulator decisions use the [HSL 2026 rules v1.1.1](https://github.com/RoboCup-HumanoidSoccerLeague/HSL-Rules/releases/tag/rules-2026-v1.1.1).
+The referee observes MuJoCo positions and contacts and submits validated actions to that core.
+It sends real UDP GameController packets through the same production message handlers and receives robot return traffic from both teams.
+Automatic mode uses private loopback ports and accepts state packets only from its embedded controller, so an external controller cannot take over the match.
+All match timers advance with simulation time and freeze when paused.
+An external controller continues using its own wall clock.
+
+Automatic mode creates one match ball and disables adding or deleting balls.
+Dragging it remains available for test setup; a drag does not count as a kick or a goal.
+The referee starts Ready, places the ball in Set and injects the existing ground-truth whistle output when starting play.
+Goals and whole-ball boundary crossings trigger kickoffs, kick-ins, corner kicks or goal kicks.
+Contacts identify the last touching team; ambiguous contact without a later clear touch produces a neutral dropped ball on an exit.
+Ordinary free kicks stop play, place the ball and resume without a kickoff whistle.
+Restart history preserves indirect-goal and second-touch restrictions after the core announces Ball Free.
+Local and global stuck situations, kickoff positioning, excess goal-area defenders, leaving the carpet and motion in Set or Stop have automatic checks.
+Positional and motion checks use a short grace period to accommodate message latency and settling.
+At halftime, the referee moves teams to the correct sidelines for the new ends and observes the full core break duration.
+
+Penalized robots acknowledge Penalized before physical removal, with a one-second fallback.
+The referee stands them outside their own penalty mark, avoids occupied slots, starts the core penalty timer after placement and releases them when that timer expires.
+They must walk back under their own control.
+Motion-in-Set penalties stay in place; sent-off robots remain removed.
+The **Referee** menu exposes score calls, stop/resume, dropped balls, whistles, restarts and penalties for the selected robot, plus a bounded decision log.
+Manual calls are applied on the next simulation step.
+Turning off automatic decisions preserves UDP transport and penalty handling for manual experiments.
+
+This is a deterministic match referee, not a complete interpretation of every discretionary offense.
+Pushing, deliberate handling, holding, incapability, advantage, kickoff retakes and penalty shootouts are not automatically judged.
+Use manual penalties and restart calls for these experiments; a manual pushing penalty does not also award its free kick.
+Judgments that depend on intent or a robot being pushed into an illegal position still require a human.
+
+Run the referee rule and private-UDP tests with `cargo test -p simulate autoref::tests`.
+With the motion models, MuJoCo and ONNX Runtime configured, the ignored roundtrip test starts two robots on each team, checks all return streams and delayed state packets, physically removes a penalized robot, checks pause timing and waits for penalty expiry.
+
+```sh
+for profile in motion_behavior filtering body_state_odometry localization; do
+  SIMULATOR_TEST_PROFILE="$profile" cargo test -p simulate automatic_referee_robot_roundtrip -- --ignored --nocapture
+done
+```

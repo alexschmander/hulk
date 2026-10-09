@@ -297,6 +297,7 @@ impl Viewport {
                 self.selected = pick(world, ray);
                 if let Some(entity) = self.selected
                     && world.get::<Ball>(entity).is_some()
+                    && world.resource::<crate::team::Team>().referee().is_none()
                 {
                     self.start_drag(world, entity, Handle::Ball, ray);
                 }
@@ -316,6 +317,7 @@ impl Viewport {
             && ui.input(|i| i.key_pressed(Key::Delete))
             && let Some(entity) = self.selected
             && world.get::<Ball>(entity).is_some()
+            && world.resource::<crate::team::Team>().referee().is_none()
         {
             self.finish_drag(world);
             world.despawn(entity);
