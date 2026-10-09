@@ -1,19 +1,19 @@
 //! One physical gamepad, routed to the selected robot with a fresh Start edge.
-use crate::{robotics::Configuration, team::Member};
+use crate::{
+    robotics::Configuration,
+    team::{Member, RobotId},
+};
 use color_eyre::Result;
 use ros_z::prelude::*;
 use std::{
     collections::BTreeMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU8, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use types::controller_input::{Button, ControllerInput};
 
 pub(crate) struct Controller {
-    selected: Arc<AtomicU8>,
+    selected: Arc<Mutex<Option<RobotId>>>,
     additions: tokio::sync::mpsc::UnboundedSender<Member>,
     task: tokio_util::task::AbortOnDropHandle<Result<()>>,
     runtime: tokio::runtime::Handle,
@@ -50,7 +50,7 @@ impl Controller {
         let reader = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
             controller_handler::run_boxed(source.clone()),
         ));
-        let selected = Arc::new(AtomicU8::new(1));
+        let selected = Arc::new(Mutex::new(Some(RobotId::FIRST)));
         let selection = selected.clone();
         let (additions, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         for member in members {
@@ -66,8 +66,8 @@ impl Controller {
                     member = receiver.recv() => {
                         let Some(member) = member else { break; };
                         let result: Result<Target> = async {
-                            let mut builder = ContextBuilder::default().with_namespace(crate::team::robot_namespace(member.number))
-                                .with_json("namespace", crate::team::transport_scope(member.number));
+                            let mut builder = ContextBuilder::default().with_namespace(crate::team::robot_namespace(member.id))
+                                .with_json("namespace", crate::team::transport_scope(member.id));
                             if let Some(router) = &router { builder = builder.with_router_endpoint(router)?; }
                             let context = Arc::new(builder.build().await?);
                             let node = context.create_node("simulator_gamepad").build().await?;
@@ -75,16 +75,16 @@ impl Controller {
                             let behavior = node.subscriber("behavior/blackboard").cache(1).build().await?;
                             Ok(Target { context, publisher, behavior, suppress_start: false })
                         }.await;
-                        targets.insert(member.number, result?);
+                        targets.insert(member.id, result?);
                     }
                     _ = timer.tick() => {
                         let input = input.get_after(ros_z::time::Clock::wallclock().now() - Duration::from_millis(250)).map(|v| v.as_ref().clone()).unwrap_or_default();
-                        let selected = selection.load(Ordering::Relaxed);
+                        let selected = *selection.lock().unwrap();
                         let fresh_start = gate.update(selected, &input);
                         for (&number, target) in &mut targets {
                             if !input.is_pressed(Button::Start) { target.suppress_start = false; }
-                            let mut output = if number == selected && gate.armed { input.clone() } else { ControllerInput::default() };
-                            if number == selected && gate.armed && fresh_start
+                            let mut output = if Some(number) == selected && gate.armed { input.clone() } else { ControllerInput::default() };
+                            if Some(number) == selected && gate.armed && fresh_start
                                 && target.behavior.get_latest().is_some_and(|state| state.remote_control_enabled) {
                                 // Re-enable input routing without toggling an already enabled robot off.
                                 target.suppress_start = true;
@@ -128,8 +128,8 @@ impl Controller {
         }
         self.failure.clone()
     }
-    pub fn select(&self, number: u8) {
-        self.selected.store(number, Ordering::Relaxed);
+    pub fn select(&self, id: Option<RobotId>) {
+        *self.selected.lock().unwrap() = id;
     }
     pub fn add(&self, member: Member) {
         let _ = self.additions.send(member);
@@ -144,13 +144,13 @@ impl Drop for Controller {
 }
 #[derive(Default)]
 struct Gate {
-    selected: u8,
+    selected: Option<RobotId>,
     armed: bool,
     last_start: bool,
     start_edge: bool,
 }
 impl Gate {
-    fn update(&mut self, selected: u8, input: &ControllerInput) -> bool {
+    fn update(&mut self, selected: Option<RobotId>, input: &ControllerInput) -> bool {
         let start = input.connected && input.is_pressed(Button::Start);
         if selected != self.selected || !input.connected {
             self.selected = selected;
@@ -176,7 +176,13 @@ mod tests {
             connected: true,
             ..Default::default()
         };
-        gate.update(1, &input);
+        gate.update(
+            Some(RobotId {
+                team: crate::TeamId::Hulks,
+                number: 1,
+            }),
+            &input,
+        );
         input
             .buttons
             .push(types::controller_input::ControllerButton {
@@ -184,12 +190,30 @@ mod tests {
                 pressed: true,
                 value: 1.0,
             });
-        assert!(gate.update(1, &input));
+        assert!(gate.update(
+            Some(RobotId {
+                team: crate::TeamId::Hulks,
+                number: 1
+            }),
+            &input
+        ));
         assert!(gate.armed);
-        assert!(!gate.update(2, &input));
+        assert!(!gate.update(
+            Some(RobotId {
+                team: crate::TeamId::Hulks,
+                number: 2
+            }),
+            &input
+        ));
         assert!(!gate.armed);
         input.buttons.clear();
-        gate.update(2, &input);
+        gate.update(
+            Some(RobotId {
+                team: crate::TeamId::Hulks,
+                number: 2,
+            }),
+            &input,
+        );
         input
             .buttons
             .push(types::controller_input::ControllerButton {
@@ -197,8 +221,50 @@ mod tests {
                 pressed: true,
                 value: 1.0,
             });
-        assert!(gate.update(2, &input));
-        gate.update(2, &ControllerInput::default());
+        assert!(gate.update(
+            Some(RobotId {
+                team: crate::TeamId::Hulks,
+                number: 2
+            }),
+            &input
+        ));
+        gate.update(
+            Some(RobotId {
+                team: crate::TeamId::Hulks,
+                number: 2,
+            }),
+            &ControllerInput::default(),
+        );
         assert!(!gate.armed);
+        input.buttons.clear();
+        let own = Some(RobotId {
+            team: crate::TeamId::Hulks,
+            number: 1,
+        });
+        let opponent = Some(RobotId {
+            team: crate::TeamId::Opponents,
+            number: 1,
+        });
+        gate.update(own, &input);
+        input
+            .buttons
+            .push(types::controller_input::ControllerButton {
+                name: Button::Start,
+                pressed: true,
+                value: 1.0,
+            });
+        assert!(gate.update(own, &input));
+        assert!(!gate.update(opponent, &input));
+        assert!(!gate.armed);
+        input.buttons.clear();
+        gate.update(opponent, &input);
+        input
+            .buttons
+            .push(types::controller_input::ControllerButton {
+                name: Button::Start,
+                pressed: true,
+                value: 1.0,
+            });
+        assert!(gate.update(opponent, &input));
     }
 }

@@ -29,6 +29,7 @@ mod enabled {
         parameter_root: PathBuf,
         model_directory: PathBuf,
         robot_count: u8,
+        opponent_count: u8,
         location: String,
         profile: Profile,
         controller: ControllerSource,
@@ -41,6 +42,7 @@ mod enabled {
                 model_directory: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../../etc/neural_networks"),
                 robot_count: 1,
+                opponent_count: 0,
                 location: "incheon_small".into(),
                 profile: Profile::default(),
                 controller: ControllerSource::default(),
@@ -72,7 +74,7 @@ mod enabled {
         }
     }
     impl SimulatorPanel {
-        pub fn select_robot(&mut self, number: u8) {
+        pub fn select_robot(&mut self, number: Option<simulate::RobotId>) {
             if let Some(simulator) = &mut self.simulator {
                 simulator.select_robot(number);
             }
@@ -100,11 +102,11 @@ mod enabled {
 
         fn header_ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
             let Some(simulator) = &mut self.simulator else {
-                ui.weak("Simulate a HULKs team with the real robotics nodes.");
+                ui.weak("Simulate robot teams with the real robotics nodes.");
                 return;
             };
-            if let Some(number) = simulate::robot_number(&context.backend.namespace()) {
-                simulator.select_robot(number);
+            if let Some(number) = simulate::robot_id(&context.backend.namespace()) {
+                simulator.select_robot(Some(number));
             }
             if simulator.header(ui) {
                 self.simulator = None;
@@ -142,9 +144,9 @@ mod enabled {
                                 data.get_temp::<RenderState>(egui::Id::new(RENDER_STATE_ID))
                             });
                             if let Some(renderer) = renderer {
-                                if let Err(error) =
-                                    context.backend.set_namespace(simulate::robot_namespace(1))
-                                {
+                                if let Err(error) = context.backend.set_namespace(
+                                    simulate::robot_namespace(simulate::RobotId::FIRST),
+                                ) {
                                     self.error = Some(format!("{error:#}"));
                                 }
                                 self.simulator = Some(Simulator::new(prepared, renderer));
@@ -193,7 +195,7 @@ mod enabled {
         fn setup_ui(&mut self, ui: &mut Ui, context: &PanelUiContext<'_>) {
             ui.add_enabled_ui(self.pending.is_none(), |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
-                ui.label(RichText::new("Robots").strong());
+                ui.label(RichText::new("HULKs · team 24").strong());
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for count in 1..=5 {
@@ -208,6 +210,16 @@ mod enabled {
                             ));
                         if response.clicked() {
                             self.settings.robot_count = count;
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                ui.label(RichText::new("Opponents · team 5").strong());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for count in 0..=5 {
+                        if widgets::segment(ui, self.settings.opponent_count == count, &count.to_string()).clicked() {
+                            self.settings.opponent_count = count;
                         }
                     }
                 });
@@ -326,7 +338,13 @@ mod enabled {
             let preview = self.preview.as_ref().unwrap();
             match &preview.field {
                 Ok(field) => {
-                    widgets::field_preview(ui, field, self.settings.robot_count, max_height);
+                    widgets::field_preview(
+                        ui,
+                        field,
+                        self.settings.robot_count,
+                        self.settings.opponent_count,
+                        max_height,
+                    );
                     ui.add_space(4.0);
                     ui.weak(format!(
                         "{}, {} × {} m",
@@ -359,8 +377,9 @@ mod enabled {
             let configuration = Configuration {
                 parameter_root: self.settings.parameter_root.clone(),
                 model_directory: self.settings.model_directory.clone(),
-                namespace: simulate::robot_namespace(1),
+                namespace: simulate::robot_namespace(simulate::RobotId::FIRST),
                 robot_count: self.settings.robot_count,
+                opponent_count: self.settings.opponent_count,
                 location: Some(self.settings.location.clone()),
                 field_configuration: Some(field),
                 router: context.backend.router().map(str::to_owned),
