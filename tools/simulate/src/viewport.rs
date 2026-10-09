@@ -1,4 +1,5 @@
 use bevy::{
+    camera::primitives::Aabb,
     camera_controller::pan_orbit_camera::prelude::PanOrbitCamera,
     ecs::system::SystemState,
     picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
@@ -12,7 +13,7 @@ use std::sync::{
 
 use crate::{
     bevy_mujoco::{SharedPhysics, SimulationMode},
-    scene::{ball::Ball, object::ObjectPart},
+    scene::{ball::Ball, object::ObjectPart, robot::RobotHead},
     simulation::ControlledRobot,
 };
 
@@ -346,26 +347,26 @@ impl Viewport {
     }
     fn paint_scene(&self, ui: &Ui, rect: Rect, world: &mut World, selected: u8) {
         if let Some(view) = CameraView::new(world, rect) {
-            let team = world.resource::<crate::team::Team>();
-            let physics = world.resource::<SharedPhysics>().lock();
-            for member in team.members() {
-                let Some(entity) = member.entity else {
-                    continue;
-                };
-                let Some(body) = physics
-                    .data()
-                    .body(&format!("object_{}_Head_2", entity.to_bits()))
+            let members = world.resource::<crate::team::Team>().members();
+            let mut heads =
+                world.query_filtered::<(&ObjectPart, &Aabb, &GlobalTransform), With<RobotHead>>();
+            let label_size = egui::vec2(30.0, 28.0);
+            for (part, bounds, transform) in heads.iter(world) {
+                let Some(member) = members.iter().find(|member| member.entity == Some(part.0))
                 else {
                     continue;
                 };
-                let p = body.view(physics.data()).xpos;
-                let point = Vec3::new(p[0] as f32, p[2] as f32 + 0.22, -p[1] as f32);
-                if let Some(position) = view.project(point) {
+                if let Some(head) = view.project_bounds(bounds, transform) {
+                    // Keep a four-point gap below the selection rim, regardless of
+                    // camera distance, viewing angle, or the robot's head pose.
+                    let clearance = 4.0 + if member.number == selected { 5.0 } else { 0.0 };
+                    let position =
+                        egui::pos2(head.center().x, head.top() - clearance - label_size.y / 2.0);
                     let color = member
                         .io
                         .led_color()
                         .map_or(Color32::GRAY, |led| Color32::from_rgb(led.r, led.g, led.b));
-                    let rect = Rect::from_center_size(position, egui::vec2(30.0, 28.0));
+                    let rect = Rect::from_center_size(position, label_size);
                     let painter = ui
                         .painter()
                         .with_clip_rect(rect.intersect(view.rect).expand(5.0));
@@ -500,6 +501,20 @@ impl CameraView {
             self.pose.translation,
             Dir3::new(self.pose.rotation * Vec3::new(x, y, -1.0)).unwrap(),
         )
+    }
+    fn project_bounds(&self, bounds: &Aabb, transform: &GlobalTransform) -> Option<Rect> {
+        let mut rect = Rect::NOTHING;
+        let min = bounds.min();
+        let max = bounds.max();
+        for x in [min.x, max.x] {
+            for y in [min.y, max.y] {
+                for z in [min.z, max.z] {
+                    let point = transform.transform_point(Vec3::new(x, y, z));
+                    rect.extend_with(self.project(point)?);
+                }
+            }
+        }
+        Some(rect)
     }
     fn project(&self, point: Vec3) -> Option<Pos2> {
         let local = self.pose.rotation.inverse() * (point - self.pose.translation);
