@@ -1,6 +1,7 @@
 use super::*;
+use calls::Call;
 use engine::Effect;
-use game_controller_core::{action::VAction, actions::*, types::*};
+use game_controller_core::types::*;
 use std::time::Duration;
 
 fn fixture() -> (Engine, Snapshot) {
@@ -177,11 +178,11 @@ fn penalty_placement_starts_timer_then_releases_without_teleporting_back() {
     playing(&mut e, &s);
     for team in crate::TeamId::ALL {
         for number in [1, 2] {
-            e.commands.push(VAction::Penalize(Penalize {
-                side: side(team),
-                player: PlayerNumber::new(number),
-                call: PenaltyCall::RequestForPickUp,
-            }));
+            e.call(Call::Penalize(
+                id(team, number),
+                PenaltyCall::RequestForPickUp,
+            ))
+            .unwrap();
         }
     }
     step(&mut e, &s, 0.01);
@@ -242,21 +243,20 @@ fn motion_in_set_stays_in_place_and_clock_freezes_on_brief_stop() {
     step(&mut e, &s, 0.01);
     step(&mut e, &s, 45.0);
     e.enabled = false;
-    e.commands.push(VAction::Penalize(Penalize {
-        side: Side::Home,
-        player: PlayerNumber::new(1),
-        call: PenaltyCall::MotionInSet,
-    }));
+    e.call(Call::Penalize(
+        id(crate::TeamId::Hulks, 1),
+        PenaltyCall::MotionInSet,
+    ))
+    .unwrap();
     let effects = step(&mut e, &s, 0.1);
     assert!(
         !effects
             .iter()
             .any(|effect| matches!(effect, Effect::Robot(..)))
     );
-    e.manual_whistle = true;
+    e.call(Call::Whistle).unwrap();
     step(&mut e, &s, 0.1);
-    e.commands
-        .push(VAction::StopPlay(StopPlay { resume: false }));
+    e.call(Call::StopPlay).unwrap();
     step(&mut e, &s, 0.1);
     let remaining = e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)]
         .penalty_timer
@@ -292,7 +292,8 @@ fn indirect_goal_and_second_touch_restrictions_survive_ball_free() {
     for second in [false, true] {
         let (mut e, mut s) = fixture();
         playing(&mut e, &s);
-        e.restarts.push((SetPlay::ThrowIn, Side::Home));
+        e.call(Call::Restart(crate::TeamId::Hulks, SetPlay::ThrowIn))
+            .unwrap();
         step(&mut e, &s, 0.01);
         let placement = step(&mut e, &s, 0.6)
             .into_iter()
@@ -501,11 +502,7 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
         e.enabled = false;
         // Clear any positioning penalties before the targeted handler check.
         for member in &members {
-            e.commands.push(VAction::Unpenalize(Unpenalize {
-                side: side(member.id.team),
-                player: PlayerNumber::new(member.id.number),
-                force: true,
-            }));
+            let _ = e.call(Call::Release(member.id));
         }
     }
     thread::sleep(Duration::from_millis(100));
@@ -518,12 +515,11 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
         .engine
         .lock()
         .unwrap()
-        .commands
-        .push(VAction::Penalize(Penalize {
-            side: Side::Home,
-            player: PlayerNumber::new(1),
-            call: PenaltyCall::RequestForPickUp,
-        }));
+        .call(Call::Penalize(
+            id(crate::TeamId::Hulks, 1),
+            PenaltyCall::RequestForPickUp,
+        ))
+        .unwrap();
     wait("sideline", &mut worker, &mut || {
         physics
             .lock()
@@ -777,7 +773,8 @@ fn manual_restart_still_places_ball_and_sent_off_player_stays_removed() {
     let (mut e, mut s) = fixture();
     playing(&mut e, &s);
     e.enabled = false;
-    e.restarts.push((SetPlay::CornerKick, Side::Home));
+    e.call(Call::Restart(crate::TeamId::Hulks, SetPlay::CornerKick))
+        .unwrap();
     step(&mut e, &s, 0.01);
     assert!(
         step(&mut e, &s, 0.6)
@@ -786,19 +783,19 @@ fn manual_restart_still_places_ball_and_sent_off_player_stays_removed() {
     );
     step(&mut e, &s, 0.4);
     assert!(!e.core.get_game(false).stopped);
-    e.commands.push(VAction::Penalize(Penalize {
-        side: Side::Home,
-        player: PlayerNumber::new(1),
-        call: PenaltyCall::RequestForPickUp,
-    }));
+    e.call(Call::Penalize(
+        id(crate::TeamId::Hulks, 1),
+        PenaltyCall::RequestForPickUp,
+    ))
+    .unwrap();
     s.robots[0].penalized = true;
     step(&mut e, &s, 0.01);
     step(&mut e, &s, 0.4);
-    e.commands.push(VAction::Penalize(Penalize {
-        side: Side::Home,
-        player: PlayerNumber::new(1),
-        call: PenaltyCall::SendOff,
-    }));
+    e.call(Call::Penalize(
+        id(crate::TeamId::Hulks, 1),
+        PenaltyCall::SendOff,
+    ))
+    .unwrap();
     assert!(
         step(&mut e, &s, 0.01)
             .iter()
@@ -809,4 +806,88 @@ fn manual_restart_still_places_ball_and_sent_off_player_stays_removed() {
         e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
         Penalty::SentOff
     );
+}
+#[test]
+fn operator_calls_apply_immediately_and_follow_core_legality() {
+    let (mut e, s) = fixture();
+    step(&mut e, &s, 0.01);
+    e.enabled = false;
+    assert_eq!(e.core.get_game(false).state, State::Ready);
+    assert!(!e.allowed(Call::Goal(crate::TeamId::Hulks)));
+    assert!(e.call(Call::Goal(crate::TeamId::Hulks)).is_err());
+    let refused = e.events.back().unwrap();
+    assert!(!refused.accepted);
+    assert_eq!(refused.origin, engine::Origin::Operator);
+    assert_eq!(Call::next(e.core.get_game(false)), Some(Call::Set));
+    // No simulation step between call and state: calls also work while paused.
+    e.call(Call::Set).unwrap();
+    assert_eq!(e.core.get_game(false).state, State::Set);
+    assert!(
+        step(&mut e, &s, 0.01)
+            .iter()
+            .any(|v| matches!(v, Effect::Ball([0.0, 0.0])))
+    );
+    e.call(Call::Whistle).unwrap();
+    assert_eq!(e.core.get_game(false).state, State::Playing);
+    assert!(step(&mut e, &s, 0.01).contains(&Effect::Whistle));
+    assert_eq!(Call::next(e.core.get_game(false)), Some(Call::BallFree));
+    e.call(Call::BallFree).unwrap();
+    assert_eq!(e.core.get_game(false).set_play, SetPlay::NoSetPlay);
+    assert_eq!(Call::next(e.core.get_game(false)), None);
+    e.call(Call::StopPlay).unwrap();
+    assert!(e.call(Call::StopPlay).is_err());
+    e.call(Call::ResumePlay).unwrap();
+    assert!(
+        e.events
+            .iter()
+            .filter(|event| event.origin == engine::Origin::Operator && event.accepted)
+            .all(|event| !event.text.contains(['{', '(']))
+    );
+}
+#[test]
+fn penalty_kick_is_placed_on_the_mark_without_kickoff_positioning() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    s.robots[0].position = [2.5, 0.5, 0.65];
+    s.robots[0].feet = vec![[2.5, 0.5]];
+    e.call(Call::Restart(crate::TeamId::Hulks, SetPlay::PenaltyKick))
+        .unwrap();
+    assert_eq!(e.core.get_game(false).state, State::Ready);
+    let effects = step(&mut e, &s, 45.0);
+    assert_eq!(e.core.get_game(false).state, State::Set);
+    let ball = effects
+        .iter()
+        .find_map(|v| {
+            if let Effect::Ball(p) = v {
+                Some(*p)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert!(ball[0] > 2.0 && ball[1] == 0.0);
+    step(&mut e, &s, 1.5);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::NoPenalty
+    );
+}
+#[test]
+fn manual_half_end_and_timeout_resume_through_kickoff() {
+    let (mut e, s) = fixture();
+    playing(&mut e, &s);
+    e.call(Call::FinishHalf).unwrap();
+    assert!(step(&mut e, &s, 0.01).contains(&Effect::Whistle));
+    assert_eq!(Call::next(e.core.get_game(false)), Some(Call::SecondHalf));
+    e.call(Call::SecondHalf).unwrap();
+    step(&mut e, &s, 0.01);
+    assert_eq!(e.core.get_game(false).phase, Phase::SecondHalf);
+    assert_eq!(e.core.get_game(false).state, State::Ready);
+    assert_eq!(e.core.get_game(false).kicking_side, Some(Side::Away));
+    e.call(Call::RefereeTimeout).unwrap();
+    assert_eq!(e.core.get_game(false).state, State::Timeout);
+    step(&mut e, &s, 599.0);
+    assert_eq!(e.core.get_game(false).state, State::Timeout);
+    step(&mut e, &s, 1.1);
+    assert_eq!(e.core.get_game(false).state, State::Ready);
 }

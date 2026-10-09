@@ -60,12 +60,15 @@ Placement follows the known GameController field side, defaulting to Home for HU
 A running match continues during startup; a paused match keeps the existing clock and poses frozen.
 Reset pose returns the selected robot to its original spawn slot, mirrored if GameController has changed its field side.
 Floating player numbers use each robot's actual commanded LED color; the selected player's number is ringed.
+Click a number to select that robot in Twix.
 Startup uses the real button bridge, handler and safe-pose check to pass through Prepare to Initial.
 While running, the panel header is the toolbar.
-Its first row controls the whole simulation: **Run**/**Pause**, simulation time, **Whistle**, **Add ball**, **Add robot** and **Stop simulator**.
-Its second row controls the selected player: LED, **F1**, **Stand**, **Walk**, **Reset pose** and the fly camera.
-Narrow panels show icons for the scene actions; hover them for their names.
+With Auto referee, its first row is the match: score, half, clock, state, active restart, **Stop play**, the next match step and the **Referee desk** toggle.
+The simulation row follows: **Run**/**Pause**, simulation time, **Add robot** and **Stop simulator**; External mode also offers **Whistle** and **Add ball**.
+The last row controls the selected player: LED, **F1**, **Stand**, **Walk**, **Reset pose**, the fly camera and, with Auto referee, its penalty and penalty calls.
+Narrow panels show icons for the scene and match actions; hover them for their names.
 Press **Run** to advance physics.
+The scene marks a paused simulation.
 If GameController is already running, its game state takes over.
 
 **F1**, **Stand** and **Walk** emit CDR `ButtonEventMsg` packets on `rt/button_event` within the simulator's global Zenoh scope.
@@ -296,13 +299,25 @@ Penalized robots acknowledge Penalized before physical removal, with a one-secon
 The referee stands them outside their own penalty mark, avoids occupied slots, starts the core penalty timer after placement and releases them when that timer expires.
 They must walk back under their own control.
 Motion-in-Set penalties stay in place; sent-off robots remain removed.
-The running panel shows team scores, the current half, remaining match or halftime time, game state and active restart.
-The **Referee** menu exposes score calls, stop/resume, dropped balls, whistles, restarts and penalties for the selected robot, plus a bounded decision log.
-Manual calls are applied on the next simulation step.
-Turning off automatic decisions preserves UDP transport and penalty handling for manual experiments.
+The running panel always shows team scores, the current half, remaining match or halftime time, game state and active restart.
+**Pause** freezes physics, robotics and every clock.
+**Stop play** is a referee call: the match halts while the simulation continues, and robots must stand still.
+The next-step button follows the GameController sequence: **Ready**, **Set**, **Whistle**, **Ball free** and **Second half**.
+The **Referee desk** groups match calls, each team's goal, restarts and timeout, and each player's penalties beside a decision log.
+It docks beside the scene, or below it in narrow panels.
+Calls the core does not accept in the current state stay visible but disabled, and their tooltip explains why.
+Click a player's badge to select that robot in Twix.
+While the pointer is over the panel, **Shift+Space** stops or resumes play, **N** takes the next step and **R** toggles the desk.
+Calls apply immediately, also while paused; ball placement, whistles and robot handling follow once the simulation runs.
+Accepted calls are confirmed over the scene and marked in the log, which also lists automatic decisions and actions the core did not apply.
+There is no undo, because undoing core state cannot reverse physical ball and robot handling.
+**Penalty kick** places the ball on the mark in front of the defending team's goal once Ready ends.
+When a timeout expires, automatic calls start the next kickoff.
+Turning off **Automatic calls** preserves UDP transport and penalty handling for manual experiments.
 
 This is a deterministic match referee, not a complete interpretation of every discretionary offense.
-Pushing, deliberate handling, holding, incapability, advantage, kickoff retakes and penalty shootouts are not automatically judged.
+Pushing, deliberate handling, holding, incapability, advantage, kickoff retakes and penalty-kick positioning are not automatically judged.
+Extra time and penalty shootouts are not offered.
 Use manual penalties and restart calls for these experiments; a manual pushing penalty does not also award its free kick.
 Judgments that depend on intent or a robot being pushed into an illegal position still require a human.
 
