@@ -43,6 +43,9 @@ pub struct Viewport {
     warp_position: Option<Pos2>,
     drag: Option<Drag>,
     error: Option<String>,
+    /// Player labels painted last frame; clicking one selects that robot in Twix.
+    labels: Vec<(Rect, RobotId)>,
+    clicked_label: Option<RobotId>,
 }
 // The panel may disappear while the mouse is captured. Release it even when this
 // viewport no longer receives ui() calls; the plugin keeps only a weak reference.
@@ -180,6 +183,9 @@ impl Viewport {
             self.capture(ui.ctx(), self.captured.is_none());
         }
     }
+    pub fn captured(&self) -> bool {
+        self.captured.is_some()
+    }
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -272,7 +278,15 @@ impl Viewport {
             return;
         };
         let ray = view.ray(pointer);
-        if hovered && ui.input(|i| i.pointer.primary_pressed()) {
+        let label = self
+            .labels
+            .iter()
+            .rev()
+            .find(|(label, _)| label.contains(pointer))
+            .map(|(_, id)| *id);
+        if hovered && ui.input(|i| i.pointer.primary_pressed()) && label.is_some() {
+            self.clicked_label = label;
+        } else if hovered && ui.input(|i| i.pointer.primary_pressed()) {
             let handle = self.selected.and_then(|entity| {
                 world.get::<ControlledRobot>(entity)?;
                 let pose = world
@@ -342,13 +356,18 @@ impl Viewport {
             world.resource::<SharedPhysics>().lock().mode = drag.resume;
         }
     }
-    pub fn paint(&self, ui: &Ui, rect: Rect, world: &mut World, selected: Option<RobotId>) {
+    /// A robot whose scene label was clicked, for Twix to select its namespace.
+    pub fn take_selection(&mut self) -> Option<RobotId> {
+        self.clicked_label.take()
+    }
+    pub fn paint(&mut self, ui: &Ui, rect: Rect, world: &mut World, selected: Option<RobotId>) {
         self.paint_scene(ui, rect, world, selected);
         if self.captured.is_some() {
             capture_legend(ui, rect);
         }
     }
-    fn paint_scene(&self, ui: &Ui, rect: Rect, world: &mut World, selected: Option<RobotId>) {
+    fn paint_scene(&mut self, ui: &Ui, rect: Rect, world: &mut World, selected: Option<RobotId>) {
+        self.labels.clear();
         if let Some(view) = CameraView::new(world, rect) {
             let members = world.resource::<crate::team::Team>().members();
             let mut heads =
@@ -386,8 +405,16 @@ impl Viewport {
                             egui::StrokeKind::Outside,
                         );
                     }
-                    ui.interact(rect, ui.id().with(member.id), egui::Sense::hover())
-                        .on_hover_text(crate::robot_namespace(member.id));
+                    let visible = rect.intersect(view.rect);
+                    if visible.is_positive() && self.captured.is_none() {
+                        self.labels.push((visible, member.id));
+                        ui.interact(visible, ui.id().with(member.id), egui::Sense::hover())
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!(
+                                "Select {} in Twix",
+                                crate::robot_namespace(member.id)
+                            ));
+                    }
                     painter.rect_filled(rect, 5.0, color);
                     // A dark rim keeps light LED colors legible against field lines and goals.
                     painter.rect_stroke(
@@ -406,15 +433,7 @@ impl Viewport {
                     painter.text(
                         position,
                         egui::Align2::CENTER_CENTER,
-                        format!(
-                            "{}{}",
-                            if member.id.team == crate::TeamId::Hulks {
-                                "H"
-                            } else {
-                                "O"
-                            },
-                            member.id.number
-                        ),
+                        crate::autoref::short(member.id),
                         egui::FontId::proportional(20.0),
                         text,
                     );
