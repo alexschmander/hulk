@@ -16,7 +16,7 @@ The panel starts a configured team and adds controlled robots and balls with too
 | Pause, reset and object placement | Simulator toolbar; ball dragging and robot translation/rotation gizmo |
 | Walk/kick arrows and camera | Simulator scene |
 | Reset robot and stack | Reset pose; Stop/Start for a new stack |
-| Profile and gamepad source | Simulator configuration before Start |
+| Profile | Simulator configuration before Start |
 | Whistle | Simulator toolbar publishes detections through the real whistle filter |
 | Physical F1/Stand/Walk buttons | Simulator toolbar, emitting raw `rt/button_event` through the unchanged bridge and handler |
 | Track first ball and fill kick ground truth | Removed convenience commands; not provided by Twix's parameter editor |

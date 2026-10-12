@@ -389,7 +389,6 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
             .ok()
             .map(|s| serde_json::from_value(serde_json::Value::String(s)).unwrap())
             .unwrap_or(crate::Profile::MotionBehavior),
-        controller: crate::ControllerSource::External,
     };
     let localization = config.profile == crate::Profile::Localization;
     let team = runtime
