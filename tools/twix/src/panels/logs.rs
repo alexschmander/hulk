@@ -5,9 +5,9 @@ use crate::{
 };
 use eframe::egui::{self, RichText, Ui};
 use ros_z::time::Time;
-use ros_z_debug::{DynamicTopicObservation, RetentionPolicy, TopicObservationUpdateReceiver};
+use ros_z_debug::{DynamicTopicObservation, ObservationPolicy, TopicObservationUpdateReceiver};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 pub struct LogsPanel {
     backend: Arc<RobotBackend>,
@@ -33,7 +33,17 @@ impl LogsPanel {
         match context.backend.observer().observe_dynamic("logs") {
             Ok(builder) => {
                 let observation = builder
-                    .retention(RetentionPolicy::time_window(Duration::from_secs(86400)).unwrap())
+                    .policy(
+                        ObservationPolicy::time_window(Duration::from_secs(86400))
+                            .unwrap()
+                            .with_subscriber_qos(ros_z::qos::QosProfile {
+                                durability: ros_z::qos::QosDurability::TransientLocal,
+                                history: ros_z::qos::QosHistory::KeepLast(
+                                    NonZeroUsize::new(4096).unwrap(),
+                                ),
+                                ..Default::default()
+                            }),
+                    )
                     .spawn();
                 self.updates = observation.subscribe_updates().ok();
                 self.repaint = Some(observation.repaint_on_updates(&context));
@@ -53,6 +63,26 @@ fn timestamp(nanoseconds: i64) -> String {
         milliseconds.div_euclid(1000).rem_euclid(60),
         milliseconds.rem_euclid(1000)
     )
+}
+fn message_with_fields(record: &Value) -> String {
+    let mut message = record["message"].as_str().unwrap_or_default().to_owned();
+    let fields = record["fields"].as_str().unwrap_or_default();
+    if let Ok(Value::Object(fields)) = serde_json::from_str(fields) {
+        for (name, value) in fields {
+            message.push_str("  ");
+            message.push_str(&name);
+            message.push('=');
+            if let Some(value) = value.as_str() {
+                message.push_str(value);
+            } else {
+                message.push_str(&value.to_string());
+            }
+        }
+    } else if !fields.is_empty() {
+        message.push_str("  ");
+        message.push_str(fields);
+    }
+    message
 }
 fn level_name(level: u8) -> &'static str {
     match level {
@@ -179,10 +209,7 @@ impl Panel for LogsPanel {
                             "{time} {:5} {}  {}",
                             level_name(level),
                             record["target"].as_str().unwrap_or_default(),
-                            record["message"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .replace('\n', " ⏎ ")
+                            message_with_fields(record).replace('\n', " ⏎ ")
                         );
                         ui.add(
                             egui::Label::new(RichText::new(text).monospace().color(color))
@@ -190,12 +217,11 @@ impl Panel for LogsPanel {
                                 .extend(),
                         )
                         .on_hover_text(format!(
-                            "Simulation time: {} ns\nWall time: {} ({} ns)\n{}\n{}",
+                            "Simulation time: {} ns\nWall time: {} ({} ns)\n{}",
                             record["simulation_time"],
                             timestamp(record["wall_time"].as_i64().unwrap_or_default()),
                             record["wall_time"],
-                            record["message"].as_str().unwrap_or_default(),
-                            record["fields"].as_str().unwrap_or_default()
+                            message_with_fields(record)
                         ));
                     }
                 },
@@ -218,8 +244,32 @@ mod tests {
         assert!(matches(&debug, 5, "motion"));
         assert!(!matches(&error, 5, "localization"));
     }
+    #[test]
+    fn displayed_message_includes_structured_fields_without_truncation() {
+        let record = json!({
+            "message": "motion command changed",
+            "fields": json!({
+                "motion_command": "Walk { forward: 0.25, left: 0.0 }",
+                "motion_type": "Walk",
+                "previous_motion_type": "Stand"
+            }).to_string()
+        });
+        assert_eq!(
+            message_with_fields(&record),
+            "motion command changed  motion_command=Walk { forward: 0.25, left: 0.0 }  motion_type=Walk  previous_motion_type=Stand"
+        );
+        assert_eq!(
+            message_with_fields(&json!({"message": "plain", "fields": "{}"})),
+            "plain"
+        );
+        assert_eq!(
+            message_with_fields(&json!({"message": "plain", "fields": "legacy details"})),
+            "plain  legacy details"
+        );
+    }
     #[derive(Clone, serde::Serialize, serde::Deserialize, ros_z::Message)]
     struct TestLog {
+        sequence: u64,
         level: u8,
         target: String,
         message: String,
@@ -229,21 +279,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn viewer_only_shows_the_connected_namespace_and_clears_on_switch() {
+    async fn viewer_replays_local_history_and_clears_on_namespace_switch() {
+        check_history_and_namespace(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn viewer_replays_remote_history_and_clears_on_namespace_switch() {
+        check_history_and_namespace(true).await;
+    }
+
+    async fn check_history_and_namespace(remote: bool) {
+        let scope = format!("logs_test_{}", uuid::Uuid::new_v4().simple());
+        let robot_context = if remote {
+            Some(
+                ros_z::context::ContextBuilder::default()
+                    .with_json("namespace", &scope)
+                    .with_mode("router")
+                    .disable_multicast_scouting()
+                    .with_connect_endpoints(std::iter::empty::<&str>())
+                    .with_listen_endpoints(["tcp/127.0.0.1:0"])
+                    .build()
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let router = if let Some(context) = &robot_context {
+            Some(context.session().info().locators().await[0].to_string())
+        } else {
+            None
+        };
         let backend = Arc::new(
-            RobotBackend::new(
+            RobotBackend::new_scoped(
                 tokio::runtime::Handle::current(),
-                None,
+                router,
                 "/log_test_a".into(),
+                Some(scope),
             )
             .await
             .unwrap(),
         );
-        let node = backend.node();
+        let node = if let Some(context) = &robot_context {
+            Arc::new(context.create_node("robot_logs").build().await.unwrap())
+        } else {
+            backend.node()
+        };
         let a = node
             .publisher::<TestLog>("/log_test_a/logs")
             .qos(ros_z::qos::QosProfile {
                 durability: ros_z::qos::QosDurability::TransientLocal,
+                history: ros_z::qos::QosHistory::KeepLast(
+                    std::num::NonZeroUsize::new(512).unwrap(),
+                ),
                 ..Default::default()
             })
             .build()
@@ -253,23 +341,32 @@ mod tests {
             .publisher::<TestLog>("/log_test_b/logs")
             .qos(ros_z::qos::QosProfile {
                 durability: ros_z::qos::QosDurability::TransientLocal,
+                history: ros_z::qos::QosHistory::KeepLast(
+                    std::num::NonZeroUsize::new(512).unwrap(),
+                ),
                 ..Default::default()
             })
             .build()
             .await
             .unwrap();
         for (publisher, message) in [(&a, "robot a"), (&b, "robot b")] {
-            publisher
-                .publish(&TestLog {
-                    level: 3,
-                    target: "motion".into(),
-                    message: message.into(),
-                    fields: "{}".into(),
-                    simulation_time: 123,
-                    wall_time: 456,
-                })
-                .await
-                .unwrap();
+            for sequence in 0..512 {
+                publisher
+                    .publish_with_source_time(
+                        &TestLog {
+                            sequence,
+                            level: 3,
+                            target: "motion".into(),
+                            message: message.into(),
+                            fields: "{}".into(),
+                            simulation_time: 123,
+                            wall_time: 456,
+                        },
+                        Time::from_nanos(123),
+                    )
+                    .await
+                    .unwrap();
+            }
         }
         let egui = egui::Context::default();
         let mut panel = LogsPanel::new(PanelCreationContext {
@@ -298,12 +395,16 @@ mod tests {
                         .all(|record| record["message"] == expected),
                     "old namespace leaked into viewer"
                 );
-                if !panel.records.is_empty() {
+                if panel.records.len() == 512 {
+                    assert_eq!(panel.records.first().unwrap()["sequence"], 0);
+                    assert_eq!(panel.records.last().unwrap()["sequence"], 511);
                     break;
                 }
                 assert!(
                     started.elapsed() < Duration::from_secs(5),
-                    "no logs for {namespace}"
+                    "only {} retained logs for {namespace}: {:?}",
+                    panel.records.len(),
+                    panel.observation.as_ref().unwrap().status()
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
