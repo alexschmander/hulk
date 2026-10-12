@@ -753,3 +753,57 @@ mod tests {
         Ok(())
     }
 }
+
+// Run the entire runtime on another OS thread so a synchronous transport deadlock
+// fails the test deadline instead of hanging Tokio's shutdown inside the test.
+#[test]
+fn transient_local_replays_a_large_local_history_without_blocking() {
+    let (finished, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let context = ContextBuilder::default()
+                .disable_multicast_scouting()
+                .with_listen_endpoints(std::iter::empty::<&str>())
+                .with_connect_endpoints(std::iter::empty::<&str>())
+                .build()
+                .await
+                .unwrap();
+            let node = context.create_node("large_history").build().await.unwrap();
+            let qos = QosProfile {
+                durability: QosDurability::TransientLocal,
+                history: QosHistory::KeepLast(NonZeroUsize::new(512).unwrap()),
+                ..Default::default()
+            };
+            let publisher = node
+                .publisher::<u64>("logs")
+                .qos(qos)
+                .build()
+                .await
+                .unwrap();
+            for sequence in 0..512 {
+                publisher.publish(&sequence).await.unwrap();
+            }
+            let subscriber = node
+                .subscriber::<u64>("logs")
+                .qos(qos)
+                .build()
+                .await
+                .unwrap();
+            for sequence in 0..512 {
+                assert_eq!(subscriber.recv().await.unwrap(), sequence);
+            }
+            publisher.publish(&512).await.unwrap();
+            assert_eq!(subscriber.recv().await.unwrap(), 512);
+        });
+        drop(runtime);
+        let _ = finished.send(());
+    });
+    result
+        .recv_timeout(Duration::from_secs(10))
+        .expect("retained history replay or shutdown blocked");
+}
