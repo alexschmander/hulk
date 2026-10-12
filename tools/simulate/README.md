@@ -370,7 +370,8 @@ Shared host infrastructure and native library output that bypasses Rust logging 
 The `simulator_recording.json5` overlay uses the normal parameter layers, so a location can override its settings.
 By default `topics: ["**"]` captures every ROS-Z topic emitted in the robot's namespace, including `ground_truth/**`, node outputs and `logs`.
 The subscription starts before robotics nodes and covers publishers created later.
-A publisher must keep its schema service alive until first discovery; a publisher that exits sooner can leave samples unrecordable, which is reported as a recording error.
+The recorder retains schemas registered locally during capture, so queued samples remain decodable after their publisher exits.
+External publishers still need a reachable schema service at first discovery.
 Booster transport packets and service requests are not ROS-Z topics; their corresponding node inputs and outputs are recorded.
 `capture_level` controls collection at startup: Error=1, Warn=2, Info=3, Debug=4 and Trace=5.
 The default is Info, independently of the viewer's filter and Twix's terminal filter.

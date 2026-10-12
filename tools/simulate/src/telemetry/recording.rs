@@ -1,8 +1,9 @@
-//! Capture before publisher startup so schema discovery cannot lose initial samples.
+//! Capture before publisher startup and retain local schemas while queued samples drain.
 use color_eyre::{
     Result,
     eyre::{ensure, eyre},
 };
+use ros_z::dynamic::schema_service::LocalSchemaCapture;
 use ros_z::message::{SerdeCdrCodec, WireEncoder};
 use ros_z::{attachment::Attachment, prelude::*, time::Clock};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,7 @@ impl Recording {
         parameters: &super::Parameters,
         health: super::Health,
     ) -> Result<Self> {
+        let local_schemas = LocalSchemaCapture::default();
         let file = File::options()
             .write(true)
             .create_new(true)
@@ -142,15 +144,18 @@ impl Recording {
                 let channel = if let Some(channel) = channels.get(&key) {
                     channel.clone()
                 } else {
-                    let channel = match resolve_channel(&node, &key, &prefix, &mut schemas).await {
-                        Ok(channel) => Arc::new(channel),
-                        Err(error) => {
-                            health.error(format!("Cannot record {key}: {error:#}"));
-                            failed.insert(key);
-                            lost.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        }
-                    };
+                    let channel =
+                        match resolve_channel(&node, &key, &prefix, &local_schemas, &mut schemas)
+                            .await
+                        {
+                            Ok(channel) => Arc::new(channel),
+                            Err(error) => {
+                                health.error(format!("Cannot record {key}: {error:#}"));
+                                failed.insert(key);
+                                lost.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        };
                     channels.insert(key, channel.clone());
                     channel
                 };
@@ -187,6 +192,7 @@ async fn resolve_channel(
     node: &Node,
     key: &str,
     prefix: &str,
+    local_schemas: &LocalSchemaCapture,
     schemas: &mut std::collections::HashMap<
         (String, ros_z::entity::SchemaHash),
         ros_z::dynamic::Schema,
@@ -205,15 +211,21 @@ async fn resolve_channel(
     let schema = if let Some(schema) = schemas.get(&(name.to_owned(), hash)) {
         schema.clone()
     } else {
-        let discovered = node
-            .discover_topic_schema(topic, Duration::from_secs(2))
-            .await?;
-        ensure!(
-            discovered.schema_hash == hash && discovered.root_name == name,
-            "Schema changed during discovery"
-        );
-        schemas.insert((name.to_owned(), hash), discovered.schema.clone());
-        discovered.schema
+        let schema = match local_schemas.get(name, &hash)? {
+            Some(registered) => registered.schema,
+            None => {
+                let discovered = node
+                    .discover_topic_schema(topic, Duration::from_secs(2))
+                    .await?;
+                ensure!(
+                    discovered.schema_hash == hash && discovered.root_name == name,
+                    "Schema changed during discovery"
+                );
+                discovered.schema
+            }
+        };
+        schemas.insert((name.to_owned(), hash), schema.clone());
+        schema
     };
     Ok(Channel {
         topic: topic.to_owned(),
@@ -319,9 +331,64 @@ impl Drop for Recording {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolves_queued_primitive_and_optional_topics_after_producer_teardown() {
+        let context = ContextBuilder::default()
+            .with_namespace("/schema_capture")
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(["tcp/127.0.0.1:0"])
+            .build()
+            .await
+            .unwrap();
+        let recorder = context.create_node("recorder").build().await.unwrap();
+        let local_schemas = LocalSchemaCapture::default();
+        let producer = context.create_node("producer").build().await.unwrap();
+        let primitive = producer
+            .publisher::<u16>("primitive")
+            .build()
+            .await
+            .unwrap();
+        let optional = producer
+            .publisher::<Option<u16>>("optional")
+            .build()
+            .await
+            .unwrap();
+        drop((primitive, optional, producer));
+        let mut schemas = std::collections::HashMap::new();
+        for (topic, info) in [
+            ("primitive", u16::type_info()),
+            ("optional", Option::<u16>::type_info()),
+        ] {
+            let key = format!(
+                "rt/schema_capture/{topic}/{}/{}",
+                info.name,
+                info.hash.to_hash_string()
+            );
+            let channel = resolve_channel(
+                &recorder,
+                &key,
+                "rt/schema_capture/",
+                &local_schemas,
+                &mut schemas,
+            )
+            .await
+            .unwrap();
+            assert_eq!(channel.topic, topic);
+            assert_eq!(channel.name, info.name);
+            assert_eq!(
+                channel.metadata["ros_z.schema_hash"],
+                info.hash.to_hash_string()
+            );
+        }
+        context.shutdown().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn full_disk_failure_stays_inside_the_recording_worker() {
         let file = File::options().write(true).open("/dev/full").unwrap();

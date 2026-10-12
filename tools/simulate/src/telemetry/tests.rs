@@ -66,7 +66,8 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
                     .unwrap();
                 publisher.publish(&42).await.unwrap();
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                let late = node
+                let late_node = context.create_node("short_lived").build().await.unwrap();
+                let late = late_node
                     .publisher::<LateRecordingSample>("late")
                     .build()
                     .await
@@ -74,7 +75,14 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
                 late.publish(&LateRecordingSample { value: 7 })
                     .await
                     .unwrap();
-                (context, telemetry, publisher, (node, late))
+                let optional = late_node
+                    .publisher::<Option<u32>>("optional")
+                    .build()
+                    .await
+                    .unwrap();
+                optional.publish(&Some(17)).await.unwrap();
+                drop((late, optional, late_node));
+                (context, telemetry, publisher, node)
             })
             .await
             .unwrap();
@@ -142,6 +150,14 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
             .collect();
         assert!(messages.iter().any(|m| m.channel.topic == "logs"));
         assert!(messages.iter().any(|m| m.channel.topic == "late"));
+        let optional = messages
+            .iter()
+            .find(|m| m.channel.topic == "optional")
+            .unwrap();
+        assert_eq!(
+            ros_z::message::SerdeCdrCodec::<Option<u32>>::deserialize(&optional.data).unwrap(),
+            Some(17)
+        );
         let times: Vec<_> = messages
             .iter()
             .filter(|m| m.channel.topic == "ground_truth/test")
