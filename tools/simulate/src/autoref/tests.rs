@@ -733,12 +733,57 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
         rates[4] > rates[0] * 2.0,
         "fast playback must outperform slow playback: {rates:?}"
     );
+    let recordings: Vec<_> = members
+        .iter()
+        .map(|member| member.io.recording_status().unwrap().0.to_owned())
+        .collect();
     drop(poses);
     drop(worker);
     drop(raw);
     drop(members);
     drop(team);
     drop(app);
+    let recording_errors = crate::finish_recordings();
+    assert!(
+        recording_errors.is_empty(),
+        "Recording finalization failed: {recording_errors:?}"
+    );
+    for path in recordings {
+        let status: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path.join("finished.json")).unwrap()).unwrap();
+        assert_eq!(status["dropped_samples"], 0, "{path:?}: {status}");
+        assert_eq!(status["dropped_logs"], 0, "{path:?}: {status}");
+        let bytes = std::fs::read(path.join("recording.mcap")).unwrap();
+        let summary = mcap::Summary::read(&bytes).unwrap().unwrap();
+        let topics: std::collections::BTreeSet<_> = summary
+            .channels
+            .values()
+            .map(|channel| channel.topic.as_str())
+            .collect();
+        for required in [
+            "logs",
+            "inputs/low_state",
+            "behavior/motion_command",
+            "filtered_game_controller_state",
+        ] {
+            assert!(
+                topics.contains(required),
+                "{path:?} missing {required}: {topics:?}"
+            );
+        }
+        assert!(
+            topics
+                .iter()
+                .any(|topic| topic.starts_with("ground_truth/"))
+        );
+        eprintln!(
+            "{}: {} topics, {} samples, {:.1} MiB",
+            path.display(),
+            topics.len(),
+            summary.stats.as_ref().unwrap().message_count,
+            bytes.len() as f64 / 1048576.0
+        );
+    }
     router.shutdown().unwrap();
 }
 
