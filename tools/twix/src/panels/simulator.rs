@@ -16,8 +16,7 @@ mod enabled {
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
     use simulate::{
-        Configuration, ControllerSource, FieldConfiguration, PreparedSimulator, Profile, Simulator,
-        widgets,
+        Configuration, FieldConfiguration, PreparedSimulator, Profile, Simulator, widgets,
     };
     use tokio_util::task::AbortOnDropHandle;
 
@@ -32,7 +31,6 @@ mod enabled {
         opponent_count: u8,
         location: String,
         profile: Profile,
-        controller: ControllerSource,
         referee: simulate::RefereeMode,
         competition: simulate::Competition,
         ball: simulate::BallSize,
@@ -48,7 +46,6 @@ mod enabled {
                 opponent_count: 0,
                 location: "incheon_small".into(),
                 profile: Profile::default(),
-                controller: ControllerSource::default(),
                 referee: simulate::RefereeMode::default(),
                 competition: simulate::Competition::default(),
                 ball: simulate::BallSize::default(),
@@ -351,33 +348,6 @@ mod enabled {
                 ui.add_space(10.0);
                 ui.label(RichText::new("Profile").strong());
                 widgets::profile_ladder(ui, &mut self.settings.profile);
-                ui.add_space(10.0);
-                ui.label(RichText::new("Gamepad").strong());
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for (source, label) in [
-                        (ControllerSource::Local, "Local gamepad"),
-                        (ControllerSource::External, "External controller"),
-                    ] {
-                        if widgets::segment(ui, self.settings.controller == source, label)
-                            .clicked()
-                        {
-                            self.settings.controller = source;
-                        }
-                    }
-                });
-                if self.settings.controller == ControllerSource::External {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(
-                                "Publish inputs/controller_input in this robot namespace and simulator transport scope.",
-                            )
-                            .size(11.5)
-                            .weak(),
-                        )
-                        .wrap(),
-                    );
-                }
                 ui.add_space(6.0);
                 egui::CollapsingHeader::new("Parameter and model paths")
                     .id_salt("simulator_paths")
@@ -496,7 +466,6 @@ mod enabled {
                 field_configuration: Some(field),
                 router: context.backend.router().map(str::to_owned),
                 profile: self.settings.profile,
-                controller: self.settings.controller,
                 referee: self.settings.referee,
                 competition: self.settings.competition,
             };
@@ -529,16 +498,16 @@ mod enabled {
 
         #[test]
         fn legacy_layout_defaults_and_profile_choices_survive_serialization() {
-            let legacy: Settings =
-                serde_json::from_value(serde_json::json!({"namespace":"/saved/robot"})).unwrap();
+            let legacy: Settings = serde_json::from_value(
+                serde_json::json!({"namespace":"/saved/robot", "controller":"external"}),
+            )
+            .unwrap();
             assert_eq!(legacy.profile, Profile::MotionBehavior);
-            assert_eq!(legacy.controller, ControllerSource::Local);
             assert_eq!(legacy.ball, simulate::BallSize::Location);
             assert_eq!(legacy.competition, simulate::Competition::Middle);
             for profile in Profile::ALL {
                 let settings = Settings {
                     profile,
-                    controller: ControllerSource::External,
                     competition: simulate::Competition::MiddleFoundation,
                     ball: simulate::BallSize::Size4,
                     ..Settings::default()
@@ -546,7 +515,6 @@ mod enabled {
                 let saved: Settings =
                     serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
                 assert_eq!(saved.profile, profile);
-                assert_eq!(saved.controller, ControllerSource::External);
                 assert_eq!(saved.competition, simulate::Competition::MiddleFoundation);
                 assert_eq!(saved.ball, simulate::BallSize::Size4);
             }

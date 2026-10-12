@@ -38,7 +38,7 @@ mod whistle;
 pub mod widgets;
 
 use bevy_mujoco::{SharedPhysics, SimulationMode};
-pub use profiles::{ControllerSource, Profile};
+pub use profiles::Profile;
 pub use robotics::Configuration;
 
 /// Global transport scope, including the otherwise unnamespaced Booster SDK.
