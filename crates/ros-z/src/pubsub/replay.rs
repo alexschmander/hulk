@@ -719,6 +719,37 @@ pub(crate) fn transient_local_replay_live_capacity(
     }
 }
 
+// Zenoh's default FIFO reply handler blocks its caller when full, including a Tokio
+// worker serving a local publisher. Process replies directly into the bounded
+// coordinator instead, and wait for the query callback to be dropped on completion.
+async fn receive_replay_replies(
+    session: &Session,
+    replay_key: String,
+    timeout: Duration,
+    callback: impl Fn(zenoh::query::Reply) + Send + Sync + 'static,
+) -> Result<()> {
+    let (finished, complete) = tokio::sync::oneshot::channel();
+    let mut finished = Some(finished);
+    session
+        .get(replay_key)
+        .target(zenoh::query::QueryTarget::AllComplete)
+        .consolidation(zenoh::query::ConsolidationMode::None)
+        .accept_replies(zenoh::query::ReplyKeyExpr::Any)
+        .timeout(timeout)
+        .with(zenoh::handlers::CallbackDrop {
+            callback,
+            drop: move || {
+                if let Some(finished) = finished.take() {
+                    let _ = finished.send(());
+                }
+            },
+        })
+        .await
+        .map_err(|source| crate::Error::zenoh("query transient-local replay", source))?;
+    let _ = complete.await;
+    Ok(())
+}
+
 async fn query_transient_local_replay(
     session: &Session,
     topic_key_expr: &str,
@@ -734,36 +765,22 @@ async fn query_transient_local_replay(
     let replay_order = Arc::new(AtomicUsize::new(0));
     let replay_order_callback = replay_order.clone();
     let replay_coordinator = coordinator.clone();
-    let replies = match session
-        .get(replay_key)
-        .target(zenoh::query::QueryTarget::AllComplete)
-        .consolidation(zenoh::query::ConsolidationMode::None)
-        .accept_replies(zenoh::query::ReplyKeyExpr::Any)
-        .timeout(timeout)
-        .await
+    if let Err(err) = receive_replay_replies(session, replay_key, timeout, move |reply| match reply
+        .into_result()
     {
-        Ok(replies) => replies,
-        Err(err) => {
-            debug!("[SUB] Failed to query transient local replay: {}", err);
-            return if coordinator.is_cancelled() {
-                0
-            } else {
-                replay_order.load(Ordering::Relaxed)
-            };
+        Ok(sample) if sample.key_expr().as_str() == expected_topic_key_expr => {
+            let insertion_order = replay_order_callback.fetch_add(1, Ordering::Relaxed);
+            replay_coordinator.handle_late_replay(publisher_global_id, sample, insertion_order);
         }
-    };
-    while let Ok(reply) = replies.recv_async().await {
-        match reply.into_result() {
-            Ok(sample) if sample.key_expr().as_str() == expected_topic_key_expr => {
-                let insertion_order = replay_order_callback.fetch_add(1, Ordering::Relaxed);
-                replay_coordinator.handle_late_replay(publisher_global_id, sample, insertion_order);
-            }
-            Ok(sample) => debug!(
-                "[SUB] Dropping transient local replay sample with unexpected key: {}",
-                sample.key_expr()
-            ),
-            Err(err) => debug!("[SUB] Transient local replay query error: {}", err),
-        }
+        Ok(sample) => debug!(
+            "[SUB] Dropping transient local replay sample with unexpected key: {}",
+            sample.key_expr()
+        ),
+        Err(err) => debug!("[SUB] Transient local replay query error: {}", err),
+    })
+    .await
+    {
+        debug!("[SUB] Failed to query transient local replay: {}", err);
     }
     if coordinator.is_cancelled() {
         0
@@ -787,15 +804,7 @@ pub(crate) async fn query_initial_transient_local_replay_async(
     let replay_order = Arc::new(AtomicUsize::new(0));
     let replay_order_callback = replay_order.clone();
     let replay_coordinator = coordinator.clone();
-    let replies = session
-        .get(replay_key)
-        .target(zenoh::query::QueryTarget::AllComplete)
-        .consolidation(zenoh::query::ConsolidationMode::None)
-        .accept_replies(zenoh::query::ReplyKeyExpr::Any)
-        .timeout(timeout)
-        .await
-        .map_err(|source| crate::Error::zenoh("query transient-local replay", source))?;
-    while let Ok(reply) = replies.recv_async().await {
+    receive_replay_replies(session, replay_key, timeout, move |reply| {
         match reply.into_result() {
             Ok(sample) if sample.key_expr().as_str() == expected_topic_key_expr => {
                 let insertion_order = replay_order_callback.fetch_add(1, Ordering::Relaxed);
@@ -807,7 +816,8 @@ pub(crate) async fn query_initial_transient_local_replay_async(
             ),
             Err(err) => debug!("[SUB] Transient local replay query error: {}", err),
         }
-    }
+    })
+    .await?;
     if coordinator.is_cancelled() {
         Ok(0)
     } else {
