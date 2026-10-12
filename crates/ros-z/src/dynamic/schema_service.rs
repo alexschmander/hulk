@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use ros_z_schema::{SchemaBundle, SchemaError, ServiceDef, TypeDef};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,57 @@ use crate::service::{ServiceServer, ServiceServerBuilder};
 
 type SchemaVersions = HashMap<SchemaHash, RegisteredSchema>;
 type SchemaRegistry = HashMap<String, SchemaVersions>;
+
+/// Retains schemas registered by local nodes while this capture is alive.
+/// Create before publishers start; queued samples remain decodable after node teardown.
+/// Captures are opt-in and retain shared schema data rather than message payloads.
+pub struct LocalSchemaCapture {
+    schemas: Arc<RwLock<SchemaRegistry>>,
+}
+
+type SchemaCaptures = Mutex<Vec<Weak<RwLock<SchemaRegistry>>>>;
+fn local_schema_captures() -> &'static SchemaCaptures {
+    static CAPTURES: OnceLock<SchemaCaptures> = OnceLock::new();
+    CAPTURES.get_or_init(Mutex::default)
+}
+
+impl Default for LocalSchemaCapture {
+    fn default() -> Self {
+        let schemas = Arc::new(RwLock::new(HashMap::new()));
+        let mut captures = local_schema_captures()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        captures.retain(|capture| capture.strong_count() > 0);
+        captures.push(Arc::downgrade(&schemas));
+        Self { schemas }
+    }
+}
+
+impl LocalSchemaCapture {
+    pub fn get(
+        &self,
+        root_name: &str,
+        schema_hash: &SchemaHash,
+    ) -> Result<Option<RegisteredSchema>, DynamicError> {
+        SchemaService::lookup_registered_schema(&self.schemas, root_name, schema_hash)
+    }
+}
+
+fn capture_local_schema(registered: &RegisteredSchema) -> Result<(), DynamicError> {
+    let mut captures = local_schema_captures()
+        .lock()
+        .map_err(|_| DynamicError::RegistryLockPoisoned)?;
+    captures.retain(|capture| capture.strong_count() > 0);
+    for capture in captures.iter().filter_map(Weak::upgrade) {
+        capture
+            .write()
+            .map_err(|_| DynamicError::RegistryLockPoisoned)?
+            .entry(registered.root_name.clone())
+            .or_default()
+            .insert(registered.schema_hash, registered.clone());
+    }
+    Ok(())
+}
 
 fn empty_schema_bundle() -> SchemaBundle {
     let type_name = ros_z_schema::TypeName::new("ros_z::Empty").unwrap();
@@ -354,6 +405,7 @@ impl SchemaService {
         schema: Schema,
     ) -> std::result::Result<(), DynamicError> {
         let registered = RegisteredSchema::new(root_name, schema)?;
+        capture_local_schema(&registered)?;
         Self::insert_registered_schema(schemas, registered)
     }
 
@@ -531,5 +583,43 @@ impl SchemaService {
                 schema: empty_schema_bundle(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod local_schema_capture_tests {
+    use super::*;
+    use crate::context::ContextBuilder;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_keeps_primitive_and_optional_schemas_after_node_teardown() {
+        let capture = LocalSchemaCapture::default();
+        let context = ContextBuilder::default()
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(["tcp/127.0.0.1:0"])
+            .build()
+            .await
+            .unwrap();
+        let node = context.create_node("schema_capture").build().await.unwrap();
+        let primitive = node.publisher::<u64>("primitive").build().await.unwrap();
+        let optional = node
+            .publisher::<Option<u64>>("optional")
+            .build()
+            .await
+            .unwrap();
+        drop((primitive, optional, node));
+        for info in [u64::type_info(), Option::<u64>::type_info()] {
+            let schema = capture.get(&info.name, &info.hash).unwrap().unwrap();
+            assert_eq!(schema.schema_hash, info.hash);
+            assert_eq!(schema.root_name, info.name);
+        }
+        let retained = Arc::downgrade(&capture.schemas);
+        drop(capture);
+        assert!(
+            retained.upgrade().is_none(),
+            "capture must release its registry"
+        );
+        context.shutdown().unwrap();
     }
 }
