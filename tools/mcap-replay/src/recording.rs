@@ -24,12 +24,14 @@ pub struct Channel {
     pub topic: String,
     pub type_info: TypeInfo,
     pub schema: Schema,
+    replay_receipt_time: bool,
 }
 
 #[derive(Clone)]
 pub struct Message {
     pub header: MessageHeader,
     pub data: zenoh::bytes::ZBytes,
+    pub replay_time: u64,
 }
 
 struct SnapshotChunk {
@@ -139,6 +141,11 @@ impl Recording {
                     topic,
                     type_info: TypeInfo::new(name, hash),
                     schema: Arc::new(bundle),
+                    replay_receipt_time: channel
+                        .metadata
+                        .get("ros_z.replay_clock")
+                        .map(String::as_str)
+                        == Some("log_time"),
                 },
             );
         }
@@ -286,7 +293,13 @@ impl Recording {
                         self.channels.contains_key(&header.channel_id),
                         "message references an unknown channel"
                     );
+                    let replay_time = if self.channels[&header.channel_id].replay_receipt_time {
+                        header.log_time
+                    } else {
+                        header.publish_time
+                    };
                     return Ok(Some(Message {
+                        replay_time,
                         header,
                         data: data.to_vec().into(),
                     }));

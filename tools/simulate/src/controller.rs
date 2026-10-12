@@ -22,6 +22,7 @@ pub(crate) struct Controller {
     reader: tokio_util::task::AbortOnDropHandle<Result<()>>,
 }
 struct Target {
+    _node: Node,
     context: Arc<Context>,
     publisher: Publisher<ControllerInput>,
     behavior: ros_z::cache::Cache<behavior_node::node::Blackboard>,
@@ -73,7 +74,7 @@ impl Controller {
                             let node = context.create_node("simulator_gamepad").build().await?;
                             let publisher = node.publisher("inputs/controller_input").build().await?;
                             let behavior = node.subscriber("behavior/blackboard").cache(1).build().await?;
-                            Ok(Target { context, publisher, behavior, suppress_start: false })
+                            Ok(Target { _node: node, context, publisher, behavior, suppress_start: false })
                         }.await;
                         targets.insert(member.id, result?);
                     }

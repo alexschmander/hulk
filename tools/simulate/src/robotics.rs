@@ -46,6 +46,8 @@ impl std::ops::Deref for Robotics {
     }
 }
 pub(crate) struct RobotSettings {
+    pub lease: Option<Arc<crate::Lease>>,
+    pub recording_directory: PathBuf,
     pub default_away: bool,
     pub player: hsl_network_messages::PlayerNumber,
     pub scope: String,
@@ -54,29 +56,54 @@ pub(crate) struct RobotSettings {
 }
 impl Robotics {
     pub(crate) async fn new_robot(
-        runtime: Handle,
         configuration: Configuration,
         settings: RobotSettings,
     ) -> Result<Self> {
-        Ok(Self(Arc::new(
-            RobotStack::new(runtime, configuration, Some(settings)).await?,
-        )))
+        let startup = crate::telemetry::Startup::new(
+            settings.recording_directory.clone(),
+            settings.clock.clone(),
+        )?;
+        std::fs::write(
+            startup.directory.join("robot.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "namespace": configuration.namespace, "transport_scope": settings.scope,
+                "player": settings.player, "profile": configuration.profile,
+                "spawn_simulation_time": settings.clock.now().as_nanos(),
+            }))?,
+        )?;
+        let owned_runtime = Arc::new(crate::telemetry::RobotRuntime::new(
+            startup.capture.clone(),
+        )?);
+        let runtime = owned_runtime.handle();
+        let handle = runtime.clone();
+        let owner = owned_runtime.clone();
+        let task = tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
+            let mut stack =
+                RobotStack::new(handle, configuration, Some(settings), Some(startup)).await?;
+            stack.owned_runtime = Some(owner);
+            Ok::<_, color_eyre::Report>(stack)
+        }));
+        let stack = task.await??;
+        Ok(Self(Arc::new(stack)))
     }
     #[cfg(test)]
     pub async fn new(runtime: Handle, configuration: Configuration) -> Result<Self> {
         Ok(Self(Arc::new(
-            RobotStack::new(runtime, configuration, None).await?,
+            RobotStack::new(runtime, configuration, None, None).await?,
         )))
     }
 }
 
 pub struct RobotStack {
+    owned_runtime: Option<Arc<crate::telemetry::RobotRuntime>>,
+    lease: Option<Arc<crate::Lease>>,
+    telemetry: Option<crate::telemetry::Telemetry>,
     runtime: Handle,
     context: Arc<Context>,
     _node: Arc<Node>,
     // The set owns every task, including the SDK receiver, through shutdown and failed startup.
     tasks: Mutex<JoinSet<(&'static str, Result<()>)>>,
-    _overrides: tempfile::TempDir,
+    _overrides: Option<tempfile::TempDir>,
     pub parameters: NodeParameters<SimulatorParameters>,
     pub field_dimensions: types::field_dimensions::FieldDimensions,
     pub profile: Profile,
@@ -103,10 +130,8 @@ impl RobotStack {
         runtime: Handle,
         configuration: Configuration,
         settings: Option<RobotSettings>,
+        telemetry_startup: Option<crate::telemetry::Startup>,
     ) -> Result<Self> {
-        let default_away = settings
-            .as_ref()
-            .is_some_and(|settings| settings.default_away);
         let overrides = tempfile::tempdir()?;
         // Twix can write this last layer without changing the robot parameter files.
         std::fs::write(
@@ -165,7 +190,7 @@ impl RobotStack {
                 |settings| settings.clock.clone(),
             ))
             .with_namespace(&configuration.namespace)
-            .with_parameter_layers(layers);
+            .with_parameter_layers(layers.clone());
         if let Some(router) = &configuration.router {
             builder = builder.with_router_endpoint(router)?;
         }
@@ -184,6 +209,58 @@ impl RobotStack {
             "ZENOH_CONFIG_OVERRIDE conflicts with the simulator transport namespace"
         );
         let node = Arc::new(context.create_node("simulator").build().await?);
+        let telemetry = if let Some(startup) = telemetry_startup {
+            Some(
+                crate::telemetry::Telemetry::start(
+                    startup,
+                    &context,
+                    &configuration.namespace,
+                    &layers,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        match Self::start_nodes(
+            runtime,
+            context.clone(),
+            node,
+            configuration,
+            settings,
+            overrides,
+        )
+        .await
+        {
+            Ok(mut stack) => {
+                stack.telemetry = telemetry;
+                Ok(stack)
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "Robot startup failed");
+                if let Some(telemetry) = telemetry {
+                    telemetry
+                        .health
+                        .error(format!("Robot startup failed: {error:#}"));
+                    telemetry.finish().await;
+                }
+                let _ = context.shutdown();
+                Err(error)
+            }
+        }
+    }
+
+    async fn start_nodes(
+        runtime: Handle,
+        context: Arc<Context>,
+        node: Arc<Node>,
+        configuration: Configuration,
+        settings: Option<RobotSettings>,
+        overrides: tempfile::TempDir,
+    ) -> Result<Self> {
+        let default_away = settings
+            .as_ref()
+            .is_some_and(|settings| settings.default_away);
         let parameters = node.bind_parameter_as::<SimulatorParameters>("simulator")?;
         parameters.add_validation_hook(SimulatorParameters::validate)?;
         if let Some(field) = &configuration.field_configuration {
@@ -279,7 +356,13 @@ impl RobotStack {
         });
         for spec in configuration.profile.nodes() {
             let future = (spec.run)(context.clone());
-            tasks.spawn(async move { (spec.name, future.await) });
+            tasks.spawn(async move {
+                let result = future.await;
+                if let Err(error) = &result {
+                    tracing::error!(node = spec.name, error = %error, "Robot node failed");
+                }
+                (spec.name, result)
+            });
         }
         let (whistle, pulse) = watch::channel(None);
         let whistle_context = context.clone();
@@ -345,11 +428,16 @@ impl RobotStack {
             });
         }
         Ok(Self {
+            owned_runtime: None,
+            lease: settings
+                .as_ref()
+                .and_then(|settings| settings.lease.clone()),
+            telemetry: None,
             runtime,
             context,
             _node: node,
             tasks: Mutex::new(tasks),
-            _overrides: overrides,
+            _overrides: Some(overrides),
             parameters,
             field_dimensions,
             profile: configuration.profile,
@@ -370,6 +458,12 @@ impl RobotStack {
             commands,
             failure: Mutex::new(None),
         })
+    }
+
+    pub fn recording_status(&self) -> Option<(&std::path::Path, Option<String>)> {
+        self.telemetry
+            .as_ref()
+            .map(|telemetry| (telemetry.directory.as_path(), telemetry.status()))
     }
 
     pub fn poll(&self) -> Option<String> {
@@ -500,19 +594,44 @@ impl RobotStack {
 
 impl Drop for RobotStack {
     fn drop(&mut self) {
-        let tasks = self.tasks.get_mut().unwrap();
-        tasks.abort_all();
-        let mut shutdown = || {
-            self.runtime
-                .block_on(async { while tasks.join_next().await.is_some() {} })
-        };
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(shutdown);
+        let mut tasks = std::mem::take(self.tasks.get_mut().unwrap());
+        if let Some(telemetry) = self.telemetry.take() {
+            let context = self.context.clone();
+            let node = self._node.clone();
+            let runtime = self.runtime.clone();
+            let owner = self.owned_runtime.take();
+            let lease = self.lease.take();
+            let overrides = self._overrides.take();
+            crate::telemetry::finalize(move || {
+                // Keep schema services and parameter layers alive until the recording drains.
+                let error = runtime.block_on(async {
+                    let error = telemetry.finish().await;
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    error
+                });
+                drop(node);
+                let shutdown_error = context.shutdown().err().map(|error| error.to_string());
+                drop(context);
+                drop(overrides);
+                drop(owner);
+                drop(lease);
+                error.or(shutdown_error)
+            });
         } else {
-            shutdown();
-        }
-        if let Err(error) = self.context.shutdown() {
-            log::error!("Simulator shutdown: {error:#}");
+            tasks.abort_all();
+            let mut shutdown = || {
+                self.runtime
+                    .block_on(async { while tasks.join_next().await.is_some() {} })
+            };
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::block_in_place(shutdown);
+            } else {
+                shutdown();
+            }
+            if let Err(error) = self.context.shutdown() {
+                log::error!("Simulator shutdown: {error:#}");
+            }
         }
     }
 }

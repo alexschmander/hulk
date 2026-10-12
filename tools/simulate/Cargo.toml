@@ -56,6 +56,7 @@ hsl_network_messages = { workspace = true }
 kinematics = { workspace = true }
 linear_algebra = { workspace = true }
 log = { workspace = true }
+mcap = { workspace = true }
 message_filter = { workspace = true }
 message_handler = { workspace = true }
 motion = { workspace = true }
@@ -70,14 +71,17 @@ rule_obstacle_composer = { workspace = true }
 safe_pose_checker = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 socket2 = { workspace = true }
 team_ball_filter = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 types = { workspace = true }
 zenoh = { workspace = true }
 
 [dev-dependencies]
-tracing-subscriber = { workspace = true }
+ros-z-schema = { workspace = true }
 bincode = { workspace = true }

@@ -543,3 +543,13 @@ async fn scrub_latency() {
     );
     drop(retained);
 }
+
+#[test]
+fn ordinary_recordings_replay_original_source_time() {
+    let file = fixture();
+    let mut recording = Recording::open(file.path(), "/replay").unwrap();
+    for message in recording.snapshot(recording.end).unwrap() {
+        assert_ne!(message.header.log_time, message.header.publish_time);
+        assert_eq!(message.replay_time, message.header.publish_time);
+    }
+}

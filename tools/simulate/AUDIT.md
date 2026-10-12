@@ -31,7 +31,7 @@ The simulator retains ball dragging and robot translation/rotation gizmos.
 
 ## Current process boundary
 
-Twix owns one robotics context and SDK substitute per player, plus a shared physics worker and logical clock.
+Twix owns one async runtime, robotics context, log collector, recorder and SDK substitute per player, plus a shared physics worker and logical clock.
 Each robot uses a team-name scope, `hulk_simulator/hulks/N` or `hulk_simulator/opponents/N`, and matching ROS namespace `/hulks/N` or `/opponents/N`.
 The panel requires that scope before it can start.
 Closing the panel cancels pending additions, drains the physics worker and node tasks, and releases their sockets.

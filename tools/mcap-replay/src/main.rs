@@ -79,7 +79,7 @@ async fn publish(publishers: &BTreeMap<u16, RawPublisher>, message: Message) -> 
         .ok_or_else(|| color_eyre::eyre::eyre!("unknown channel"))?
         .publish_with_source_time(
             message.data,
-            Time::from_nanos(message.header.publish_time.try_into()?),
+            Time::from_nanos(message.replay_time.try_into()?),
         )
         .await?;
     Ok(())

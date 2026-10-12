@@ -33,6 +33,7 @@ mod scene;
 mod sensors;
 mod simulated_sdk;
 mod simulation;
+mod telemetry;
 mod viewport;
 mod whistle;
 pub mod widgets;
@@ -40,6 +41,7 @@ pub mod widgets;
 use bevy_mujoco::{SharedPhysics, SimulationMode};
 pub use profiles::Profile;
 pub use robotics::Configuration;
+pub use telemetry::finish_recordings;
 
 /// Global transport scope, including the otherwise unnamespaced Booster SDK.
 pub const ZENOH_NAMESPACE: &str = "hulk_simulator";
@@ -239,7 +241,16 @@ impl Simulator {
                 if !failed {
                     self.simulation_controls(ui, compact);
                 }
-                widgets::trailing(ui, 150.0, |ui| {
+                widgets::trailing(ui, 190.0, |ui| {
+                    let team = self.widget.bevy_app.world().resource::<team::Team>();
+                    if let Some(member) = team.selected()
+                        && let Some((directory, _)) = member.io.recording_status()
+                    {
+                        ui.weak("REC").on_hover_text(format!(
+                            "All robots are recording.\nSelected robot: {}",
+                            directory.display()
+                        ));
+                    }
                     stop = widgets::action(ui, icons::ICON_STOP.codepoint, "Stop simulator", false)
                         .clicked();
                 });
@@ -251,6 +262,15 @@ impl Simulator {
                 });
             }
         });
+        let team = self.widget.bevy_app.world().resource::<team::Team>();
+        for member in team.members() {
+            if let Some((_, Some(error))) = member.io.recording_status() {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("{}: {error}", team::robot_namespace(member.id)),
+                );
+            }
+        }
         stop
     }
 
