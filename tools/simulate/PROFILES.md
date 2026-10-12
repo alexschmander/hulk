@@ -151,11 +151,11 @@ Behavior rejects controller samples older than 250 ms; test the resulting existi
 If the OS gamepad backend itself cannot initialize, report gamepad unavailability without treating its optional task's clean exit as failure of the whole robot.
 Other required node exits remain fatal.
 
-For a controller hosted in another process/machine, the supported boundary is the same `ControllerInput` topic, ROS namespace and global Zenoh scope.
-An explicit advanced input-source choice, Local gamepad or External publisher, must prevent a local disconnected publisher from overwriting external input.
-Local is the default; external mode keeps all consumers active and does not require a publisher at Start.
+Capture one local gamepad centrally and route its input to the selected robot.
+The controller handler is shared across the simulation, while the other profile nodes run separately for each robot.
+Require a fresh Start press after changing the selected robot.
 Do not add a custom remote-control panel or a second controller message protocol.
-Test external delivery separately from the OS-device capture path.
+Test injected controller messages separately from the OS-device capture path.
 
 ### Whistle button
 
@@ -381,7 +381,7 @@ The external HSL GameController continues its match clock and packets; their mat
 Incoming network messages and UI actions can still update event-driven nodes at the frozen robotics timestamp.
 Behavior-generated return packets stop while behavior is paused, so a long pause can appear as a disconnected robot in the GameController.
 Do not synthesize replacement heartbeats.
-Local and external gamepads retain wall-clock source stamps because the unchanged behavior node checks their freshness against `SystemTime`.
+Gamepad inputs retain wall-clock source stamps because the unchanged behavior node checks their freshness against `SystemTime`.
 LED blinking, UI button holds and transport timeouts retain their existing wall-time behavior.
 
 Treat scene changes explicitly:
@@ -467,11 +467,11 @@ Each gate must pass before the next profile is presented as supported.
    Keep unfinished profiles unavailable until their implementation gates pass.
 2. **Complete the profile-1 node set and shared controls.**
    Add the four missing common nodes explicitly: `low_state_bridge`, `controller_handler`, `whistle_filter` and `world_to_field_provider`.
-   Profile 1 is not complete until the 24-node common set is wired and validated; profiles 2-4 inherit it, with the documented external controller-source exception.
+   Profile 1 is not complete until the 24-node common set is wired and validated; profiles 2-4 inherit it, with the controller handler shared across robots.
    Run `led_handler` and consume and acknowledge its Booster light RPC through the unchanged hardware interface.
-   Implement raw paired sensor packets, gamepad source selection and whistle pulses.
+   Implement raw paired sensor packets, shared gamepad routing and whistle pulses.
    Remove direct sensor publishers.
-   Exercise real button/mode paths, actual HSL roundtrip, raw timestamps, no-gamepad startup and external controller disconnect.
+   Exercise real button/mode paths, actual HSL roundtrip, raw timestamps, no-gamepad startup and controller disconnect.
    Verify the native OS gamepad path with a real or virtual input device.
 3. **Coherent truth and geometry.**
    Capture unified samples, camera calibration, all ball poses and discontinuities.
@@ -553,7 +553,7 @@ Its match countdown advances at least two seconds while the robotics clock stays
 Twix tests pass with the simulator feature enabled and disabled.
 Native Twix starts all four profiles and preserves the profile choice across application restart.
 The updated Bevy renderer displays the scene with orbit controls disabled, and the native check confirms that `M` captures the fly camera and `W` moves it.
-The local controller node starts without a device and the external controller path passes walking/disconnect tests.
+The local controller node starts without a device and injected controller inputs pass walking/disconnect tests.
 OS gamepad capture remains unverified because this environment exposes neither an input device nor `uinput`.
 
 The preferred obstacle filter computes observer-motion compensation from absolute odometry.

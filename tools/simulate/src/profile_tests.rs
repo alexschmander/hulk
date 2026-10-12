@@ -53,7 +53,6 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
                 opponent_count: 0,
                 field_configuration: None,
                 profile,
-                controller: crate::ControllerSource::External,
             },
         ))
         .unwrap();
@@ -306,7 +305,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         }
         assert!(
             started.elapsed() < Duration::from_secs(2),
-            "external gamepad did not reach behavior: {:?}",
+            "gamepad input did not reach behavior: {:?}",
             io.active_motion()
         );
         thread::sleep(Duration::from_millis(20));

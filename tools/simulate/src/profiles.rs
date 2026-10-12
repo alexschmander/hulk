@@ -56,26 +56,14 @@ impl Profile {
         self == Self::Localization
     }
 
-    pub(crate) fn nodes(
-        self,
-        controller: ControllerSource,
-    ) -> impl Iterator<Item = &'static NodeSpec> {
+    pub(crate) fn nodes(self) -> impl Iterator<Item = &'static NodeSpec> {
         COMMON
             .iter()
             .chain(NETWORK)
-            .chain((controller == ControllerSource::Local).then_some(&CONTROLLER))
             .chain(FILTERING.iter().filter(move |_| self.filtering()))
             .chain(BODY_STATE.iter().filter(move |_| self.body_state()))
             .chain(LOCALIZATION.iter().filter(move |_| self.localization()))
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ControllerSource {
-    #[default]
-    Local,
-    External,
 }
 
 type Runner = fn(Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
@@ -161,10 +149,6 @@ pub(crate) const NETWORK: &[NodeSpec] = nodes![
     player_states_receiver,
     team_ball_filter
 ];
-const CONTROLLER: NodeSpec = NodeSpec {
-    name: "controller_handler",
-    run: controller_handler::run_boxed,
-};
 const FILTERING: &[NodeSpec] = nodes![
     ball_filter,
     visual_kick_ball_selector,
@@ -188,17 +172,13 @@ mod tests {
     #[test]
     fn profiles_are_cumulative_and_keep_all_common_nodes() {
         let mut previous = HashSet::new();
-        for (profile, count) in Profile::ALL.into_iter().zip([24, 28, 33, 36]) {
-            let names: HashSet<_> = profile
-                .nodes(ControllerSource::Local)
-                .map(|node| node.name)
-                .collect();
+        for (profile, count) in Profile::ALL.into_iter().zip([23, 27, 32, 35]) {
+            let names: HashSet<_> = profile.nodes().map(|node| node.name).collect();
             assert_eq!(names.len(), count);
             assert!(previous.is_subset(&names));
             for required in [
                 "low_state_bridge",
                 "led_handler",
-                "controller_handler",
                 "whistle_filter",
                 "world_to_field_provider",
                 "message_handler",
@@ -206,7 +186,6 @@ mod tests {
             ] {
                 assert!(names.contains(required));
             }
-            assert_eq!(profile.nodes(ControllerSource::External).count(), count - 1);
             previous = names;
         }
     }

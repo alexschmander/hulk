@@ -17,10 +17,7 @@ use types::{
 };
 
 use crate::{
-    observations::Frame,
-    parameters::SimulatorParameters,
-    profiles::{ControllerSource, Profile},
-    robot_io::Observation,
+    observations::Frame, parameters::SimulatorParameters, profiles::Profile, robot_io::Observation,
 };
 #[cfg(test)]
 use types::time_wrapper::TimeWrapper;
@@ -38,7 +35,6 @@ pub struct Configuration {
     pub opponent_count: u8,
     pub field_configuration: Option<crate::FieldConfiguration>,
     pub profile: Profile,
-    pub controller: ControllerSource,
 }
 
 #[derive(Resource, Clone)]
@@ -78,14 +74,12 @@ pub struct RobotStack {
     runtime: Handle,
     context: Arc<Context>,
     _node: Arc<Node>,
-    controller_context: Option<Arc<Context>>,
     // The set owns every task, including the SDK receiver, through shutdown and failed startup.
     tasks: Mutex<JoinSet<(&'static str, Result<()>)>>,
     _overrides: tempfile::TempDir,
     pub parameters: NodeParameters<SimulatorParameters>,
     pub field_dimensions: types::field_dimensions::FieldDimensions,
     pub profile: Profile,
-    controller_unavailable: Mutex<bool>,
     whistle: watch::Sender<Option<Time>>,
     frames: watch::Sender<Option<Frame>>,
     body: crate::reference::BodyReferences,
@@ -189,20 +183,6 @@ impl RobotStack {
                 ),
             "ZENOH_CONFIG_OVERRIDE conflicts with the simulator transport namespace"
         );
-        // The unchanged behavior node checks gamepad freshness against SystemTime.
-        // Host inputs therefore retain wall-clock source timestamps, just like an
-        // external controller, while the robotics context uses simulation time.
-        let controller_context = if configuration.controller == ControllerSource::Local {
-            let mut builder = ContextBuilder::default().with_namespace(&configuration.namespace);
-            if let Some(router) = &configuration.router {
-                builder = builder.with_router_endpoint(router)?;
-            }
-            Some(Arc::new(
-                builder.with_json("namespace", scope).build().await?,
-            ))
-        } else {
-            None
-        };
         let node = Arc::new(context.create_node("simulator").build().await?);
         let parameters = node.bind_parameter_as::<SimulatorParameters>("simulator")?;
         parameters.add_validation_hook(SimulatorParameters::validate)?;
@@ -297,15 +277,8 @@ impl RobotStack {
                 .await,
             )
         });
-        for spec in configuration.profile.nodes(configuration.controller) {
-            let node_context = if spec.name == "controller_handler" {
-                controller_context
-                    .as_ref()
-                    .expect("local controller context")
-            } else {
-                &context
-            };
-            let future = (spec.run)(node_context.clone());
+        for spec in configuration.profile.nodes() {
+            let future = (spec.run)(context.clone());
             tasks.spawn(async move { (spec.name, future.await) });
         }
         let (whistle, pulse) = watch::channel(None);
@@ -375,14 +348,12 @@ impl RobotStack {
             runtime,
             context,
             _node: node,
-            controller_context,
             tasks: Mutex::new(tasks),
             _overrides: overrides,
             parameters,
             field_dimensions,
             profile: configuration.profile,
             default_away,
-            controller_unavailable: Mutex::new(false),
             whistle,
             frames,
             body,
@@ -407,18 +378,13 @@ impl RobotStack {
         if failure.is_some() {
             return failure.clone();
         }
-        while let Some(result) = tasks.try_join_next() {
-            if matches!(&result, Ok(("controller_handler", Ok(())))) {
-                *self.controller_unavailable.lock().unwrap() = true;
-                continue;
-            }
+        if let Some(result) = tasks.try_join_next() {
             *failure = Some(match result {
                 Ok((name, Ok(()))) => format!("Simulator node {name} exited"),
                 Ok((name, Err(error))) => format!("Simulator node {name} failed: {error:#}"),
                 Err(error) => format!("Simulator task failed: {error}"),
             });
             tasks.abort_all();
-            break;
         }
         failure.clone()
     }
@@ -445,15 +411,10 @@ impl RobotStack {
             Some(_) => "HSL Game Controller connected",
         };
         format!(
-            "{} · {} · {}{}",
+            "{} · {} · {}",
             self.profile.label(),
             self.readiness.status(self.now()),
             game,
-            if *self.controller_unavailable.lock().unwrap() {
-                " · Local gamepad unavailable"
-            } else {
-                ""
-            }
         )
     }
 
@@ -549,11 +510,6 @@ impl Drop for RobotStack {
             tokio::task::block_in_place(shutdown);
         } else {
             shutdown();
-        }
-        if let Some(context) = &self.controller_context
-            && let Err(error) = context.shutdown()
-        {
-            log::error!("Simulator gamepad shutdown: {error:#}");
         }
         if let Err(error) = self.context.shutdown() {
             log::error!("Simulator shutdown: {error:#}");
