@@ -366,7 +366,8 @@ Open Twix's **Logs** panel to follow the connected robot namespace.
 Changing namespaces clears the display and subscribes to that robot's relative `logs` topic.
 The level selector and text filter affect only the viewer, and **Follow** controls scrolling without stopping collection.
 The viewer keeps at most 4,096 entries from the last day of source time, and the publisher retains its most recent 512 entries for newly connected viewers.
-Hover a log entry to inspect its structured fields and wall timestamp.
+Each row includes the complete message and structured fields; scroll horizontally for long entries.
+Hover a log entry to inspect its wall timestamp and original line breaks.
 The same panel can display recorded logs through Twix's existing MCAP replay support.
 Physical robots do not publish this topic yet.
 
