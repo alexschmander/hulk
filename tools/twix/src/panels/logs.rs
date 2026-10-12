@@ -1,0 +1,312 @@
+use crate::{
+    backend::RobotBackend,
+    panel::{Panel, PanelCreationContext, PanelUiContext},
+    repaint::{ObservationRepaint, RepaintOnUpdates},
+};
+use eframe::egui::{self, RichText, Ui};
+use ros_z::time::Time;
+use ros_z_debug::{DynamicTopicObservation, RetentionPolicy, TopicObservationUpdateReceiver};
+use serde_json::{Value, json};
+use std::{sync::Arc, time::Duration};
+
+pub struct LogsPanel {
+    backend: Arc<RobotBackend>,
+    namespace: String,
+    observation: Option<DynamicTopicObservation>,
+    repaint: Option<ObservationRepaint>,
+    updates: Option<TopicObservationUpdateReceiver>,
+    records: Vec<Value>,
+    error: Option<String>,
+    minimum: u8,
+    search: String,
+    follow: bool,
+}
+impl LogsPanel {
+    fn connect(&mut self, context: PanelUiContext<'_>) {
+        self.observation = None;
+        self.repaint = None;
+        self.updates = None;
+        self.records.clear();
+        self.backend = context.backend.clone();
+        self.namespace = context.backend.namespace();
+        let _runtime = context.backend.runtime_handle().enter();
+        match context.backend.observer().observe_dynamic("logs") {
+            Ok(builder) => {
+                let observation = builder
+                    .retention(RetentionPolicy::time_window(Duration::from_secs(86400)).unwrap())
+                    .spawn();
+                self.updates = observation.subscribe_updates().ok();
+                self.repaint = Some(observation.repaint_on_updates(&context));
+                self.observation = Some(observation);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+}
+fn timestamp(nanoseconds: i64) -> String {
+    let milliseconds = nanoseconds.div_euclid(1_000_000);
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        milliseconds.div_euclid(3_600_000).rem_euclid(24),
+        milliseconds.div_euclid(60_000).rem_euclid(60),
+        milliseconds.div_euclid(1000).rem_euclid(60),
+        milliseconds.rem_euclid(1000)
+    )
+}
+fn level_name(level: u8) -> &'static str {
+    match level {
+        1 => "ERROR",
+        2 => "WARN",
+        3 => "INFO",
+        4 => "DEBUG",
+        _ => "TRACE",
+    }
+}
+fn matches(record: &Value, minimum: u8, search: &str) -> bool {
+    record["level"]
+        .as_u64()
+        .is_some_and(|level| level <= u64::from(minimum))
+        && ["target", "message", "fields"].iter().any(|field| {
+            record[field]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(search)
+        })
+}
+impl Panel for LogsPanel {
+    const STORAGE_ID: &'static str = "logs";
+    const DISPLAY_NAME: &'static str = "Logs";
+    const ICON: &'static str = egui_material_icons::icons::ICON_SUBJECT.codepoint;
+    fn new(context: PanelCreationContext<'_>) -> Self {
+        let saved = context.value.cloned().unwrap_or_default();
+        let mut panel = Self {
+            backend: context.backend.clone(),
+            namespace: String::new(),
+            observation: None,
+            repaint: None,
+            updates: None,
+            records: Vec::new(),
+            error: None,
+            minimum: saved["minimum"]
+                .as_u64()
+                .filter(|n| (1..=5).contains(n))
+                .unwrap_or(3) as u8,
+            search: saved["search"].as_str().unwrap_or_default().to_owned(),
+            follow: true,
+        };
+        panel.connect(PanelUiContext {
+            backend: &context.backend,
+            egui_context: &context.egui_context,
+        });
+        panel
+    }
+    fn header_ui(&mut self, ui: &mut Ui, _: PanelUiContext<'_>) {
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("log-level")
+                .selected_text(level_name(self.minimum))
+                .show_ui(ui, |ui| {
+                    for level in (1..=5).rev() {
+                        ui.selectable_value(&mut self.minimum, level, level_name(level));
+                    }
+                })
+                .response
+                .on_hover_text("Minimum displayed severity; recording is unchanged");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("Filter logs")
+                    .desired_width(160.0),
+            );
+            ui.checkbox(&mut self.follow, "Follow")
+                .on_hover_text("Scroll to new messages; collection always continues");
+        });
+    }
+    fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
+        if self.namespace != context.backend.namespace()
+            || !Arc::ptr_eq(&self.backend, context.backend)
+        {
+            self.connect(context);
+        }
+        if let Some(error) = &self.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        let Some(observation) = &self.observation else {
+            return;
+        };
+        // The observer also supplies MCAP replay data and clears history when its target changes.
+        let mut changed = self.records.is_empty();
+        if let Some(updates) = &mut self.updates {
+            while let Ok(Some(_)) = updates.try_recv() {
+                changed = true;
+            }
+        }
+        if changed {
+            self.records = observation.window_json(Time::zero(), Time::from_nanos(i64::MAX));
+        }
+        if let ros_z_debug::TopicObservationStatus::Retrying { error, .. } = observation.status() {
+            ui.colored_label(ui.visuals().warn_fg_color, error);
+        }
+        if self.records.is_empty() {
+            ui.weak("Waiting for logs from the connected robot…");
+            return;
+        }
+        let search = self.search.to_lowercase();
+        let records: Vec<_> = self
+            .records
+            .iter()
+            .filter(|r| matches(r, self.minimum, &search))
+            .collect();
+        egui::ScrollArea::both()
+            .stick_to_bottom(self.follow)
+            .auto_shrink([false; 2])
+            .show_rows(
+                ui,
+                ui.text_style_height(&egui::TextStyle::Monospace),
+                records.len(),
+                |ui, range| {
+                    for record in &records[range] {
+                        let level = record["level"].as_u64().unwrap_or(3) as u8;
+                        let color = match level {
+                            1 => ui.visuals().error_fg_color,
+                            2 => ui.visuals().warn_fg_color,
+                            4 | 5 => ui.visuals().weak_text_color(),
+                            _ => ui.visuals().text_color(),
+                        };
+                        let time =
+                            timestamp(record["simulation_time"].as_i64().unwrap_or_default());
+                        let text = format!(
+                            "{time} {:5} {}  {}",
+                            level_name(level),
+                            record["target"].as_str().unwrap_or_default(),
+                            record["message"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .replace('\n', " ⏎ ")
+                        );
+                        ui.add(
+                            egui::Label::new(RichText::new(text).monospace().color(color))
+                                .selectable(true)
+                                .extend(),
+                        )
+                        .on_hover_text(format!(
+                            "Simulation time: {} ns\nWall time: {} ({} ns)\n{}\n{}",
+                            record["simulation_time"],
+                            timestamp(record["wall_time"].as_i64().unwrap_or_default()),
+                            record["wall_time"],
+                            record["message"].as_str().unwrap_or_default(),
+                            record["fields"].as_str().unwrap_or_default()
+                        ));
+                    }
+                },
+            );
+    }
+    fn save(&self) -> Value {
+        json!({"minimum": self.minimum, "search": self.search})
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn severity_and_search_only_filter_displayed_records() {
+        let error =
+            json!({"level":1, "target":"motion", "message":"Sensor timeout", "fields":"{}"});
+        let debug = json!({"level":4, "target":"motion", "message":"New sensor", "fields":"{}"});
+        assert!(matches(&error, 2, "sensor"));
+        assert!(!matches(&debug, 2, "sensor"));
+        assert!(matches(&debug, 5, "motion"));
+        assert!(!matches(&error, 5, "localization"));
+    }
+    #[derive(Clone, serde::Serialize, serde::Deserialize, ros_z::Message)]
+    struct TestLog {
+        level: u8,
+        target: String,
+        message: String,
+        fields: String,
+        simulation_time: i64,
+        wall_time: i64,
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn viewer_only_shows_the_connected_namespace_and_clears_on_switch() {
+        let backend = Arc::new(
+            RobotBackend::new(
+                tokio::runtime::Handle::current(),
+                None,
+                "/log_test_a".into(),
+            )
+            .await
+            .unwrap(),
+        );
+        let node = backend.node();
+        let a = node
+            .publisher::<TestLog>("/log_test_a/logs")
+            .qos(ros_z::qos::QosProfile {
+                durability: ros_z::qos::QosDurability::TransientLocal,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let b = node
+            .publisher::<TestLog>("/log_test_b/logs")
+            .qos(ros_z::qos::QosProfile {
+                durability: ros_z::qos::QosDurability::TransientLocal,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        for (publisher, message) in [(&a, "robot a"), (&b, "robot b")] {
+            publisher
+                .publish(&TestLog {
+                    level: 3,
+                    target: "motion".into(),
+                    message: message.into(),
+                    fields: "{}".into(),
+                    simulation_time: 123,
+                    wall_time: 456,
+                })
+                .await
+                .unwrap();
+        }
+        let egui = egui::Context::default();
+        let mut panel = LogsPanel::new(PanelCreationContext {
+            backend: backend.clone(),
+            value: None,
+            egui_context: egui.clone(),
+            render_state: None,
+        });
+        for (namespace, expected) in [("/log_test_a", "robot a"), ("/log_test_b", "robot b")] {
+            backend.set_namespace(namespace.into()).unwrap();
+            let started = std::time::Instant::now();
+            loop {
+                let _ = egui.run_ui(Default::default(), |ui| {
+                    panel.ui(
+                        ui,
+                        PanelUiContext {
+                            backend: &backend,
+                            egui_context: &egui,
+                        },
+                    );
+                });
+                assert!(
+                    panel
+                        .records
+                        .iter()
+                        .all(|record| record["message"] == expected),
+                    "old namespace leaked into viewer"
+                );
+                if !panel.records.is_empty() {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "no logs for {namespace}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+}

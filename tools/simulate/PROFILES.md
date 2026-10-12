@@ -524,8 +524,9 @@ Runtime validation is required for these implementations.
   Do not add their dependencies or present their coverage in these four profiles.
 - Do not run the stub nodes `active_vision`, `world_state_composer`, `time_to_reach_kick_position`, `motor_commands_collector` or `trigger` as evidence of additional coverage.
   Only the minimal attention substitute is needed here.
-- Booster odometer/fall-state firmware topics and MCAP recording are separate optional features.
+- Booster odometer/fall-state firmware topics are separate optional features.
   They are not prerequisites for these profile boundaries.
+  Tool-owned logging and MCAP recording run for every robot in all profiles.
 - The camera mount has been aligned with the production parameters.
   Retain its transform check and verify joint/sole frame parity when enabling profile 3.
   Any actual robotics correction still requires explicit approval.
