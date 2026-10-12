@@ -108,11 +108,9 @@ impl Team {
                 member.pose = on_field_side(member.pose, true);
             }
         }
-        if configuration.controller == crate::ControllerSource::Local {
-            let members = team.members();
-            let controller = crate::controller::Controller::new(&configuration, members).await?;
-            *team.0.controller.lock().unwrap() = Some(controller);
-        }
+        let members = team.members();
+        let controller = crate::controller::Controller::new(&configuration, members).await?;
+        *team.0.controller.lock().unwrap() = Some(controller);
         Ok(team)
     }
     pub fn referee(&self) -> Option<&crate::autoref::AutoRef> {
@@ -203,7 +201,6 @@ impl Team {
         ][usize::from(number - 1)];
         let mut configuration = self.0.configuration.clone();
         configuration.namespace = robot_namespace(id);
-        configuration.controller = crate::ControllerSource::External;
         let connection = Arc::new(network.add_robot(side).await?);
         let io = Robotics::new_robot(
             self.0.runtime.clone(),
@@ -663,7 +660,6 @@ mod runtime_tests {
                 .map(|n| n.parse().unwrap())
                 .unwrap_or(2),
             profile,
-            controller: crate::ControllerSource::External,
         };
         let team = runtime
             .block_on(Team::new(runtime.handle().clone(), configuration))

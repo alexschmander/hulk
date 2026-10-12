@@ -19,7 +19,7 @@ The [profile plan](PROFILES.md) records topic ownership and validation contracts
 | Localization | Field-mark association and 3D/2D localization | Synthetic camera detections, calibration and coherent camera-motion measurements |
 
 Changing a profile requires Stop/Start.
-Profile selection and gamepad source persist with the panel; old layouts default to Motion & behavior and Local gamepad.
+Profile selection persists with the panel; old layouts default to Motion & behavior.
 Vision and microphone processing remain out of scope.
 
 ## Run
@@ -46,7 +46,7 @@ With Cargo directly, enable `--features simulator`, pass `--zenoh-namespace hulk
 The current Nix Twix package builds ordinary Twix; it does not bundle the simulator.
 
 Open the **Simulator** preset or add a **Simulator** panel.
-Select one to five HULKs, zero to five opponents, a field location, ball, profile and gamepad source, then press **Start simulator**.
+Select one to five HULKs, zero to five opponents, a field location, ball and profile, then press **Start simulator**.
 The field preview draws the selected location's parameter dimensions and the spawn slots for both teams.
 Parameter and model directories are under **Parameter and model paths**.
 Twix selects the robot's namespace automatically.
@@ -89,13 +89,12 @@ Before the first command or after releasing LED control, the rectangle is neutra
 Firmware-owned LED colors after release are not simulated.
 Inspect primary state, localization and Game Controller connection status in Twix or GameController; the simulator header does not repeat them.
 
-The default **Local gamepad** source runs the real controller handler on the Twix host.
+The simulator runs one shared instance of the real controller handler on the Twix host.
 It routes input only to the robot selected in Twix.
 Release and press Start after switching robots to enable routing; holding Start across a switch does not activate the new robot.
 Subsequent Start presses toggle behavior's remote mode; walking axes, head controls and kicks use the existing robot mappings.
 Inactive robots receive disconnected controller inputs.
 Inspect `inputs/controller_input` and `behavior/blackboard.remote_control_enabled` in Twix to check capture and activation.
-**External controller** disables only the local producer and accepts `ControllerInput` on `inputs/controller_input` in the same robot namespace and global Zenoh scope.
 Behavior stops using stale controller input after its existing 250 ms freshness window.
 No connected gamepad is required for startup.
 
@@ -136,7 +135,7 @@ A whistle clicked while paused is retained for resume; its 750 ms pulse uses sim
 The external GameController keeps its own real-time match clock at every simulation speed, and incoming packets, Twix parameters and body buttons remain live while paused.
 The toolbar explicitly indicates this clock difference when External mode uses a speed other than 1×.
 Behavior-generated return messages pause with behavior, so the GameController may mark the robot disconnected during a long pause.
-Local gamepad capture and its source timestamps use wall time, matching external gamepads and the existing behavior freshness check.
+Gamepad capture and its source timestamps use wall time, matching the existing behavior freshness check.
 LED blinking, transport deadlines and UI button holds also retain their existing wall-time behavior.
 This freezes robotics clock-driven processing; it does not suspend every asynchronous callback or promise deterministic execution.
 Neural policies and contacts still need validation against hardware.
@@ -260,14 +259,14 @@ The GUI itself is not driven.
 Tested against upstream commit `af7d12962c671b631dee7b293df70e6f7b8bb491`, protocol 20, return protocol 4.
 
 The ordinary unit suite also checks UDP team-message reception, SDK request/reply isolation for global Zenoh prefixes `42` and `43`, physics model recompilation, sensor transforms, command vectors, fall-detection poses, gizmo geometry, and raw body-button delivery through the real bridge, handler and primary-state filter.
-The optional startup test launches profiles sequentially and checks producer ownership, independent truth, whistles, external gamepad/disconnect, filtering and body estimation.
+The optional startup test launches profiles sequentially and checks producer ownership, independent truth, whistles, controller input/disconnect, filtering and body estimation.
 Set `SIMULATOR_TEST_PROFILE` to `motion_behavior`, `filtering`, `body_state_odometry` or `localization` to select one.
 It pauses longer than a whistle pulse and verifies frozen physics, robotics time, sensor timestamps and behavior timers, followed by resume without a catch-up jump.
 It also holds the scene-edit lock for 300 ms and checks that the shared clock freezes, caches remain fresh in simulation time and camera frames resume coherently.
 For profile 4 it checks the live input chain, VO ingestion and acquisition status.
 The captured-frame regression `localization_startup_frame_acquires_with_production_parameters` now runs in the ordinary unit suite and passes with the new production association solver.
 Run `localization_acquisition_and_tracking` explicitly with `--ignored` to exercise live acquisition and walking with ONNX Runtime and motion models.
-OS gamepad capture could not be tested here because no input device or `uinput` was available; external gamepad messages and the no-device local startup path were tested.
+OS gamepad capture could not be tested here because no input device or `uinput` was available; injected controller messages and the no-device local startup path were tested.
 
 On the tested Linux environment, dynamically loading ONNX Runtime 1.22.1 caused an exit-time crash in its global environment destructor.
 Preloading the same library made startup, rendering and shutdown succeed:

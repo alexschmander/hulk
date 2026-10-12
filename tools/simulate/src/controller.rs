@@ -118,9 +118,7 @@ impl Controller {
             };
             if let Some((name, result)) = result {
                 self.failure = Some(match result {
-                    Ok(Ok(())) => format!(
-                        "Local gamepad {name} stopped; restart with External controller if host input is unavailable"
-                    ),
+                    Ok(Ok(())) => format!("Local gamepad {name} is unavailable"),
                     Ok(Err(error)) => format!("Local gamepad {name} failed: {error:#}"),
                     Err(error) => format!("Local gamepad {name} task failed: {error}"),
                 });
