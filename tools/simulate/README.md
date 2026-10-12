@@ -285,27 +285,32 @@ Foundation and Advanced differ only in players per team: 4 or 7 in Small, and 3 
 Players numbered above the limit start as substitutes and are placed beside the field; the setup page warns before starting.
 Layouts saved before Foundation existed keep their Advanced preset.
 External GameController remains the default for saved layouts and existing workflows.
-Automatic mode embeds the [HSL GameController core](https://github.com/RoboCup-HumanoidSoccerLeague/GameController/tree/39a617c8746708b7acc7df53b2a88252cd75250e) at revision `39a617c8746708b7acc7df53b2a88252cd75250e`.
+Automatic mode embeds the [HSL GameController core and autoreferee](https://github.com/RoboCup-HumanoidSoccerLeague/GameController/tree/a6cc98bb9f7c0f03912134b333194af3fa880798) at revision `a6cc98bb9f7c0f03912134b333194af3fa880798`.
 Its copied competition YAML files retain the upstream MIT license in `src/autoref/LICENSE.upstream`.
 The message crate's build requires libclang, as does the upstream build.
 
 The core owns match state, clocks, scores, penalty durations, delayed Playing packets, halftime and message accounting.
-Simulator decisions use the [HSL 2026 rules v1.1.1](https://github.com/RoboCup-HumanoidSoccerLeague/HSL-Rules/releases/tag/rules-2026-v1.1.1).
-The referee observes MuJoCo positions and contacts and submits validated actions to that core.
+The upstream autoreferee owns boundary, restart, touch, positioning, motion and stuck-ball judgments.
+The simulator converts MuJoCo poses and contacts into its world observations, including field-coordinate and line-width conventions, and executes its ball placements, player placements and whistles.
+The simulator retains physical handling delays, halftime sideline placement, operator controls and transport.
+Rule context is the [HSL 2026 rules v1.1.1](https://github.com/RoboCup-HumanoidSoccerLeague/HSL-Rules/releases/tag/rules-2026-v1.1.1).
 It sends real UDP GameController packets through the same production message handlers and receives robot return traffic from both teams.
 Automatic mode uses private loopback ports and accepts state packets only from its embedded controller, so an external controller cannot take over the match.
 All match timers advance with simulation time and freeze when paused.
 An external controller continues using its own wall clock.
 
 Automatic mode creates one match ball and disables adding or deleting balls.
-Dragging it remains available for test setup; a drag does not count as a kick or a goal.
+Dragging it remains available for test setup; a drag starts a new scenario, clearing previous touch and restart history.
+Placing the ball outside the field cannot produce a goal or boundary call until it returns inside.
 The referee starts Ready, places the ball in Set and injects the existing ground-truth whistle output when starting play.
 Goals and whole-ball boundary crossings trigger kickoffs, kick-ins, corner kicks or goal kicks.
-Contacts identify the last touching team; ambiguous contact without a later clear touch produces a neutral dropped ball on an exit.
+Contacts identify the last touching team; when no contact is known, the upstream referee awards the exit restart to the defending team.
 Ordinary free kicks stop play, place the ball and resume without a kickoff whistle.
 Restart history preserves indirect-goal and second-touch restrictions after the core announces Ball Free.
 Local and global stuck situations, kickoff positioning, excess goal-area defenders, leaving the carpet and motion in Set or Stop have automatic checks.
-Positional and motion checks use a short grace period to accommodate message latency and settling.
+The upstream checks use robot poses with a 20 cm footprint radius and their own settling and contact debounce intervals.
+Distinct retouches count after the upstream debounce interval; continuous contact does not count as repeated kicks.
+At the end of a half, the referee waits for the ball to rest for one second, with a maximum delay of ten seconds.
 At halftime, the referee moves teams to the correct sidelines for the new ends and observes the full core break duration.
 
 Penalized robots acknowledge Penalized before physical removal, with a one-second fallback.
@@ -330,7 +335,7 @@ When a timeout expires, automatic calls start the next kickoff.
 Turning off **Automatic calls** preserves UDP transport and penalty handling for manual experiments.
 
 This is a deterministic match referee, not a complete interpretation of every discretionary offense.
-Pushing, deliberate handling, holding, incapability, advantage, kickoff retakes and penalty-kick positioning are not automatically judged.
+Pushing, deliberate handling, holding, incapability, advantage and kickoff retakes are not automatically judged.
 Extra time and penalty shootouts are not offered.
 Use manual penalties and restart calls for these experiments; a manual pushing penalty does not also award its free kick.
 Judgments that depend on intent or a robot being pushed into an illegal position still require a human.
