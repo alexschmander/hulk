@@ -85,14 +85,18 @@ See README for its supported rules and discretionary calls that still require a 
 
 ## Automatic referee validation
 
-The upstream core is pinned to `39a617c8746708b7acc7df53b2a88252cd75250e` and remains the only owner of match transitions, scores, timers and penalty durations.
-The simulator owns geometric judgments, contact history, handling effects and private UDP transport.
-The test suite passes 58 simulator tests and 127 Twix tests, including 16 referee rule, preset and UDP tests.
+The upstream core and autoreferee are pinned together to `a6cc98bb9f7c0f03912134b333194af3fa880798`.
+The core owns match transitions, scores, timers and penalty durations; the autoreferee owns geometric judgments and contact history.
+The simulator adapts coordinates and field dimensions, feeds current-frame contacts before exit judgments, executes physical handling, and provides private UDP transport.
+Penalty timers begin after physical placement, so automatic upstream unpenalizing is disabled.
+Manual ball edits clear referee trajectory history and suppress exit judgments until the ball returns to the field.
+The test suite passes 71 simulator tests, including regressions for manual restarts in either half, ball edits, current-frame deflections and pose-based motion penalties.
 The ignored automatic-referee roundtrip test passed separately in all four profiles with two robots per team.
 It checks both teams' real return streams, delayed Playing packets, physical penalty placement and release, pause timing and isolation of other robots' motion history.
-A native Twix run completed the normal Ready/Set/whistle sequence, accepted a corner call, automatically called a goal kick and scored a goal, and handled a pickup penalty and expiry.
+The earlier native Twix UI audit completed the normal Ready/Set/whistle sequence, accepted a corner call, automatically called a goal kick and scored a goal, and handled a pickup penalty and expiry.
 Stopping and immediately starting another automatic match succeeded.
-Clippy with warnings denied and formatting checks pass.
+Simulator Clippy with `--no-deps -D warnings` and formatting checks pass.
+Dependency-inclusive Clippy is blocked by existing `too_many_arguments` warnings in `motion_inference`.
 No robotics source under `crates/` changed for this feature.
 
 ## Running referee UI

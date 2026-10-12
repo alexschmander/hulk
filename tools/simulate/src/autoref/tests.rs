@@ -15,7 +15,6 @@ fn fixture() -> (Engine, Snapshot) {
         ball: Some(Ball {
             entity: 1,
             position: [0.0, 0.0, 0.11],
-            velocity: [0.0; 3],
             epoch: 0,
         }),
         ..Default::default()
@@ -34,9 +33,8 @@ fn fixture() -> (Engine, Snapshot) {
             snapshot.robots.push(Robot {
                 id: crate::RobotId { team, number },
                 position: p,
-                feet: vec![[p[0], p[1]]],
+                yaw: 0.0,
                 speed: 0.0,
-                leg_speed: 0.0,
                 fallen: false,
                 penalized: false,
             });
@@ -61,11 +59,11 @@ fn id(team: crate::TeamId, number: u8) -> crate::RobotId {
 fn move_ball(s: &mut Snapshot, p: [f64; 3]) {
     let ball = s.ball.as_mut().unwrap();
     ball.position = p;
-    ball.velocity = [0.2, 0.0, 0.0];
 }
 fn touch(e: &mut Engine, s: &mut Snapshot, robot: crate::RobotId) {
     s.contacts.clear();
-    step(e, s, 0.01);
+    // Upstream ignores contacts during the first 500 ms of a restart and debounces retouches.
+    step(e, s, 0.6);
     s.contacts.insert(robot);
     step(e, s, 0.01);
     s.contacts.clear();
@@ -99,7 +97,7 @@ fn full_ball_crossing_and_last_deflection_determine_kick_in() {
     assert!(
         effects
             .iter()
-            .any(|effect| matches!(effect,Effect::Ball([_,y]) if *y==3.0))
+            .any(|effect| matches!(effect,Effect::Ball([_,y]) if (*y-3.0).abs()<1e-5))
     );
     assert!(!effects.contains(&Effect::Whistle));
     move_ball(&mut s, [0.7, 3.0, 0.11]);
@@ -113,6 +111,7 @@ fn both_goal_lines_award_corners_and_goal_kicks() {
         for defender_touched in [false, true] {
             let (mut e, mut s) = fixture();
             playing(&mut e, &s);
+            touch(&mut e, &mut s, id(crate::TeamId::Hulks, 1));
             let defender = if positive {
                 crate::TeamId::Opponents
             } else {
@@ -272,7 +271,7 @@ fn motion_in_set_stays_in_place_and_clock_freezes_on_brief_stop() {
     assert!(e.core.get_game(false).primary_timer.get_remaining() < primary);
 }
 #[test]
-fn manual_ball_move_cannot_score_and_unknown_last_touch_is_neutral() {
+fn manual_ball_move_cannot_score_and_unknown_last_touch_uses_upstream_restart() {
     let (mut e, mut s) = fixture();
     playing(&mut e, &s);
     move_ball(&mut s, [5.0, 0.0, 0.11]);
@@ -281,10 +280,10 @@ fn manual_ball_move_cannot_score_and_unknown_last_touch_is_neutral() {
     assert_eq!(e.core.get_game(false).teams[Side::Home].score, 0);
     move_ball(&mut s, [0.0, 0.0, 0.11]);
     step(&mut e, &s, 0.01);
-    move_ball(&mut s, [0.0, 4.0, 0.11]);
+    move_ball(&mut s, [-1.0, 4.0, 0.11]);
     step(&mut e, &s, 0.01);
-    assert_eq!(e.core.get_game(false).state, State::Ready);
-    assert_eq!(e.core.get_game(false).kicking_side, None);
+    assert_eq!(e.core.get_game(false).set_play, SetPlay::ThrowIn);
+    assert_eq!(e.core.get_game(false).kicking_side, Some(Side::Home));
 }
 
 #[test]
@@ -335,7 +334,6 @@ fn timeout_and_global_stuck_use_the_core_restart_lifecycle() {
     step(&mut e, &s, 45.0);
     step(&mut e, &s, 2.1);
     s.robots[0].position = [0.3, 0.0, 0.65];
-    s.robots[0].feet = vec![[0.3, 0.0]];
     step(&mut e, &s, 0.1);
     step(&mut e, &s, 10.1);
     assert_eq!(
@@ -801,14 +799,12 @@ fn goal_area_excess_uses_entry_order_and_set_border_distance() {
         for r in &mut s.robots {
             if r.id.team == crate::TeamId::Hulks {
                 r.position = [-4.0, 0.0, 0.65];
-                r.feet = vec![[-4.0, 0.0]];
             }
         }
         step(&mut e, &s, 0.01);
         let mut extra = s.robots[0].clone();
         extra.id.number = 4;
         extra.position[0] = -3.55;
-        extra.feet = vec![[-3.55, 0.0]];
         s.robots.push(extra);
         step(&mut e, &s, 0.1);
         step(&mut e, &s, 0.6);
@@ -828,11 +824,10 @@ fn goal_area_excess_uses_entry_order_and_set_border_distance() {
 fn kickoff_allows_only_one_player_across_halfway() {
     let (mut e, mut s) = fixture();
     step(&mut e, &s, 0.01);
-    step(&mut e, &s, 45.0);
     for r in &mut s.robots[..2] {
-        r.position = [0.2, 0.1, 0.65];
-        r.feet = vec![[0.2, 0.1]];
+        r.position = [0.35, 0.1, 0.65];
     }
+    step(&mut e, &s, 45.0);
     step(&mut e, &s, 1.1);
     step(&mut e, &s, 0.6);
     assert_eq!(
@@ -848,11 +843,12 @@ fn kickoff_allows_only_one_player_across_halfway() {
 fn halftime_waits_for_ball_then_switches_ends_and_observes_full_break() {
     let (mut e, mut s) = fixture();
     playing(&mut e, &s);
+    e.call(Call::BallFree).unwrap();
+    s.robots[0].position = [0.2, 0.5, 0.65];
     move_ball(&mut s, [0.2, 0.0, 0.11]);
-    step(&mut e, &s, 610.0);
+    step(&mut e, &s, 600.1);
     assert_eq!(e.core.get_game(false).state, State::Playing);
-    s.ball.as_mut().unwrap().velocity = [0.0; 3];
-    assert!(step(&mut e, &s, 0.01).contains(&Effect::Whistle));
+    assert!(step(&mut e, &s, 1.1).contains(&Effect::Whistle));
     assert_eq!(e.core.get_game(false).state, State::Finished);
     let effects = step(&mut e, &s, 301.0);
     assert!(
@@ -995,7 +991,7 @@ fn all_upstream_competition_presets_parse() {
 }
 
 #[test]
-fn two_player_kickoff_allows_continuous_contact_outside_circle() {
+fn two_player_kickoff_allows_a_retouch_outside_circle() {
     let (mut e, mut s) = fixture();
     s.robots.retain(|r| r.id.number <= 2);
     playing(&mut e, &s);
@@ -1004,7 +1000,7 @@ fn two_player_kickoff_allows_continuous_contact_outside_circle() {
     move_ball(&mut s, [0.6, 0.0, 0.11]);
     step(&mut e, &s, 0.01);
     move_ball(&mut s, [1.0, 0.0, 0.11]);
-    step(&mut e, &s, 0.01);
+    touch(&mut e, &mut s, id(crate::TeamId::Hulks, 1));
     s.contacts.clear();
     move_ball(&mut s, [5.0, 0.0, 0.11]);
     step(&mut e, &s, 0.01);
@@ -1091,7 +1087,6 @@ fn penalty_kick_is_placed_on_the_mark_without_kickoff_positioning() {
     let (mut e, mut s) = fixture();
     playing(&mut e, &s);
     s.robots[0].position = [2.5, 0.5, 0.65];
-    s.robots[0].feet = vec![[2.5, 0.5]];
     e.call(Call::Restart(crate::TeamId::Hulks, SetPlay::PenaltyKick))
         .unwrap();
     assert_eq!(e.core.get_game(false).state, State::Ready);
@@ -1190,4 +1185,107 @@ async fn controller_packets_follow_simulation_time_and_heartbeat_while_paused() 
         assert_eq!(engine.lock().unwrap().core.get_time(), frozen);
         assert_eq!(heartbeat.game_state, playing.game_state);
     }
+}
+
+#[test]
+fn manual_restart_placement_uses_the_awarded_team_in_both_halves() {
+    for second_half in [false, true] {
+        for team in crate::TeamId::ALL {
+            for kind in [SetPlay::CornerKick, SetPlay::GoalKick] {
+                let (mut e, mut s) = fixture();
+                playing(&mut e, &s);
+                if second_half {
+                    e.call(Call::FinishHalf).unwrap();
+                    e.call(Call::SecondHalf).unwrap();
+                    for robot in &mut s.robots {
+                        robot.position[0] = -robot.position[0];
+                    }
+                    playing(&mut e, &s);
+                }
+                e.enabled = false;
+                // The ball is at midfield, so its old position cannot select the goal line.
+                e.call(Call::Restart(team, kind)).unwrap();
+                let effects = step(&mut e, &s, 0.6);
+                let position = effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        Effect::Ball(p) => Some(*p),
+                        _ => None,
+                    })
+                    .unwrap();
+                let own = if (team == crate::TeamId::Opponents) != second_half {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let expected = if kind == SetPlay::GoalKick {
+                    own * 3.5
+                } else {
+                    -own * 4.5
+                };
+                assert!(
+                    (position[0] - expected).abs() < 1e-5,
+                    "{team:?}, {kind:?}, second half {second_half}: {position:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn manual_ball_removal_and_placement_do_not_create_goals_or_stuck_calls() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    touch(&mut e, &mut s, id(crate::TeamId::Hulks, 1));
+    let mut ball = s.ball.take().unwrap();
+    step(&mut e, &s, 40.0);
+    assert_eq!(e.core.get_game(false).state, State::Playing);
+    ball.entity += 1;
+    ball.position = [5.0, 0.0, 0.11];
+    s.ball = Some(ball);
+    for _ in 0..3 {
+        step(&mut e, &s, 1.0);
+    }
+    assert_eq!(e.core.get_game(false).teams[Side::Home].score, 0);
+    move_ball(&mut s, [0.0, 0.0, 0.11]);
+    step(&mut e, &s, 0.01);
+    move_ball(&mut s, [5.0, 0.0, 0.11]);
+    step(&mut e, &s, 0.01);
+    assert_eq!(e.core.get_game(false).teams[Side::Home].score, 1);
+}
+
+#[test]
+fn upstream_motion_checks_use_pose_changes_in_set_and_stop() {
+    let (mut e, mut s) = fixture();
+    step(&mut e, &s, 0.01);
+    step(&mut e, &s, 45.0);
+    step(&mut e, &s, 1.1); // Capture the settled Set poses.
+    s.robots[0].position[0] += 0.15;
+    let effects = step(&mut e, &s, 0.1);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::MotionInSet
+    );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Robot(..))));
+    e.call(Call::Whistle).unwrap();
+    e.call(Call::StopPlay).unwrap();
+    step(&mut e, &s, 1.1);
+    s.robots[1].yaw += 0.4;
+    step(&mut e, &s, 0.1);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(2)].penalty,
+        Penalty::MotionInStop
+    );
+}
+
+#[test]
+fn ball_exit_uses_contacts_from_the_current_physics_step() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    touch(&mut e, &mut s, id(crate::TeamId::Hulks, 1));
+    s.contacts.insert(id(crate::TeamId::Opponents, 2));
+    move_ball(&mut s, [0.7, 3.11, 0.11]);
+    step(&mut e, &s, 0.01);
+    assert_eq!(e.core.get_game(false).set_play, SetPlay::ThrowIn);
+    assert_eq!(e.core.get_game(false).kicking_side, Some(Side::Home));
 }
