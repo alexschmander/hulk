@@ -57,6 +57,7 @@ mod enabled {
         settings: Settings,
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
         simulator: Option<Simulator>,
+        finishing: Option<tokio::task::JoinHandle<Vec<String>>>,
         pending: Option<mpsc::Receiver<Result<PreparedSimulator, String>>>,
         task: Option<AbortOnDropHandle<()>>,
         error: Option<String>,
@@ -96,6 +97,7 @@ mod enabled {
                     .and_then(|value| serde_json::from_value(value.clone()).ok())
                     .unwrap_or_default(),
                 simulator: None,
+                finishing: None,
                 pending: None,
                 task: None,
                 error: None,
@@ -113,6 +115,12 @@ mod enabled {
             }
             if simulator.header(ui) {
                 self.simulator = None;
+                self.finishing = Some(
+                    context
+                        .backend
+                        .runtime_handle()
+                        .spawn_blocking(simulate::finish_recordings),
+                );
             }
         }
 
@@ -123,6 +131,24 @@ mod enabled {
         }
 
         fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
+            if let Some(task) = &self.finishing {
+                if !task.is_finished() {
+                    ui.spinner();
+                    ui.label("Finalizing recordings…");
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(50));
+                    return;
+                }
+                let result = context
+                    .backend
+                    .runtime_handle()
+                    .block_on(self.finishing.take().unwrap());
+                match result {
+                    Ok(errors) if !errors.is_empty() => self.error = Some(errors.join("\n")),
+                    Err(error) => self.error = Some(format!("Recording finalization: {error}")),
+                    _ => {}
+                }
+            }
             if !context.backend.transport_scope().is_some_and(|scope| {
                 scope == simulate::ZENOH_NAMESPACE
                     || scope.starts_with(&format!("{}/", simulate::ZENOH_NAMESPACE))

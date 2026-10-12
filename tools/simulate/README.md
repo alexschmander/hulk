@@ -345,3 +345,44 @@ for profile in motion_behavior filtering body_state_odometry localization; do
   SIMULATOR_TEST_PROFILE="$profile" cargo test -p simulate automatic_referee_robot_roundtrip -- --ignored --nocapture
 done
 ```
+
+## Robot logs and recordings
+
+Every simulator robot records automatically, including robots added during a match.
+Sessions are stored in `logs/simulator/<session>/`, with separate `hulks/<player>/` and `opponents/<player>/` directories.
+Set `SIMULATOR_RECORDING_ROOT` before launching Twix to change the root directory.
+The recording label in the simulator header shows the selected robot's directory on hover.
+Each robot writes `logs.jsonl`, `recording.mcap`, a snapshot of its parameter layers and a final status file.
+Each robot also records its namespace, player identity and spawn time in `robot.json`.
+The session manifest records the selected profile, field, teams, model hashes, source revision and working-tree status.
+Recordings are retained until manually removed; the simulator never overwrites a previous session.
+
+Open Twix's **Logs** panel to follow the connected robot namespace.
+Changing namespaces clears the display and subscribes to that robot's relative `logs` topic.
+The level selector and text filter affect only the viewer, and **Follow** controls scrolling without stopping collection.
+The viewer keeps at most 4,096 entries from the last day of source time, and the publisher retains its most recent 512 entries for newly connected viewers.
+Hover a log entry to inspect its structured fields and wall timestamp.
+The same panel can display recorded logs through Twix's existing MCAP replay support.
+Physical robots do not publish this topic yet.
+
+The simulator owns a separate async runtime and log collector per robot, including nested async tasks and blocking workers.
+Shared host infrastructure and native library output that bypasses Rust logging remain in Twix's terminal.
+The `simulator_recording.json5` overlay uses the normal parameter layers, so a location can override its settings.
+By default `topics: ["**"]` captures every ROS-Z topic emitted in the robot's namespace, including `ground_truth/**`, node outputs and `logs`.
+The subscription starts before robotics nodes and covers publishers created later.
+A publisher must keep its schema service alive until first discovery; a publisher that exits sooner can leave samples unrecordable, which is reported as a recording error.
+Booster transport packets and service requests are not ROS-Z topics; their corresponding node inputs and outputs are recorded.
+`capture_level` controls collection at startup: Error=1, Warn=2, Info=3, Debug=4 and Trace=5.
+The default is Info, independently of the viewer's filter and Twix's terminal filter.
+`queue_capacity` bounds each recording queue and defaults to 8,192 samples.
+Edit these settings in the parameter files before starting; live changes are rejected.
+
+MCAP `log_time` is simulation time at receipt, so pauses and speed changes replay on the simulation timeline.
+MCAP `publish_time` preserves the publisher's original source timestamp, including wall-clock gamepad inputs.
+Simulator channels tell `mcap-replay` to publish using simulation receipt time, so wall-clock inputs stay on the simulation timeline in Twix.
+The MCAP retains their original source timestamps.
+The compressed `_recording/receipt` channel preserves wall arrival and transport timestamps together with channel, publisher and sequence identifiers.
+Stopping drains and finalizes the recordings in background workers while the panel displays **Finalizing recordings**.
+Recording failures and dropped samples appear in the simulator header and the final status files; they do not stop the match.
+Failure to create a recording destination prevents that robot from starting.
+MCAP replay is topic playback and does not reconstruct a deterministic physics run.

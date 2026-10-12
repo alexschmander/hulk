@@ -1,0 +1,7 @@
+{
+  // All ROS-Z topics emitted in this robot namespace, including ground_truth/** and logs.
+  topics: ["**"],
+  queue_capacity: 8192,
+  // Error=1, Warn=2, Info=3, Debug=4, Trace=5. Independent of the Twix display filter.
+  capture_level: 3,
+}

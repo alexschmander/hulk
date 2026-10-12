@@ -21,8 +21,8 @@ use hulk_widgets::CompletionEdit;
 use layout::{FocusDirection, TwixLayout};
 use log::{error, warn};
 use panels::{
-    AudioPanel, BehaviorTreePanel, ImagePanel, Map3DPanel, MapPanel, ParameterPanel, PlotPanel,
-    SimulatorPanel, TextPanel, TimelinePanel,
+    AudioPanel, BehaviorTreePanel, ImagePanel, LogsPanel, Map3DPanel, MapPanel, ParameterPanel,
+    PlotPanel, SimulatorPanel, TextPanel, TimelinePanel,
 };
 use repository::{Repository, inspect_version::check_for_update};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -46,6 +46,7 @@ mod visuals;
 
 impl_selectable_panel!(
     TextPanel,
+    LogsPanel,
     ImagePanel,
     MapPanel,
     Map3DPanel,
@@ -402,7 +403,7 @@ fn main() -> eframe::Result<()> {
         });
     }
 
-    run_native(
+    let result = run_native(
         "Twix",
         {
             #[allow(unused_mut)]
@@ -437,5 +438,10 @@ fn main() -> eframe::Result<()> {
                 configuration,
             )))
         }),
-    )
+    );
+    #[cfg(feature = "simulator")]
+    for error in simulate::finish_recordings() {
+        log::error!("{error}");
+    }
+    result
 }

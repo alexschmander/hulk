@@ -29,12 +29,13 @@ struct Inner {
     runtime: Handle,
     configuration: Configuration,
     clock: Clock,
+    recording_directory: std::path::PathBuf,
     referee: Option<crate::autoref::AutoRef>,
     network: tokio::sync::Mutex<Network>,
     members: Mutex<BTreeMap<RobotId, Member>>,
     selected: Mutex<RobotId>,
     controller: Mutex<Option<crate::controller::Controller>>,
-    _lease: Option<crate::Lease>,
+    _lease: Option<Arc<crate::Lease>>,
 }
 impl Team {
     #[cfg(test)]
@@ -67,6 +68,7 @@ impl Team {
             .ok_or_else(|| eyre!("Missing field configuration"))?;
         field.validate().map_err(|error| eyre!(error))?;
         let clock = Clock::logical(Clock::wallclock().now());
+        let recording_directory = crate::telemetry::session(&configuration, &clock)?;
         let mut referee = if configuration.referee == crate::RefereeMode::Automatic {
             Some(crate::autoref::AutoRef::new(&configuration).await?)
         } else {
@@ -81,9 +83,10 @@ impl Team {
         };
         let team = Self(Arc::new(Inner {
             cancelled,
-            _lease: lease,
+            _lease: lease.map(Arc::new),
             runtime,
             clock,
+            recording_directory,
             network: tokio::sync::Mutex::new(network),
             referee,
             members: Mutex::new(BTreeMap::new()),
@@ -203,9 +206,13 @@ impl Team {
         configuration.namespace = robot_namespace(id);
         let connection = Arc::new(network.add_robot(side).await?);
         let io = Robotics::new_robot(
-            self.0.runtime.clone(),
             configuration,
             RobotSettings {
+                lease: self.0._lease.clone(),
+                recording_directory: crate::telemetry::robot_directory(
+                    &self.0.recording_directory,
+                    &robot_namespace(id),
+                ),
                 player,
                 default_away: side.default_away(),
                 scope: transport_scope(id),
@@ -908,6 +915,8 @@ mod runtime_tests {
         drop(members);
         drop(team);
         drop(app);
+        let errors = crate::finish_recordings();
+        assert!(errors.is_empty(), "{errors:?}");
         router.shutdown().unwrap();
         std::net::UdpSocket::bind("0.0.0.0:3838").unwrap();
     }

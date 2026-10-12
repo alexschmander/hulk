@@ -20,3 +20,6 @@ pub use timeline::TimelinePanel;
 
 pub mod simulator;
 pub use simulator::SimulatorPanel;
+
+mod logs;
+pub use logs::LogsPanel;
