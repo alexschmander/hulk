@@ -4563,9 +4563,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_controller_autoreferee"
+version = "7.0.0"
+source = "git+https://github.com/RoboCup-HumanoidSoccerLeague/GameController?rev=a6cc98bb9f7c0f03912134b333194af3fa880798#a6cc98bb9f7c0f03912134b333194af3fa880798"
+dependencies = [
+ "bitflags 2.13.2",
+ "enum-map",
+ "game_controller_core",
+]
+
+[[package]]
 name = "game_controller_core"
 version = "7.0.0"
-source = "git+https://github.com/RoboCup-HumanoidSoccerLeague/GameController?rev=39a617c8746708b7acc7df53b2a88252cd75250e#39a617c8746708b7acc7df53b2a88252cd75250e"
+source = "git+https://github.com/RoboCup-HumanoidSoccerLeague/GameController?rev=a6cc98bb9f7c0f03912134b333194af3fa880798#a6cc98bb9f7c0f03912134b333194af3fa880798"
 dependencies = [
  "enum-map",
  "serde",
@@ -4589,7 +4599,7 @@ dependencies = [
 [[package]]
 name = "game_controller_msgs"
 version = "7.0.0"
-source = "git+https://github.com/RoboCup-HumanoidSoccerLeague/GameController?rev=39a617c8746708b7acc7df53b2a88252cd75250e#39a617c8746708b7acc7df53b2a88252cd75250e"
+source = "git+https://github.com/RoboCup-HumanoidSoccerLeague/GameController?rev=a6cc98bb9f7c0f03912134b333194af3fa880798#a6cc98bb9f7c0f03912134b333194af3fa880798"
 dependencies = [
  "anyhow",
  "bindgen 0.69.5",
@@ -10827,6 +10837,7 @@ dependencies = [
  "enum-map",
  "fall_detection",
  "field_mark_association",
+ "game_controller_autoreferee",
  "game_controller_core",
  "game_controller_filter",
  "game_controller_msgs",
