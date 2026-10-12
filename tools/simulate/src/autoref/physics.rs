@@ -11,7 +11,6 @@ use std::{
 pub(super) struct Observer {
     generation: Option<u64>,
     owners: Vec<Option<RobotId>>,
-    legs: BTreeMap<RobotId, Vec<usize>>,
 }
 impl Observer {
     fn snapshot(&mut self, world: &MujocoWorld, members: &[Member]) -> Snapshot {
@@ -36,22 +35,6 @@ impl Observer {
                 .iter()
                 .map(|body| roots.get(&model.body_rootid()[*body as usize]).copied())
                 .collect();
-            self.legs.clear();
-            for (joint, body) in model.jnt_bodyid().iter().enumerate() {
-                let Some(id) = roots.get(&model.body_rootid()[*body as usize]) else {
-                    continue;
-                };
-                let name = model.id_to_name(MjtObj::mjOBJ_JOINT, joint).unwrap_or("");
-                if ["Hip", "Knee", "Ankle"]
-                    .iter()
-                    .any(|part| name.contains(part))
-                {
-                    self.legs
-                        .entry(*id)
-                        .or_default()
-                        .push(model.jnt_dofadr()[joint] as usize);
-                }
-            }
             self.generation = Some(world.generation);
         }
         let ball = crate::observations::balls(world)
@@ -60,7 +43,6 @@ impl Observer {
             .map(|b| Ball {
                 entity: b.id,
                 position: b.position,
-                velocity: b.velocity,
                 epoch: world.object_epoch(Entity::from_bits(b.id)),
             });
         let ball_body = ball
@@ -70,7 +52,6 @@ impl Observer {
             })
             .map(|id| id as i32);
         let mut contacts = BTreeSet::new();
-        let mut feet = BTreeMap::<RobotId, Vec<[f64; 2]>>::new();
         for (index, contact) in data.contact().iter().enumerate() {
             if contact.geom[0] < 0 || contact.geom[1] < 0 || data.contact_force(index)[0] < 0.01 {
                 continue;
@@ -85,11 +66,6 @@ impl Observer {
                 let other_body = model.geom_bodyid()[other];
                 if Some(other_body) == ball_body {
                     contacts.insert(id);
-                }
-                if other_body == 0 {
-                    feet.entry(id)
-                        .or_default()
-                        .push([contact.pos[0], contact.pos[1]]);
                 }
             }
         }
@@ -108,17 +84,8 @@ impl Observer {
                 Some(Robot {
                     id: member.id,
                     position,
-                    feet: feet
-                        .remove(&member.id)
-                        .unwrap_or_else(|| vec![[position[0], position[1]]]),
+                    yaw: body.xmat[3].atan2(body.xmat[0]),
                     speed: velocity[0].hypot(velocity[1]),
-                    leg_speed: self
-                        .legs
-                        .get(&member.id)
-                        .into_iter()
-                        .flatten()
-                        .map(|&dof| data.qvel()[dof].abs())
-                        .fold(0.0, f64::max),
                     fallen: position[2] < 0.4 || body.xmat[8] < 0.5,
                     penalized: member.io.primary.get_latest().is_some_and(|state| {
                         *state == types::primary_state::PrimaryState::Penalized

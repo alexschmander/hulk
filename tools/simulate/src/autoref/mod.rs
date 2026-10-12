@@ -1,4 +1,4 @@
-//! Simulator referee. The upstream core owns match state; this module judges physics.
+//! Adapt upstream match state and referee decisions to simulator physics and transport.
 mod calls;
 mod desk;
 mod engine;
