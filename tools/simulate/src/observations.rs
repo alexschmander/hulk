@@ -399,19 +399,18 @@ impl CameraInputs {
             last_sequence: 0,
             skipped_frames: 0,
             info: node.publisher("inputs/camera_info").build().await?,
-            balls: Reference::new(node, "balls", false).await?,
-            detections: AnnouncedReference::new(node, "detected_objects", profile.filtering())
-                .await?,
+            balls: Reference::new(node, "balls", profile).await?,
+            detections: AnnouncedReference::new(node, "detected_objects", profile).await?,
             delta: Reference::new(
                 node,
                 "visual_odometry/current_left_camera_to_previous_left_camera",
-                false,
+                profile,
             )
             .await?,
             odometer: Reference::new(
                 node,
                 "visual_odometry/current_left_camera_to_visual_odometer",
-                profile.localization(),
+                profile,
             )
             .await?,
             motion: CameraMotion::default(),

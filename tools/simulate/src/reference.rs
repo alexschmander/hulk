@@ -3,12 +3,18 @@ use color_eyre::Result;
 use ros_z::{Message, prelude::*, time::Time};
 use ros_z_streams::{AnnouncingPublisher, CreateAnnouncingPublisher};
 
+use crate::profiles::Profile;
+
 pub(crate) struct Reference<T: Message> {
     truth: Publisher<T>,
     production: Option<Publisher<T>>,
 }
 impl<T: Message> Reference<T> {
-    pub async fn new(node: &Node, topic: &str, substitute: bool) -> Result<Self> {
+    /// The profile decides whether the production topic is published too.
+    pub async fn new(node: &Node, topic: &str, profile: Profile) -> Result<Self> {
+        Self::with_production(node, topic, profile.publishes(topic)).await
+    }
+    async fn with_production(node: &Node, topic: &str, substitute: bool) -> Result<Self> {
         Ok(Self {
             truth: node
                 .publisher(&format!("ground_truth/{topic}"))
@@ -38,10 +44,10 @@ pub(crate) struct AnnouncedReference<T: Message> {
     production: Option<AnnouncingPublisher<T>>,
 }
 impl<T: Message> AnnouncedReference<T> {
-    pub async fn new(node: &Node, topic: &str, substitute: bool) -> Result<Self> {
+    pub async fn new(node: &Node, topic: &str, profile: Profile) -> Result<Self> {
         Ok(Self {
-            truth: Reference::new(node, topic, false).await?,
-            production: if substitute {
+            truth: Reference::with_production(node, topic, false).await?,
+            production: if profile.publishes(topic) {
                 Some(node.announcing_publisher(topic).await?)
             } else {
                 None
@@ -59,7 +65,7 @@ impl<T: Message> AnnouncedReference<T> {
     }
 }
 
-use crate::{profiles::Profile, robot_io::Observation};
+use crate::robot_io::Observation;
 use coordinate_systems::{Ground, Odometry, Robot};
 use kinematics::robot_kinematics::RobotKinematics;
 use linear_algebra::{Isometry3, Pose2, point};
@@ -82,14 +88,13 @@ impl BodyReferences {
     pub async fn new(node: &Node, profile: Profile) -> Result<Self> {
         Ok(Self {
             odometry_origin: std::sync::Mutex::new(None),
-            camera: Reference::new(node, "camera_matrix", !profile.body_state()).await?,
-            camera_geometry: Reference::new(node, "camera_geometry", !profile.body_state()).await?,
-            ground: Reference::new(node, "ground_to_robot", !profile.body_state()).await?,
-            robot: Reference::new(node, "robot_to_ground", !profile.body_state()).await?,
-            kinematics: Reference::new(node, "robot_kinematics", !profile.body_state()).await?,
-            support: Reference::new(node, "support_foot_state", !profile.body_state()).await?,
-            odometry: AnnouncedReference::new(node, "inputs/odometry", !profile.body_state())
-                .await?,
+            camera: Reference::new(node, "camera_matrix", profile).await?,
+            camera_geometry: Reference::new(node, "camera_geometry", profile).await?,
+            ground: Reference::new(node, "ground_to_robot", profile).await?,
+            robot: Reference::new(node, "robot_to_ground", profile).await?,
+            kinematics: Reference::new(node, "robot_kinematics", profile).await?,
+            support: Reference::new(node, "support_foot_state", profile).await?,
+            odometry: AnnouncedReference::new(node, "inputs/odometry", profile).await?,
         })
     }
     pub async fn publish(&self, sample: &Observation, time: Time) -> Result<()> {
