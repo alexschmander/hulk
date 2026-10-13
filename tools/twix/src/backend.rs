@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use color_eyre::{Result, eyre::Context as _};
@@ -20,6 +20,7 @@ pub struct RobotBackend {
     observer: TopicObserver,
     namespace: Mutex<String>,
     replay_revision: AtomicU64,
+    replay_active: AtomicBool,
     replay: Mutex<crate::replay::ReplaySession>,
 }
 
@@ -121,6 +122,7 @@ impl RobotBackend {
             observer,
             namespace: Mutex::new(namespace),
             replay_revision: AtomicU64::new(0),
+            replay_active: AtomicBool::new(false),
             replay: Mutex::new(Default::default()),
         })
     }
@@ -183,8 +185,14 @@ impl RobotBackend {
     }
 
     pub fn set_replay_sources(&self, sources: Option<ros_z_debug::replay::ReplaySources>) {
+        self.replay_active
+            .store(sources.is_some(), Ordering::Relaxed);
         self.observer.set_replay_sources(sources);
         self.replay_revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn is_replaying(&self) -> bool {
+        self.replay_active.load(Ordering::Relaxed)
     }
 
     pub fn replay_revision(&self) -> u64 {

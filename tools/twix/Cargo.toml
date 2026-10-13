@@ -34,6 +34,7 @@ ndarray = { workspace = true }
 projection = { workspace = true }
 repository = { workspace = true }
 rhai = { workspace = true }
+robot_logs = { workspace = true }
 ros-z = { workspace = true }
 ros-z-protocol = { workspace = true }
 zenoh = { workspace = true }
@@ -53,3 +54,6 @@ simulate = { workspace = true, optional = true }
 
 [features]
 simulator = ["dep:simulate"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
