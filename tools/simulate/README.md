@@ -364,10 +364,11 @@ Recordings are retained until manually removed; the simulator never overwrites a
 
 Open Twix's **Logs** panel to follow the connected robot namespace.
 Changing namespaces clears the display and subscribes to that robot's relative `logs` topic.
-The level selector and text filter affect only the viewer, and **Follow** controls scrolling without stopping collection.
+Severity, search, target and grouping filters affect only the viewer; collection continues while the list is scrolled away from the newest entry.
 The viewer keeps at most 4,096 entries from the last day of source time, and the publisher retains its most recent 512 entries for newly connected viewers.
 Each row includes the complete message and structured fields; scroll horizontally for long entries.
-Hover a log entry to inspect its wall timestamp and original line breaks.
+Hover a log entry to inspect every field, its wall timestamp and original line breaks.
+See the [Twix documentation](../../docs/tooling/twix.md#logs) for the viewer's controls.
 The same panel can display recorded logs through Twix's existing MCAP replay support.
 Physical robots do not publish this topic yet.
 
