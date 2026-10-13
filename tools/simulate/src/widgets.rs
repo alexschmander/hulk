@@ -186,6 +186,95 @@ pub fn profile_ladder(ui: &mut Ui, selected: &mut Profile) -> Response {
     response
 }
 
+/// What a profile launches per robot, read from the same tables that start it.
+pub fn profile_details(ui: &mut Ui, profile: Profile) {
+    use crate::profiles::{REFERENCES, Supply};
+    let note = |ui: &mut Ui, text: &str| {
+        ui.add(egui::Label::new(RichText::new(text).size(11.5).weak()).wrap());
+    };
+    let topic = |ui: &mut Ui, topic: &str, meaning: &str| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(topic).monospace().size(11.0));
+            ui.label(RichText::new(meaning).size(11.5).weak());
+        });
+    };
+    ui.spacing_mut().item_spacing.y = 4.0;
+    ui.label(
+        RichText::new(format!(
+            "Real nodes · {} per robot",
+            profile.nodes().count()
+        ))
+        .strong(),
+    );
+    for group in profile.node_groups() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(group.label).size(11.5));
+            if group.profile == profile && profile != Profile::MotionBehavior {
+                ui.label(
+                    RichText::new("added")
+                        .size(11.0)
+                        .color(accent(ui.visuals())),
+                );
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for node in group.nodes {
+                ui.label(RichText::new(node.name).monospace().size(11.0));
+            }
+        });
+    }
+    note(
+        ui,
+        "One shared controller_handler also routes the gamepad to the selected robot.",
+    );
+    for (supply, title, absent) in [
+        (
+            Supply::Perfect,
+            "Ground truth fed to the robot",
+            "None; real nodes produce every estimate from simulated measurements.",
+        ),
+        (
+            Supply::Synthetic,
+            "Synthetic measurements",
+            "None; no real node consumes detections in this profile.",
+        ),
+    ] {
+        ui.add_space(6.0);
+        ui.label(RichText::new(title).strong());
+        let mut supplied = REFERENCES
+            .iter()
+            .filter(|reference| reference.production(profile) == Some(supply))
+            .peekable();
+        if supplied.peek().is_none() {
+            note(ui, absent);
+        }
+        for reference in supplied {
+            topic(ui, reference.topic, reference.meaning);
+        }
+    }
+    note(
+        ui,
+        "Every profile also simulates raw Booster sensors, buttons, whistle detections and camera calibration.",
+    );
+    ui.add_space(6.0);
+    ui.label(RichText::new("Comparison references").strong());
+    note(
+        ui,
+        &format!(
+            "All {} are published under ground_truth/ in every profile, also where a real node owns the production topic.",
+            REFERENCES.len()
+        ),
+    );
+    egui::CollapsingHeader::new("ground_truth/ topics")
+        .id_salt("simulator_ground_truth_topics")
+        .show(ui, |ui| {
+            for reference in REFERENCES {
+                topic(ui, reference.topic, reference.meaning);
+            }
+        });
+}
+
 /// Twix's selection color, darkened in light mode where its fill is too pale for thin marks.
 fn accent(visuals: &egui::Visuals) -> Color32 {
     if visuals.dark_mode {

@@ -21,11 +21,10 @@ pub struct BehaviorInputs {
 impl BehaviorInputs {
     pub async fn new(node: &Node, profile: Profile) -> Result<Self> {
         Ok(Self {
-            pose: Reference::new(node, "ground_to_field", !profile.localization()).await?,
-            ball: Reference::new(node, "ball_filter/ball_position", !profile.filtering()).await?,
-            visual_ball: Reference::new(node, "visual_kick/ball_position", !profile.filtering())
-                .await?,
-            obstacles: Reference::new(node, "obstacles", !profile.filtering()).await?,
+            pose: Reference::new(node, "ground_to_field", profile).await?,
+            ball: Reference::new(node, "ball_filter/ball_position", profile).await?,
+            visual_ball: Reference::new(node, "visual_kick/ball_position", profile).await?,
+            obstacles: Reference::new(node, "obstacles", profile).await?,
             selected_ball: node
                 .subscriber("ball_filter/ball_position")
                 .cache(1)
