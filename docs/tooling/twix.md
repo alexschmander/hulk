@@ -79,7 +79,10 @@ Choose a panel from the **+** picker.
 
 ## Logs
 
-The Logs panel follows `<namespace>/logs` and replays retained history when it connects.
+The Logs panel automatically loads a simulator robot's full current-session log through `<namespace>/logs/history`, then follows new entries.
+History loads in pages and remains searchable without an entry-count or age limit.
+Switching namespaces reloads the complete log of the selected robot, including entries produced while another robot was selected.
+The publisher's bounded `<namespace>/logs` topic remains the fallback for robots without the history service; MCAP replay uses the regular topic observer.
 Each row shows the time, severity, target, message, and structured fields; hover a row for every field and its timestamps.
 Long targets are shortened from the left, for example `r::pubsub::subscriber`.
 

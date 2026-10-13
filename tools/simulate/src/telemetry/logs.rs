@@ -1,10 +1,8 @@
 use color_eyre::Result;
 use ros_z::{prelude::*, time::Clock};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{BufWriter, Write},
     num::NonZeroUsize,
     sync::{
         Arc,
@@ -18,17 +16,7 @@ use tracing::{
 };
 use tracing_subscriber::{Layer, layer::Context};
 
-#[derive(Clone, Debug, Serialize, Deserialize, ros_z::Message)]
-#[message(name = "hulk::LogRecord")]
-pub struct LogRecord {
-    pub sequence: u64,
-    pub simulation_time: i64,
-    pub wall_time: i64,
-    pub level: u8,
-    pub target: String,
-    pub message: String,
-    pub fields: String,
-}
+pub use robot_logs::LogRecord;
 
 #[derive(Clone)]
 pub struct Capture {
@@ -128,22 +116,13 @@ impl Logs {
             })
             .build()
             .await?;
+        let archive = robot_logs::Archive::start(node, file, "logs/history").await?;
         let stop = tokio_util::sync::CancellationToken::new();
         let cancelled = stop.clone();
         // Transport diagnostics must not feed their own log publisher.
         use tracing::instrument::WithSubscriber;
         let task = tokio::spawn(
             async move {
-                let (disk_tx, mut disk_rx) = mpsc::channel::<LogRecord>(4096);
-                let writer = tokio::task::spawn_blocking(move || -> Result<()> {
-                    let mut file = BufWriter::new(file);
-                    while let Some(record) = disk_rx.blocking_recv() {
-                        serde_json::to_writer(&mut file, &record)?;
-                        file.write_all(b"\n")?;
-                    }
-                    file.flush()?;
-                    Ok(())
-                });
                 let mut publish = true;
                 loop {
                     let next = tokio::select! {
@@ -155,7 +134,7 @@ impl Logs {
                         break;
                     };
                     // Preserve the file even when ROS-Z publication fails.
-                    if disk_tx.send(record.clone()).await.is_err() {
+                    if archive.append(record.clone()).await.is_err() {
                         failures.error("Log file writer stopped");
                         break;
                     }
@@ -178,8 +157,7 @@ impl Logs {
                         }
                     }
                 }
-                drop(disk_tx);
-                writer.await??;
+                archive.finish().await?;
                 Ok(())
             }
             .with_subscriber(tracing::Dispatch::none()),

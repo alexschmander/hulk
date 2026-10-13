@@ -82,6 +82,24 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
                     .unwrap();
                 optional.publish(&Some(17)).await.unwrap();
                 drop((late, optional, late_node));
+                // The same paused robot clock must support reading buffered startup logs.
+                let history = node.service_client::<robot_logs::ReadLogs>("logs/history")
+                    .build().await.unwrap();
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    let mut request = robot_logs::ReadLogsRequest::default();
+                    let mut records = Vec::new();
+                    loop {
+                        let page = history.call_async(&request).await.unwrap();
+                        assert!(page.error.is_empty(), "{}", page.error);
+                        request.session = page.session;
+                        request.offset = page.next_offset;
+                        records.extend(page.records);
+                        if ["startup", "nested task", "blocking worker", "log bridge"].iter().all(|text| {
+                            records.iter().any(|record| record.message.contains(&format!("{namespace} {text}")))
+                        }) { break; }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await.expect("startup logs should be available through ROS-Z without advancing simulation time");
                 (context, telemetry, publisher, node)
             })
             .await

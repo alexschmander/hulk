@@ -10006,6 +10006,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "robot_logs"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "ros-z",
+ "ros-z-schema",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ron"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10981,6 +10996,7 @@ dependencies = [
  "projection",
  "rand 0.9.5",
  "rand_distr 0.5.1",
+ "robot_logs",
  "ros-z",
  "ros-z-schema",
  "ros-z-streams",
@@ -12276,6 +12292,7 @@ dependencies = [
  "projection",
  "repository",
  "rhai",
+ "robot_logs",
  "ros-z",
  "ros-z-debug",
  "ros-z-protocol",
@@ -12283,6 +12300,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simulate",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
