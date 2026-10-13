@@ -75,6 +75,7 @@ impl Startup {
     pub fn new(directory: PathBuf, clock: Clock) -> Result<Self> {
         std::fs::create_dir_all(&directory)?;
         let file = File::options()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(directory.join("logs.jsonl"))?;

@@ -1,3 +1,5 @@
+mod history;
+
 use crate::{
     backend::RobotBackend,
     panel::{Panel, PanelCreationContext, PanelUiContext, empty_state},
@@ -204,6 +206,11 @@ pub struct LogsPanel {
     backend: Arc<RobotBackend>,
     namespace: String,
     observation: Option<DynamicTopicObservation>,
+    history: Option<history::History>,
+    history_session: String,
+    history_error: Option<String>,
+    history_loading: bool,
+    replay_revision: u64,
     repaint: Option<ObservationRepaint>,
     updates: Option<TopicObservationUpdateReceiver>,
     entries: Vec<Entry>,
@@ -217,6 +224,12 @@ pub struct LogsPanel {
 }
 impl LogsPanel {
     fn connect(&mut self, context: PanelUiContext<'_>) {
+        self.history = None;
+        self.history_session.clear();
+        self.history_error = None;
+        self.history_loading = false;
+        self.filter.cleared_until = None;
+        self.replay_revision = context.backend.replay_revision();
         self.observation = None;
         self.repaint = None;
         self.updates = None;
@@ -224,6 +237,13 @@ impl LogsPanel {
         self.backend = context.backend.clone();
         self.namespace = context.backend.namespace();
         let _runtime = context.backend.runtime_handle().enter();
+        if !context.backend.is_replaying() {
+            self.history = Some(history::History::start(
+                context.backend.node(),
+                &self.namespace,
+                context.egui_context.clone(),
+            ));
+        }
         match context.backend.observer().observe_dynamic("logs") {
             Ok(builder) => {
                 let observation = builder
@@ -267,6 +287,67 @@ impl LogsPanel {
         self.targets = targets;
         self.entries = entries;
         self.view = None;
+    }
+
+    fn append_entries(&mut self, entries: impl Iterator<Item = Entry>) {
+        let mut added: HashMap<String, usize> = HashMap::new();
+        for entry in entries {
+            *added.entry(entry.target.clone()).or_default() += 1;
+            self.entries.push(entry);
+        }
+        if added.is_empty() {
+            return;
+        }
+        for (target, count) in added {
+            self.target_width = self
+                .target_width
+                .max(target.chars().count().min(TARGET_WIDTH));
+            if let Some((_, total)) = self.targets.iter_mut().find(|(name, _)| *name == target) {
+                *total += count;
+            } else {
+                self.targets.push((target, count));
+            }
+        }
+        self.targets
+            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        self.view = None;
+    }
+
+    fn receive_history(&mut self) {
+        // Bound work per frame even when the complete session has many pages.
+        for _ in 0..4 {
+            let Some(update) = self
+                .history
+                .as_mut()
+                .and_then(|history| history.updates.try_recv().ok())
+            else {
+                break;
+            };
+            match update {
+                history::Update::Page(page) => {
+                    self.history_error = None;
+                    self.history_loading = page.next_offset < page.end;
+                    if self.history_session != page.session {
+                        self.history_session = page.session;
+                        self.set_entries(Vec::new());
+                        self.filter.cleared_until = None;
+                        // The archive is authoritative and continues from its exact cursor.
+                        // Switching from the live tail cannot duplicate or omit entries.
+                        self.observation = None;
+                        self.repaint = None;
+                        self.updates = None;
+                    }
+                    self.append_entries(page.records.into_iter().map(|record| {
+                        Entry::parse(
+                            &serde_json::to_value(record).expect("log record is JSON serializable"),
+                        )
+                    }));
+                }
+                history::Update::Error(error) => {
+                    self.history_error = Some(error);
+                }
+            }
+        }
     }
 
     fn view(&mut self) -> &View {
@@ -747,6 +828,11 @@ impl Panel for LogsPanel {
             backend: context.backend.clone(),
             namespace: String::new(),
             observation: None,
+            history: None,
+            history_session: String::new(),
+            history_error: None,
+            history_loading: false,
+            replay_revision: 0,
             repaint: None,
             updates: None,
             entries: Vec::new(),
@@ -835,28 +921,44 @@ impl Panel for LogsPanel {
     fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
         if self.namespace != context.backend.namespace()
             || !Arc::ptr_eq(&self.backend, context.backend)
+            || self.replay_revision != context.backend.replay_revision()
         {
             self.connect(context);
         }
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
-        let Some(observation) = &self.observation else {
-            return;
-        };
-        // The observer also supplies MCAP replay data and clears history when its target changes.
-        let mut changed = self.entries.is_empty();
-        if let Some(updates) = &mut self.updates {
-            while let Ok(Some(_)) = updates.try_recv() {
-                changed = true;
+        self.receive_history();
+        if self.history_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("Loading full log…");
+            });
+        }
+        if let Some(error) = &self.history_error {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Full log history unavailable; retrying…",
+            )
+            .on_hover_text(error);
+        }
+        if let Some(observation) = &self.observation {
+            // Preserve the normal topic observer for MCAP replay and older publishers.
+            let mut changed = self.entries.is_empty();
+            if let Some(updates) = &mut self.updates {
+                while let Ok(Some(_)) = updates.try_recv() {
+                    changed = true;
+                }
             }
-        }
-        if let ros_z_debug::TopicObservationStatus::Retrying { error, .. } = observation.status() {
-            ui.colored_label(ui.visuals().warn_fg_color, error);
-        }
-        if changed {
-            let records = observation.window_json(Time::zero(), Time::from_nanos(i64::MAX));
-            self.set_entries(records.iter().map(Entry::parse).collect());
+            if let ros_z_debug::TopicObservationStatus::Retrying { error, .. } =
+                observation.status()
+            {
+                ui.colored_label(ui.visuals().warn_fg_color, error);
+            }
+            if changed {
+                let records = observation.window_json(Time::zero(), Time::from_nanos(i64::MAX));
+                self.set_entries(records.iter().map(Entry::parse).collect());
+            }
         }
         if self.entries.is_empty() {
             let detail = format!(
@@ -1035,6 +1137,179 @@ mod tests {
             "plain  legacy details"
         );
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_session_history_survives_switches_and_live_tail_limits() {
+        use robot_logs::{Archive, LogRecord};
+        let scope = format!("full_logs_{}", uuid::Uuid::new_v4().simple());
+        let robot_context = ros_z::context::ContextBuilder::default()
+            .with_json("namespace", &scope)
+            .with_mode("router")
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(["tcp/127.0.0.1:0"])
+            .build()
+            .await
+            .unwrap();
+        let endpoint = robot_context.session().info().locators().await[0].to_string();
+        let backend = Arc::new(
+            RobotBackend::new_scoped(
+                tokio::runtime::Handle::current(),
+                Some(endpoint),
+                "/hulks/1".into(),
+                Some(scope),
+            )
+            .await
+            .unwrap(),
+        );
+        let node = robot_context.create_node("logs").build().await.unwrap();
+        let first = Archive::start(
+            &node,
+            tempfile::tempfile().unwrap(),
+            "/hulks/1/logs/history",
+        )
+        .await
+        .unwrap();
+        let second = Archive::start(
+            &node,
+            tempfile::tempfile().unwrap(),
+            "/opponents/1/logs/history",
+        )
+        .await
+        .unwrap();
+        let record = |sequence, message: &str| LogRecord {
+            sequence,
+            simulation_time: 42,
+            wall_time: sequence as i64,
+            level: 3,
+            target: "motion".into(),
+            message: message.into(),
+            fields: "{}".into(),
+        };
+        for sequence in 0..6000 {
+            first.append(record(sequence, "first robot")).await.unwrap();
+            second
+                .append(record(sequence, "second robot"))
+                .await
+                .unwrap();
+        }
+        let egui = egui::Context::default();
+        let mut panel = LogsPanel::new(PanelCreationContext {
+            backend: backend.clone(),
+            value: None,
+            egui_context: egui.clone(),
+            render_state: None,
+        });
+        async fn wait_for(
+            panel: &mut LogsPanel,
+            backend: &Arc<RobotBackend>,
+            egui: &egui::Context,
+            count: usize,
+            message: &str,
+        ) {
+            let started = std::time::Instant::now();
+            loop {
+                let _ = egui.run_ui(Default::default(), |ui| {
+                    panel.ui(
+                        ui,
+                        PanelUiContext {
+                            backend,
+                            egui_context: egui,
+                        },
+                    );
+                });
+                assert!(panel.entries.iter().all(|entry| entry.message == message));
+                if panel.entries.len() == count && !panel.history_loading {
+                    assert_eq!(
+                        panel
+                            .entries
+                            .iter()
+                            .map(|entry| entry.sequence)
+                            .collect::<Vec<_>>(),
+                        (0..count as u64).collect::<Vec<_>>()
+                    );
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "{message}: {} of {count}, {:?}",
+                    panel.entries.len(),
+                    panel.history_error
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        wait_for(&mut panel, &backend, &egui, 6000, "first robot").await;
+        panel.filter.cleared_until = Some(i64::MAX);
+        backend.set_namespace("/opponents/1".into()).unwrap();
+        wait_for(&mut panel, &backend, &egui, 6000, "second robot").await;
+        assert!(panel.filter.cleared_until.is_none());
+        // More than the entire former viewer limit is produced while this robot is not selected.
+        for sequence in 6000..11000 {
+            first.append(record(sequence, "first robot")).await.unwrap();
+        }
+        backend.set_namespace("/hulks/1".into()).unwrap();
+        wait_for(&mut panel, &backend, &egui, 11000, "first robot").await;
+        first.append(record(11000, "first robot")).await.unwrap();
+        wait_for(&mut panel, &backend, &egui, 11001, "first robot").await;
+
+        // Namespace changes while an earlier request is in flight must not leak old pages.
+        backend.set_namespace("/opponents/1".into()).unwrap();
+        panel.connect(PanelUiContext {
+            backend: &backend,
+            egui_context: &egui,
+        });
+        backend.set_namespace("/hulks/1".into()).unwrap();
+        wait_for(&mut panel, &backend, &egui, 11001, "first robot").await;
+        first.finish().await.unwrap();
+        let restarted = Archive::start(
+            &node,
+            tempfile::tempfile().unwrap(),
+            "/hulks/1/logs/history",
+        )
+        .await
+        .unwrap();
+        restarted
+            .append(record(0, "replacement robot"))
+            .await
+            .unwrap();
+        // The session identifier must clear old entries even when the namespace is unchanged.
+        let started = std::time::Instant::now();
+        while panel.entries.len() != 1 || panel.entries[0].message != "replacement robot" {
+            let _ = egui.run_ui(Default::default(), |ui| {
+                panel.ui(
+                    ui,
+                    PanelUiContext {
+                        backend: &backend,
+                        egui_context: &egui,
+                    },
+                )
+            });
+            assert!(started.elapsed() < Duration::from_secs(10));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(panel.entries[0].sequence, 0);
+        backend.set_replay_sources(Some(Default::default()));
+        let _ = egui.run_ui(Default::default(), |ui| {
+            panel.ui(
+                ui,
+                PanelUiContext {
+                    backend: &backend,
+                    egui_context: &egui,
+                },
+            )
+        });
+        assert!(
+            panel.history.is_none(),
+            "MCAP replay must not load a live robot archive"
+        );
+        assert!(panel.entries.is_empty());
+        backend.set_replay_sources(None);
+        wait_for(&mut panel, &backend, &egui, 1, "replacement robot").await;
+        drop(panel);
+        restarted.finish().await.unwrap();
+        second.finish().await.unwrap();
+    }
+
     #[derive(Clone, serde::Serialize, serde::Deserialize, ros_z::Message)]
     struct TestLog {
         sequence: u64,
