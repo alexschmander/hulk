@@ -46,3 +46,27 @@ pub struct SavedPanel {
     #[serde(default)]
     pub state: Value,
 }
+
+/// A centered placeholder for panels without content, with optional follow-up actions.
+pub fn empty_state(
+    ui: &mut Ui,
+    icon: &str,
+    title: &str,
+    detail: &str,
+    actions: impl FnOnce(&mut Ui),
+) {
+    use eframe::egui::{Label, RichText};
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.25).clamp(12.0, 160.0));
+        ui.label(RichText::new(icon).size(32.0).weak());
+        ui.add_space(6.0);
+        ui.label(RichText::new(title).strong());
+        if !detail.is_empty() {
+            ui.add_space(2.0);
+            ui.set_max_width(ui.available_width().min(420.0));
+            ui.add(Label::new(RichText::new(detail).weak()).wrap());
+        }
+        ui.add_space(8.0);
+        actions(ui);
+    });
+}

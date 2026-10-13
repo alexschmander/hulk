@@ -69,12 +69,30 @@ Choose a panel from the **+** picker.
 | Panel | Purpose |
 | --- | --- |
 | Text | Display a topic's latest payload or a selected field as JSON. |
+| [Logs](#logs) | Follow the connected robot's log entries with severity, search, and target filters. |
 | Image | Display the latest raw camera frame from a `TimeWrapper<ros2::sensor_msgs::image::Image>` topic, defaulting to `inputs/left_image`. |
 | Map | Display field or ground views with selectable layers for robot pose, balls, obstacles, and paths. |
 | Parameter | Discover nodes with remote parameter services, display snapshots or selected paths as JSON, and write selected paths to active layers with revision checks. |
 | Audio | Display microphone spectra and a waterfall for the selected channel, defaulting to `audio_spectrums`. |
 | [Plot](#plot-panel) | Compare numeric topics or fields over time, with enum and boolean states in the background and parameters as threshold lines. |
 | [Timeline](#mcap-timeline) | Seek and play back an MCAP recording. |
+
+## Logs
+
+The Logs panel follows `<namespace>/logs` and replays retained history when it connects.
+Each row shows the time, severity, target, message, and structured fields; hover a row for every field and its timestamps.
+Long targets are shortened from the left, for example `r::pubsub::subscriber`.
+
+- The severity buttons toggle levels and show how many entries each would add.
+  Ctrl-click a severity to show only that level.
+- Search matches targets, messages, and field names and values, ignoring case.
+- **Targets** lists every target with its entry count; untick noisy targets to hide them.
+  Right-click a row to hide its target, show only its target, search for its message, or copy it.
+- **Group repeats** merges consecutive entries with the same severity, target, and message into the latest one with a `×N` count.
+- The copy icon copies all visible rows; the sweep icon clears the view until new entries arrive.
+- The list follows new entries while scrolled to the bottom; scroll up to pause, then click **Jump to latest** to resume.
+
+Filters, hidden targets, and grouping are saved with the layout.
 
 ## Topic and field selection
 
