@@ -9,10 +9,15 @@ use types::primary_state::PrimaryState;
 #[test]
 #[ignore = "requires ONNX Runtime, motion models, and free GameController UDP ports"]
 fn startup_pause_resume_and_scene_edits_preserve_time() {
-    for profile in crate::Profile::ALL {
-        if std::env::var("SIMULATOR_TEST_PROFILE").is_ok_and(|requested| {
-            requested != serde_json::to_value(profile).unwrap().as_str().unwrap()
-        }) {
+    let requested = std::env::var("SIMULATOR_TEST_PROFILE")
+        .ok()
+        .map(|requested| {
+            serde_json::from_str::<crate::Profile>(&requested)
+                .or_else(|_| serde_json::from_value(serde_json::Value::String(requested)))
+                .expect("SIMULATOR_TEST_PROFILE must be a preset name or serialized custom profile")
+        });
+    for profile in crate::profiles::test_profiles() {
+        if requested.is_some_and(|requested| requested.estimators() != profile.estimators()) {
             continue;
         }
         validate_profile(profile, false);
@@ -20,7 +25,7 @@ fn startup_pause_resume_and_scene_edits_preserve_time() {
 }
 
 fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
-    eprintln!("Validating {}", profile.label());
+    eprintln!("Validating {}: {profile:?}", profile.label());
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let router = runtime
         .block_on(
@@ -153,6 +158,42 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
             .count(),
         0
     );
+    {
+        let graph = io.node().graph().lock();
+        for (topic, expected) in [
+            ("suggested_search_position", 1),
+            ("detected_objects", usize::from(profile.detections())),
+            (
+                "visual_odometry/current_left_camera_to_visual_odometer",
+                usize::from(profile.localization()),
+            ),
+            (
+                "ball_filter/hypothetical_ball_positions",
+                usize::from(profile.filtering()),
+            ),
+        ] {
+            assert_eq!(
+                graph
+                    .publishers_on(&format!("/simulator/startup_test/{topic}"))
+                    .count(),
+                expected,
+                "{profile:?}: {topic}"
+            );
+        }
+        for reference in crate::profiles::REFERENCES {
+            assert_eq!(
+                graph
+                    .publishers_on(&format!(
+                        "/simulator/startup_test/ground_truth/{}",
+                        reference.topic
+                    ))
+                    .count(),
+                1,
+                "{profile:?}: {}",
+                reference.topic
+            );
+        }
+    }
     assert!(reference_pose.get_latest().is_some());
     assert!(reference_camera.get_latest().is_some());
     let predicted = camera.get_latest().unwrap();
@@ -163,7 +204,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
     eprintln!("{profile:?}: camera translation difference {error:.4} m");
     assert!(error < 0.05, "camera geometry differs by {error} m");
     physics.lock().mode = SimulationMode::Running;
-    if profile == crate::Profile::Localization {
+    if profile.localization() {
         validate_localization(&runtime, &io, &physics, require_acquisition);
         drop(worker);
         drop(io);
@@ -386,7 +427,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         "scene rebuild caused a catch-up time jump"
     );
     assert!(worker.poll().is_none());
-    if profile == crate::Profile::BodyStateOdometry {
+    if profile.body_state() {
         validate_body_state(&runtime, &io, &physics);
     }
     drop(worker);
@@ -1183,5 +1224,10 @@ fn localization_startup_frame_acquires_with_production_parameters() {
 #[test]
 #[ignore = "requires ONNX Runtime, motion models, and free GameController UDP ports"]
 fn localization_acquisition_and_tracking() {
-    validate_profile(crate::Profile::Localization, true);
+    for profile in crate::profiles::test_profiles()
+        .into_iter()
+        .filter(|profile| profile.localization())
+    {
+        validate_profile(profile, true);
+    }
 }

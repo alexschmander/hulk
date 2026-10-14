@@ -77,17 +77,19 @@ pub fn keycap(ui: &mut Ui, key: &str) {
         });
 }
 
-/// Cumulative profiles as a ladder: every step includes the real nodes above it.
+/// Cumulative presets; the switches below can select other estimator combinations.
 fn profile_ladder(ui: &mut Ui, selected: &mut Profile) -> Response {
-    let index = Profile::ALL.iter().position(|profile| profile == selected);
+    let index = Profile::PRESETS
+        .iter()
+        .position(|profile| profile == selected);
     let mut changed = None;
     let mut response = ui
         .vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (step, profile) in Profile::ALL.into_iter().enumerate() {
+            for (step, profile) in Profile::PRESETS.into_iter().enumerate() {
                 let included = index.is_some_and(|index| step <= index);
                 let current = index == Some(step);
-                let last = step + 1 == Profile::ALL.len();
+                let last = step + 1 == Profile::PRESETS.len();
                 let row = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
                     let hovered = ui.response().hovered();
                     let rail = ui.cursor().left() + 8.0;
@@ -186,8 +188,8 @@ fn profile_ladder(ui: &mut Ui, selected: &mut Profile) -> Response {
     response
 }
 
-/// The Profile heading and ladder, with an info button whose popover shows what the selected
-/// profile runs and feeds. The popover ignores outside clicks so steps can be compared live.
+/// Presets and independent estimators, with details for the effective selection.
+/// The popover ignores outside clicks so configurations can be compared live.
 pub fn profile_picker(ui: &mut Ui, selected: &mut Profile) -> Response {
     let id = ui.make_persistent_id("profile_details");
     let open = egui::Popup::is_id_open(ui.ctx(), id);
@@ -208,8 +210,30 @@ pub fn profile_picker(ui: &mut Ui, selected: &mut Profile) -> Response {
     if info.clicked() {
         egui::Popup::toggle_id(ui.ctx(), id);
     }
-    let ladder = profile_ladder(ui, selected);
-    let anchor = Rect::from_x_y_ranges(ladder.rect.x_range(), top..=ladder.rect.bottom());
+    let before = *selected;
+    let mut selection = ui.vertical(|ui| {
+        profile_ladder(ui, selected);
+        ui.add_space(6.0);
+        ui.label(RichText::new("Real estimators").strong());
+        let mut estimators = selected.estimators();
+        ui.checkbox(&mut estimators.filtering, "Ball and obstacle filtering");
+        ui.checkbox(&mut estimators.body_state, "Body state & odometry");
+        ui.checkbox(&mut estimators.localization, "Localization");
+        if estimators != selected.estimators() {
+            *selected = Profile::from_estimators(estimators);
+        }
+        if matches!(selected, Profile::Custom(_)) {
+            ui.label(RichText::new("Custom selection").color(accent(ui.visuals())));
+        }
+        ui.add(egui::Label::new(
+            RichText::new("Behavior, search, motion and game/team handling always run. Unchecked estimators use simulator truth.")
+                .size(11.5).weak(),
+        ).wrap());
+    }).response;
+    if *selected != before {
+        selection.mark_changed();
+    }
+    let anchor = Rect::from_x_y_ranges(selection.rect.x_range(), top..=selection.rect.bottom());
     let profile = *selected;
     egui::Popup::new(id, ui.ctx().clone(), anchor, ui.layer_id())
         .open_memory(None)
@@ -248,7 +272,7 @@ pub fn profile_picker(ui: &mut Ui, selected: &mut Profile) -> Response {
                 .auto_shrink([false, true])
                 .show(ui, |ui| profile_details(ui, profile));
         });
-    ladder
+    selection
 }
 
 /// What a profile launches per robot, read from the same tables that start it.
@@ -270,7 +294,7 @@ fn profile_details(ui: &mut Ui, profile: Profile) {
     ui.spacing_mut().item_spacing.y = 4.0;
     ui.label(RichText::new("Real nodes").strong());
     for group in profile.node_groups() {
-        let added = group.profile == profile && profile != Profile::MotionBehavior;
+        let selected_estimator = group.estimator.is_some();
         let rail = ui.painter().add(egui::Shape::Noop);
         let block = ui
             .horizontal_top(|ui| {
@@ -287,7 +311,7 @@ fn profile_details(ui: &mut Ui, profile: Profile) {
                 })
             })
             .response;
-        let color = if added {
+        let color = if selected_estimator {
             accent(ui.visuals())
         } else {
             ui.visuals().weak_text_color().gamma_multiply(0.5)
@@ -302,10 +326,10 @@ fn profile_details(ui: &mut Ui, profile: Profile) {
                 Stroke::new(2.0, color),
             ),
         );
-        block.on_hover_text(if added {
-            format!("Added by {}", profile.label())
+        block.on_hover_text(if selected_estimator {
+            "Enabled by the estimator selection"
         } else {
-            format!("Runs from {} on", group.profile.label())
+            "Always runs, including in custom selections"
         });
     }
     note(
@@ -560,5 +584,109 @@ pub(crate) fn jersey_color(member: &crate::team::Member, visuals: &egui::Visuals
         Some(TeamColor::Brown) => Color32::from_rgb(130, 85, 50),
         Some(TeamColor::Gray) => Color32::from_gray(145),
         None => crate::autoref::team_color(visuals, member.id.team),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(
+        context: &egui::Context,
+        profile: &mut Profile,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(760.0, 900.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.set_max_width(320.0);
+                    profile_picker(ui, profile);
+                });
+            },
+        )
+    }
+
+    fn text<'a>(
+        output: &'a egui::FullOutput,
+        label: &'a str,
+    ) -> impl Iterator<Item = &'a egui::epaint::TextShape> {
+        output
+            .shapes
+            .iter()
+            .filter_map(move |shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == label => Some(text),
+                _ => None,
+            })
+    }
+
+    fn click_label(
+        context: &egui::Context,
+        profile: &mut Profile,
+        output: &egui::FullOutput,
+        label: &str,
+    ) -> egui::FullOutput {
+        // Checkbox labels follow the similarly named presets in painting order.
+        let text = text(output, label)
+            .last()
+            .unwrap_or_else(|| panic!("missing {label}"));
+        let pos = text.pos + text.galley.size() / 2.0;
+        let mut events = vec![egui::Event::PointerMoved(pos)];
+        events.extend([true, false].map(|pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }));
+        frame(context, profile, events);
+        frame(context, profile, vec![])
+    }
+
+    #[test]
+    fn estimator_switches_are_independent_and_details_follow_selection() {
+        let context = egui::Context::default();
+        egui_material_icons::initialize(&context);
+        context.global_style_mut(|style| style.animation_time = 0.0);
+        let mut profile = Profile::default();
+        frame(&context, &mut profile, vec![]);
+        let output = frame(&context, &mut profile, vec![]);
+        let output = click_label(&context, &mut profile, &output, "Body state & odometry");
+        assert_eq!(
+            profile.estimators(),
+            crate::Estimators {
+                filtering: false,
+                body_state: true,
+                localization: false,
+            }
+        );
+        assert!(matches!(profile, Profile::Custom(_)));
+        let output = click_label(&context, &mut profile, &output, icons::ICON_INFO.codepoint);
+        assert!(
+            text(&output, "29 real nodes run per robot")
+                .next()
+                .is_some()
+        );
+        assert!(text(&output, "search_suggestor").next().is_some());
+        assert!(text(&output, "kinematics_provider").next().is_some());
+        assert!(text(&output, "ball_filter").next().is_none());
+        let output = click_label(
+            &context,
+            &mut profile,
+            &output,
+            "Ball and obstacle filtering",
+        );
+        assert_eq!(profile, Profile::BodyStateOdometry);
+        assert!(
+            text(&output, "32 real nodes run per robot")
+                .next()
+                .is_some()
+        );
+        // Presets replace the flags even while the information popover stays open.
+        click_label(&context, &mut profile, &output, "Motion & behavior");
+        assert_eq!(profile, Profile::MotionBehavior);
     }
 }
