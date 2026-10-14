@@ -31,7 +31,7 @@ Whistle detection is replaced by a UI-generated detection stream; the real whist
 | Profile | Additional real nodes | Remaining simulated observations |
 | --- | --- | --- |
 | Motion & behavior | Common stack below | Raw joint/IMU samples; perfect ground/camera geometry, field pose, selected ball and obstacles |
-| Filtering | `ball_filter`, `visual_kick_ball_selector`, `obstacle_filter`, `search_suggestor` | Raw sensors; synthetic detections; perfect ground/camera geometry, planar odometry and field pose |
+| Ball and obstacle filtering | `ball_filter`, `visual_kick_ball_selector`, `obstacle_filter`, `search_suggestor` | Raw sensors; synthetic detections; perfect ground/camera geometry, planar odometry and field pose |
 | Body state & odometry | `kinematics_provider`, `support_foot_estimator`, `ground_provider`, `camera_matrix_calculator`, `odometry` | Raw sensors, camera calibration, synthetic detections and perfect field pose |
 | Localization | `field_mark_association`, `localization_3d`, `localization_2d` | Raw sensors, camera calibration, synthetic detections and camera-motion measurements substituting for stereo VO |
 
@@ -56,7 +56,7 @@ Run these in every profile:
 | Shared configuration and field side | `global_parameter_provider`, `world_to_field_provider` |
 
 `low_state_bridge`, `controller_handler`, `whistle_filter` and `world_to_field_provider` extend the original motion-only simulator.
-State filtering for messages, buttons and whistles is common infrastructure, not part of the selectable Filtering increment.
+State filtering for messages, buttons and whistles is common infrastructure, not part of the selectable Ball and obstacle filtering increment.
 
 The simulator continues to host these entry points in process.
 This work does not claim to simulate the entire unchanged `hulk_ros_z` executable.
@@ -96,7 +96,7 @@ Where a profile needs an ideal production input, publish that same physical samp
 Removing this second publication in a higher profile never disables its `ground_truth/` publication.
 The table below describes only production ownership, not whether the reference is available.
 
-| Output | Motion & behavior | Filtering | Body state & odometry | Localization |
+| Output | Motion & behavior | Ball and obstacle filtering | Body state & odometry | Localization |
 | --- | --- | --- | --- | --- |
 | Raw `rt/low_state`, `rt/joint_states` | Simulator | Simulator | Simulator | Simulator |
 | `inputs/low_state`, `inputs/imu_state`, `inputs/serial_motor_states`, `inputs/parallel_motor_states` | Low-state bridge | Low-state bridge | Low-state bridge | Low-state bridge |
@@ -205,7 +205,7 @@ Preserve current parameter-based motion overrides, selection, dragging, deletion
 Acceptance: start upright in Initial without GC, execute gamepad/head commands and motion overrides, enter Damping/Prepare through raw buttons and SDK requests, update behavior when the selected ball moves/disappears, and complete the actual HSL roundtrip.
 Verify sensor timestamps through the raw bridge rather than only direct message injection into downstream consumers.
 
-## Profile 2: Filtering
+## Profile 2: Ball and obstacle filtering
 
 Replace scalar ball, visual-kick ball and obstacle truth publishers with real nodes.
 Publish synthetic `TimeWrapper<Vec<Object<RobocupObjectLabel>>>` on `detected_objects` using the existing announcing-publisher API.
@@ -479,7 +479,7 @@ Each gate must pass before the next profile is presented as supported.
    Publish all reference streams under `ground_truth/`, regardless of selected profile; test their presence across all four configurations.
    Move attention fallback to the active ball topic.
    Finish and verify Motion & behavior.
-4. **Filtering.**
+4. **Ball and obstacle filtering.**
    Add synthetic detections and announcing truth odometry; enable the four filtering nodes.
    Leave `current_odometry_to_last_odometry` unproduced.
    Verify hypothesis lifecycle, moving-observer obstacles, empty frames, partial visibility, physical ball height, and FutureMap ordering/latency.

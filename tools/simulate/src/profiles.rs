@@ -26,7 +26,7 @@ impl Profile {
     pub fn label(self) -> &'static str {
         match self {
             Self::MotionBehavior => "Motion & behavior",
-            Self::Filtering => "Filtering",
+            Self::Filtering => "Ball and obstacle filtering",
             Self::BodyStateOdometry => "Body state & odometry",
             Self::Localization => "Localization",
         }
@@ -96,7 +96,7 @@ const NODE_GROUPS: [NodeGroup; 5] = [
         nodes: NETWORK,
     },
     NodeGroup {
-        label: "Filtering",
+        label: "Ball and obstacle filtering",
         profile: Profile::Filtering,
         nodes: FILTERING,
     },
