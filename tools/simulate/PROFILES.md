@@ -7,8 +7,8 @@ The [README](README.md) describes the current simulator.
 
 ## Scope and constraints
 
-Implement four cumulative profiles, selectable in the Simulator panel before startup.
-Keep the fifth profile, Vision, for later.
+Provide four cumulative presets plus independent object-filtering, body-estimation and localization switches, selectable in the Simulator panel before startup.
+Keep rendered vision for later.
 Synthetic image-space observations are in scope because filtering and localization consume them; camera rendering, image transport, neural detection and actual stereo VO are deferred.
 
 All wiring, substitute publishers, calibration overrides and tests belong in `tools/simulate`, with panel/settings changes in `tools/twix`.
@@ -31,13 +31,14 @@ Whistle detection is replaced by a UI-generated detection stream; the real whist
 | Profile | Additional real nodes | Remaining simulated observations |
 | --- | --- | --- |
 | Motion & behavior | Common stack below | Raw joint/IMU samples; perfect ground/camera geometry, field pose, selected ball and obstacles |
-| Ball and obstacle filtering | `ball_filter`, `visual_kick_ball_selector`, `obstacle_filter`, `search_suggestor` | Raw sensors; synthetic detections; perfect ground/camera geometry, planar odometry and field pose |
+| Ball and obstacle filtering | `ball_filter`, `visual_kick_ball_selector`, `obstacle_filter` | Raw sensors; synthetic detections; perfect ground/camera geometry, planar odometry and field pose |
 | Body state & odometry | `kinematics_provider`, `support_foot_estimator`, `ground_provider`, `camera_matrix_calculator`, `odometry` | Raw sensors, camera calibration, synthetic detections and perfect field pose |
 | Localization | `field_mark_association`, `localization_3d`, `localization_2d` | Raw sensors, camera calibration, synthetic detections and camera-motion measurements substituting for stereo VO |
 
 The Rust crate names for the last two nodes are `localization-3d` and `localization-2d`; their runtime node names are `localization3d` and `localization2d`.
-The profiles are cumulative in robotics coverage.
-Higher profiles remove substitute publishers from production topics whose outputs are now computed by real nodes.
+The presets are cumulative in robotics coverage. The independent switches override that progression; any of the eight estimator combinations is valid.
+The tables below describe the four presets. For custom selections, enabling a group removes the corresponding truth substitutes from its production topics. Disabled groups keep those substitutes. Localization requires synthetic detections even when object filtering is disabled, and its visual-odometry substitute does not depend on body estimation.
+`search_suggestor` runs in every combination as part of behavior. Its hypothetical-ball subscriber is idle when `ball_filter` is disabled; no synthetic search policy or hypotheses are supplied.
 All physical reference streams remain published under `ground_truth/` in every profile, regardless of which estimators are running.
 
 ### Common stack
@@ -46,7 +47,7 @@ Run these in every profile:
 
 | Responsibility | Nodes |
 | --- | --- |
-| Behavior | `behavior_node`, `ball_state_composer`, `rule_obstacle_composer` |
+| Behavior | `behavior_node`, `search_suggestor`, `ball_state_composer`, `rule_obstacle_composer` |
 | Motion and protection | `motion`, `motion_inference`, `head_motion`, `hardware_interface`, `fall_detection`, `safe_pose_checker` |
 | Raw Booster inputs and body buttons | `low_state_bridge`, `button_event_bridge`, `button_event_handler` |
 | Gamepad | `controller_handler`, using the existing controller input and behavior path |
@@ -112,7 +113,8 @@ The table below describes only production ownership, not whether the reference i
 | `detected_objects` and its announcements | Not needed | Synthetic observations | Synthetic observations | Synthetic observations, including field marks |
 | `ball_filter/ball_position`, `visual_kick/ball_position` | Truth | Real filters/selector | Real filters/selector | Real filters/selector |
 | `obstacles` | Truth | Obstacle filter | Obstacle filter | Obstacle filter |
-| Ball hypotheses and search suggestions | Not needed | Real filter/suggestor | Real filter/suggestor | Real filter/suggestor |
+| Ball hypotheses | No producer | Ball filter | Ball filter | Ball filter |
+| Search suggestions | Search suggestor | Search suggestor | Search suggestor | Search suggestor |
 | `visual_odometry/current_left_camera_to_visual_odometer`, including its delta | Not needed | Not needed | Not needed | Simulated camera motion |
 | Field associations, localization estimate and lifecycle status | Not needed | Not needed | Not needed | Real association/localization nodes |
 | `ground_to_field` | Truth | Truth | Truth | Localization 2D projection |
@@ -121,7 +123,7 @@ The table below describes only production ownership, not whether the reference i
 Do not retain the current attention fallback's direct access to the scene ball in profiles 2–4.
 It should follow the currently published ball position, with a fixed forward target when no usable ball exists.
 This preserves the necessary substitute for the stub `active_vision` without revealing hidden balls to higher profiles or implementing a second active-vision algorithm.
-Search suggestions still reach behavior through its existing subscription.
+Search suggestions reach behavior through its existing subscription in every combination. Scene-wide ideal ball inputs still report the first ball regardless of visibility, so running search in that mode does not test normal visibility loss.
 
 ## Common input and control contracts
 
@@ -398,7 +400,7 @@ Startup must proceed in phases: validate profile/configuration and parameter lay
 Avoid waiting for sensor-derived outputs before the physics worker exists.
 Use observable readiness and bounded deadlines, not sleeps chosen to hide races.
 
-Profile 1 readiness includes bridged sensors, safe pose, primary state and common outputs.
+Profile 1 readiness includes bridged sensors, safe pose, primary state and common outputs, including a search-suggestion sample. Custom selections add the readiness probes of each enabled estimator group.
 Profile 2 additionally proves detections/odometry are being consumed and filters emit, including empty output.
 Profile 3 additionally requires kinematics, support state and fresh ground/camera/odometry output while upright.
 Profile 4 proves its measurement and localization tasks are alive; a globally acquired pose is a separate status because the current view may be ambiguous or empty.
@@ -410,7 +412,7 @@ HSL disconnection, missing gamepad and temporarily unobservable landmarks are di
 
 ## Code and UI shape
 
-Add a serializable `Profile` enum with stable IDs `motion_behavior`, `filtering`, `body_state_odometry`, `localization`, defaulting to the first.
+Keep serialized preset IDs `motion_behavior`, `filtering`, `body_state_odometry`, `localization`, defaulting to the first. Custom selections serialize as `{"custom":{"filtering":false,"body_state":true,"localization":false}}`; switching back to a preset replaces all three flags. A selection matching a preset uses that preset name.
 One internal profile description determines node startup and substitute ownership.
 Keep this a closed, typed configuration; do not build a generic plugin system or arbitrary graph editor.
 Tests should inspect the same description used to launch, then verify actual outputs.

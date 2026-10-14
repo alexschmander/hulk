@@ -811,7 +811,7 @@ mod runtime_tests {
                 );
                 assert_eq!(member.io.field_dimensions.length, 8.95);
             }
-            if profile == crate::Profile::Localization {
+            if profile.localization() {
                 let estimates = runtime.block_on(async {
                     let mut caches = Vec::new();
                     for member in &members {

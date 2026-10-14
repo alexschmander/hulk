@@ -1,8 +1,8 @@
 //! Startup is driven by outputs from the selected pipeline, after physics starts.
 use crate::profiles::Profile;
 use color_eyre::Result;
-use coordinate_systems::{Ground, Odometry, Robot};
-use linear_algebra::{Isometry3, Pose2};
+use coordinate_systems::{Field, Ground, Odometry, Robot};
+use linear_algebra::{Isometry3, Point2, Pose2};
 use ros_z::{Message, prelude::*, time::Time};
 use std::time::Duration;
 use types::{ball_position::BallPosition, obstacles::Obstacle, time_wrapper::TimeWrapper};
@@ -43,6 +43,8 @@ impl Readiness {
                 |_| true,
             )
             .await?,
+            Probe::new::<Option<Point2<Field>>>(node, "suggested_search_position", |_| true)
+                .await?,
             Probe::new::<types::filtered_whistle::FilteredWhistle>(
                 node,
                 "filtered_whistle",

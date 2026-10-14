@@ -39,7 +39,7 @@ mod whistle;
 pub mod widgets;
 
 use bevy_mujoco::{SharedPhysics, SimulationMode};
-pub use profiles::Profile;
+pub use profiles::{Estimators, Profile};
 pub use robotics::Configuration;
 pub use telemetry::finish_recordings;
 
