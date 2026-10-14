@@ -78,7 +78,7 @@ pub fn keycap(ui: &mut Ui, key: &str) {
 }
 
 /// Cumulative profiles as a ladder: every step includes the real nodes above it.
-pub fn profile_ladder(ui: &mut Ui, selected: &mut Profile) -> Response {
+fn profile_ladder(ui: &mut Ui, selected: &mut Profile) -> Response {
     let index = Profile::ALL.iter().position(|profile| profile == selected);
     let mut changed = None;
     let mut response = ui
@@ -186,62 +186,146 @@ pub fn profile_ladder(ui: &mut Ui, selected: &mut Profile) -> Response {
     response
 }
 
+/// The Profile heading and ladder, with an info button whose popover shows what the selected
+/// profile runs and feeds. The popover ignores outside clicks so steps can be compared live.
+pub fn profile_picker(ui: &mut Ui, selected: &mut Profile) -> Response {
+    let id = ui.make_persistent_id("profile_details");
+    let open = egui::Popup::is_id_open(ui.ctx(), id);
+    let top = ui.cursor().top();
+    let info = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.label(RichText::new("Profile").strong());
+            let label = "Nodes and ground truth";
+            let response = ui
+                .add(egui::Button::selectable(open, icons::ICON_INFO.codepoint).small())
+                .on_hover_text(format!("{label} of the selected profile"));
+            response
+                .widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+            response
+        })
+        .inner;
+    if info.clicked() {
+        egui::Popup::toggle_id(ui.ctx(), id);
+    }
+    let ladder = profile_ladder(ui, selected);
+    let anchor = Rect::from_x_y_ranges(ladder.rect.x_range(), top..=ladder.rect.bottom());
+    let profile = *selected;
+    egui::Popup::new(id, ui.ctx().clone(), anchor, ui.layer_id())
+        .open_memory(None)
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .align(egui::RectAlign::RIGHT_START)
+        .align_alternatives(&[egui::RectAlign::LEFT_START, egui::RectAlign::BOTTOM_START])
+        .gap(8.0)
+        .width(400.0)
+        .show(|ui| {
+            // Areas default to 400 points high, too little for the larger profiles.
+            let height = ui.ctx().content_rect().height() * 0.75;
+            ui.set_width(400.0);
+            ui.set_max_height(height);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(profile.label()).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::new(icons::ICON_CLOSE.codepoint).frame(false))
+                        .on_hover_text("Close")
+                        .clicked()
+                    {
+                        egui::Popup::close_id(ui.ctx(), id);
+                    }
+                });
+            });
+            ui.label(
+                RichText::new(format!(
+                    "{} real nodes run per robot",
+                    profile.nodes().count()
+                ))
+                .size(11.5)
+                .weak(),
+            );
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| profile_details(ui, profile));
+        });
+    ladder
+}
+
 /// What a profile launches per robot, read from the same tables that start it.
-pub fn profile_details(ui: &mut Ui, profile: Profile) {
+fn profile_details(ui: &mut Ui, profile: Profile) {
     use crate::profiles::{REFERENCES, Supply};
+    let small = |text: &str| RichText::new(text).size(11.5);
     let note = |ui: &mut Ui, text: &str| {
-        ui.add(egui::Label::new(RichText::new(text).size(11.5).weak()).wrap());
+        ui.add(egui::Label::new(small(text).weak()).wrap());
     };
-    let topic = |ui: &mut Ui, topic: &str, meaning: &str| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(topic).monospace().size(11.0));
-            ui.label(RichText::new(meaning).size(11.5).weak());
-        });
+    let topic = |ui: &mut Ui, topic: &str| {
+        ui.add(egui::Label::new(RichText::new(topic).monospace().size(11.0)).extend())
     };
+    let heading = |ui: &mut Ui, text: &str| {
+        ui.add_space(10.0);
+        ui.label(RichText::new(text).strong());
+    };
+    // Keeps wrapped rows clear of the scroll bar.
+    ui.set_max_width(ui.available_width() - 10.0);
     ui.spacing_mut().item_spacing.y = 4.0;
-    ui.label(
-        RichText::new(format!(
-            "Real nodes · {} per robot",
-            profile.nodes().count()
-        ))
-        .strong(),
-    );
+    ui.label(RichText::new("Real nodes").strong());
     for group in profile.node_groups() {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(group.label).size(11.5));
-            if group.profile == profile && profile != Profile::MotionBehavior {
-                ui.label(
-                    RichText::new("added")
-                        .size(11.0)
-                        .color(accent(ui.visuals())),
-                );
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            for node in group.nodes {
-                ui.label(RichText::new(node.name).monospace().size(11.0));
-            }
+        let added = group.profile == profile && profile != Profile::MotionBehavior;
+        let rail = ui.painter().add(egui::Shape::Noop);
+        let block = ui
+            .horizontal_top(|ui| {
+                ui.add_space(10.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(small(group.label));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        for node in group.nodes {
+                            topic(ui, node.name);
+                        }
+                    });
+                })
+            })
+            .response;
+        let color = if added {
+            accent(ui.visuals())
+        } else {
+            ui.visuals().weak_text_color().gamma_multiply(0.5)
+        };
+        ui.painter().set(
+            rail,
+            egui::Shape::line_segment(
+                [
+                    Pos2::new(block.rect.left() + 2.0, block.rect.top() + 2.0),
+                    Pos2::new(block.rect.left() + 2.0, block.rect.bottom() - 2.0),
+                ],
+                Stroke::new(2.0, color),
+            ),
+        );
+        block.on_hover_text(if added {
+            format!("Added by {}", profile.label())
+        } else {
+            format!("Runs from {} on", group.profile.label())
         });
     }
     note(
         ui,
-        "One shared controller_handler also routes the gamepad to the selected robot.",
+        "Once per session, controller_handler routes the gamepad to the selected robot.",
     );
+
     for (supply, title, absent) in [
         (
             Supply::Perfect,
             "Ground truth fed to the robot",
-            "None; real nodes produce every estimate from simulated measurements.",
+            "None. Real nodes estimate everything from simulated measurements.",
         ),
         (
             Supply::Synthetic,
             "Synthetic measurements",
-            "None; no real node consumes detections in this profile.",
+            "None. No real node consumes detections in this profile.",
         ),
     ] {
-        ui.add_space(6.0);
-        ui.label(RichText::new(title).strong());
+        heading(ui, title);
         let mut supplied = REFERENCES
             .iter()
             .filter(|reference| reference.production(profile) == Some(supply))
@@ -250,29 +334,32 @@ pub fn profile_details(ui: &mut Ui, profile: Profile) {
             note(ui, absent);
         }
         for reference in supplied {
-            topic(ui, reference.topic, reference.meaning);
+            ui.horizontal_wrapped(|ui| {
+                topic(ui, reference.topic);
+                ui.add(egui::Label::new(small(reference.meaning).weak()));
+            });
         }
     }
+    ui.add_space(4.0);
     note(
         ui,
         "Every profile also simulates raw Booster sensors, buttons, whistle detections and camera calibration.",
     );
-    ui.add_space(6.0);
-    ui.label(RichText::new("Comparison references").strong());
+
+    heading(ui, "Comparison references");
     note(
         ui,
         &format!(
-            "All {} are published under ground_truth/ in every profile, also where a real node owns the production topic.",
+            "All {} are published under ground_truth/ in every profile. Hover one for its meaning.",
             REFERENCES.len()
         ),
     );
-    egui::CollapsingHeader::new("ground_truth/ topics")
-        .id_salt("simulator_ground_truth_topics")
-        .show(ui, |ui| {
-            for reference in REFERENCES {
-                topic(ui, reference.topic, reference.meaning);
-            }
-        });
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        for reference in REFERENCES {
+            topic(ui, reference.topic).on_hover_text(reference.meaning);
+        }
+    });
 }
 
 /// Twix's selection color, darkened in light mode where its fill is too pale for thin marks.
