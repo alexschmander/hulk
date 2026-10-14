@@ -372,12 +372,8 @@ mod enabled {
                 ui.label(RichText::new("Ball").strong());
                 self.ball_ui(ui);
                 ui.add_space(10.0);
-                ui.label(RichText::new("Profile").strong());
-                widgets::profile_ladder(ui, &mut self.settings.profile);
+                widgets::profile_picker(ui, &mut self.settings.profile);
                 ui.add_space(6.0);
-                egui::CollapsingHeader::new("Nodes and ground truth")
-                    .id_salt("simulator_profile_details")
-                    .show(ui, |ui| widgets::profile_details(ui, self.settings.profile));
                 egui::CollapsingHeader::new("Parameter and model paths")
                     .id_salt("simulator_paths")
                     .show(ui, |ui| {
