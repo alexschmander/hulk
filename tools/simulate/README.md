@@ -18,7 +18,7 @@ The [profile plan](PROFILES.md) records topic ownership and validation contracts
 | Body state & odometry | Kinematics, support foot, ground provider, camera matrix and odometry | Field pose; synthetic camera detections and camera calibration |
 | Localization | Field-mark association and 3D/2D localization | Synthetic camera detections, calibration and coherent camera-motion measurements |
 
-Expand **Nodes and ground truth** below the profiles for the selected profile's exact node list, the truth and synthetic inputs it publishes to production topics, and every `ground_truth/` reference, all read from the tables that launch it.
+Click the info button beside **Profile** for the selected profile's exact node list, the truth and synthetic inputs it publishes to production topics, and every `ground_truth/` reference, all read from the tables that launch it.
 Changing a profile requires Stop/Start.
 Profile selection persists with the panel; old layouts default to Motion & behavior.
 Vision and microphone processing remain out of scope.
