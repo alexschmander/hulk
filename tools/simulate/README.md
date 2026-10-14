@@ -5,7 +5,7 @@ MuJoCo supplies physics and simulated sensor inputs.
 The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did.
 All simulator wiring and hardware substitutes live under `tools/simulate`; robotics crates need no simulator integration code.
 
-Select a profile preset before starting, then adjust the three **Real estimators** switches independently.
+Select a profile before starting.
 The simulator sits on three explicitly requested upstream squashes: `oleflb/feat/localization-improvements`, `schluis/dev/ball-filter-preferred-20261004` and `BenSampaolo/ball-search-behavior`.
 The new localization solver acquires at the default spawn; the former lookup-budget limitation no longer applies.
 The walking/head-motion fixture measured 0.0209 m maximum position error and 0.0072 rad maximum yaw error over three seconds of simulation time, using production parameters and no truth pose injection.
@@ -18,15 +18,15 @@ The [profile plan](PROFILES.md) records topic ownership and validation contracts
 | Body state & odometry | Kinematics, support foot, ground provider, camera matrix and odometry | Field pose; synthetic camera detections and camera calibration |
 | Localization | Field-mark association and 3D/2D localization | Synthetic camera detections, calibration and coherent camera-motion measurements |
 
-The presets remain cumulative, but the switches can independently enable **Ball and obstacle filtering**, **Body state & odometry**, and **Localization**. Other combinations are labeled **Custom**. For example, body estimation can run with ideal ball/obstacle inputs, or localization can run with ideal body geometry and no ball/obstacle filters. Selecting a preset replaces the switch selection.
+The profiles are cumulative: each adds the real nodes listed in its row to those of the preceding profiles.
 
-Behavior, `search_suggestor`, motion, protection and team/game handling run in every combination. The simulator supplies ideal outputs for disabled groups; enabled groups are their sole production publishers. Synthetic detections are supplied when either object filtering or localization is enabled, and simulated visual odometry when localization is enabled. The `ground_truth/` comparison streams always remain available.
+Behavior, `search_suggestor`, motion, protection and team/game handling run in every profile. The simulator supplies ideal outputs for disabled groups; enabled groups are their sole production publishers. Synthetic detections are supplied when either object filtering or localization is enabled, and simulated visual odometry when localization is enabled. The `ground_truth/` comparison streams always remain available.
 
 Ideal ball/obstacle inputs are still scene-wide: the first ball is supplied regardless of visibility, and all robots and fixed goalposts become obstacles. Search runs in that mode, but visibility loss is only exercised with object filtering enabled. No hypothetical-ball messages are fabricated when the ball filter is off.
 
-Click the info button beside **Profile** for the effective selection's exact node list, the truth and synthetic inputs it publishes to production topics, and every `ground_truth/` reference, all read from the tables that launch it.
-Changing a preset or estimator selection requires Stop/Start.
-Preset and custom selections persist with the panel; existing saved presets keep their estimator choices, and old layouts without a profile default to Motion & behavior.
+Click the info button beside **Profile** for the selected profile's exact node list, the truth and synthetic inputs it publishes to production topics, and every `ground_truth/` reference, all read from the tables that launch it.
+Changing the profile requires Stop/Start.
+The selected profile persists with the panel; old layouts without a profile default to Motion & behavior.
 Vision and microphone processing remain out of scope.
 
 ## Run
