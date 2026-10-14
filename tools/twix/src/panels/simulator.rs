@@ -530,7 +530,12 @@ mod enabled {
             assert_eq!(legacy.profile, Profile::MotionBehavior);
             assert_eq!(legacy.ball, simulate::BallSize::Location);
             assert_eq!(legacy.competition, simulate::Competition::Middle);
-            for profile in Profile::ALL {
+            for bits in 0..8 {
+                let profile = Profile::from_estimators(simulate::Estimators {
+                    filtering: bits & 1 != 0,
+                    body_state: bits & 2 != 0,
+                    localization: bits & 4 != 0,
+                });
                 let settings = Settings {
                     profile,
                     competition: simulate::Competition::MiddleFoundation,

@@ -388,7 +388,7 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
             .map(|s| serde_json::from_value(serde_json::Value::String(s)).unwrap())
             .unwrap_or(crate::Profile::MotionBehavior),
     };
-    let localization = config.profile == crate::Profile::Localization;
+    let localization = config.profile.localization();
     let team = runtime
         .block_on(Team::new(runtime.handle().clone(), config))
         .unwrap();

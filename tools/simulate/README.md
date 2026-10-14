@@ -5,22 +5,28 @@ MuJoCo supplies physics and simulated sensor inputs.
 The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did.
 All simulator wiring and hardware substitutes live under `tools/simulate`; robotics crates need no simulator integration code.
 
-Select a cumulative profile before starting.
+Select a profile preset before starting, then adjust the three **Real estimators** switches independently.
 The simulator sits on three explicitly requested upstream squashes: `oleflb/feat/localization-improvements`, `schluis/dev/ball-filter-preferred-20261004` and `BenSampaolo/ball-search-behavior`.
 The new localization solver acquires at the default spawn; the former lookup-budget limitation no longer applies.
 The walking/head-motion fixture measured 0.0209 m maximum position error and 0.0072 rad maximum yaw error over three seconds of simulation time, using production parameters and no truth pose injection.
 The [profile plan](PROFILES.md) records topic ownership and validation contracts.
 
-| Profile | Additional real nodes | Remaining ideal inputs |
+| Preset | Additional real nodes | Remaining ideal inputs |
 | --- | --- | --- |
-| Motion & behavior | Common 24-node stack, including raw sensor/button bridges, gamepad, LED handler, whistle filter and HSL communications | Body geometry, odometry, field pose, first ball, other robots and fixed goalposts |
-| Ball and obstacle filtering | Ball filter, visual-kick selector, obstacle filter, search suggestor | Body geometry, odometry and field pose; synthetic camera detections |
+| Motion & behavior | Common 24-node stack per robot, including search, raw sensor/button bridges, LED handler, whistle filter and HSL communications; one shared gamepad handler | Body geometry, odometry, field pose, first ball, other robots and fixed goalposts |
+| Ball and obstacle filtering | Ball filter, visual-kick selector and obstacle filter | Body geometry, odometry and field pose; synthetic camera detections |
 | Body state & odometry | Kinematics, support foot, ground provider, camera matrix and odometry | Field pose; synthetic camera detections and camera calibration |
 | Localization | Field-mark association and 3D/2D localization | Synthetic camera detections, calibration and coherent camera-motion measurements |
 
-Click the info button beside **Profile** for the selected profile's exact node list, the truth and synthetic inputs it publishes to production topics, and every `ground_truth/` reference, all read from the tables that launch it.
-Changing a profile requires Stop/Start.
-Profile selection persists with the panel; old layouts default to Motion & behavior.
+The presets remain cumulative, but the switches can independently enable **Ball and obstacle filtering**, **Body state & odometry**, and **Localization**. Other combinations are labeled **Custom**. For example, body estimation can run with ideal ball/obstacle inputs, or localization can run with ideal body geometry and no ball/obstacle filters. Selecting a preset replaces the switch selection.
+
+Behavior, `search_suggestor`, motion, protection and team/game handling run in every combination. The simulator supplies ideal outputs for disabled groups; enabled groups are their sole production publishers. Synthetic detections are supplied when either object filtering or localization is enabled, and simulated visual odometry when localization is enabled. The `ground_truth/` comparison streams always remain available.
+
+Ideal ball/obstacle inputs are still scene-wide: the first ball is supplied regardless of visibility, and all robots and fixed goalposts become obstacles. Search runs in that mode, but visibility loss is only exercised with object filtering enabled. No hypothetical-ball messages are fabricated when the ball filter is off.
+
+Click the info button beside **Profile** for the effective selection's exact node list, the truth and synthetic inputs it publishes to production topics, and every `ground_truth/` reference, all read from the tables that launch it.
+Changing a preset or estimator selection requires Stop/Start.
+Preset and custom selections persist with the panel; existing saved presets keep their estimator choices, and old layouts without a profile default to Motion & behavior.
 Vision and microphone processing remain out of scope.
 
 ## Run
@@ -242,6 +248,7 @@ export LD_LIBRARY_PATH="$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+
 cargo test -p simulate --lib
 cargo test -p twix --features simulator --bin twix
 # With ONNX Runtime/models available and no simulator using the GameController ports:
+# The startup test covers all eight estimator combinations.
 cargo test -p simulate startup_pause_resume_and_scene_edits_preserve_time -- --ignored
 SIMULATOR_TEST_PROFILE=localization cargo test -p simulate five_players_dynamic -- --ignored
 SIMULATOR_TEST_OPPONENTS=2 SIMULATOR_TEST_ADD_RUNNING=1 cargo test -p simulate five_players_dynamic -- --ignored
