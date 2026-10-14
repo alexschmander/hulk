@@ -7,7 +7,7 @@ The [README](README.md) describes the current simulator.
 
 ## Scope and constraints
 
-Provide four cumulative presets plus independent object-filtering, body-estimation and localization switches, selectable in the Simulator panel before startup.
+Provide four cumulative profiles, selectable in the Simulator panel before startup.
 Keep rendered vision for later.
 Synthetic image-space observations are in scope because filtering and localization consume them; camera rendering, image transport, neural detection and actual stereo VO are deferred.
 
@@ -36,9 +36,8 @@ Whistle detection is replaced by a UI-generated detection stream; the real whist
 | Localization | `field_mark_association`, `localization_3d`, `localization_2d` | Raw sensors, camera calibration, synthetic detections and camera-motion measurements substituting for stereo VO |
 
 The Rust crate names for the last two nodes are `localization-3d` and `localization-2d`; their runtime node names are `localization3d` and `localization2d`.
-The presets are cumulative in robotics coverage. The independent switches override that progression; any of the eight estimator combinations is valid.
-The tables below describe the four presets. For custom selections, enabling a group removes the corresponding truth substitutes from its production topics. Disabled groups keep those substitutes. Localization requires synthetic detections even when object filtering is disabled, and its visual-odometry substitute does not depend on body estimation.
-`search_suggestor` runs in every combination as part of behavior. Its hypothetical-ball subscriber is idle when `ball_filter` is disabled; no synthetic search policy or hypotheses are supplied.
+The profiles are cumulative in robotics coverage. Enabling an estimator group removes the corresponding truth substitutes from its production topics. Disabled groups keep those substitutes.
+`search_suggestor` runs in every profile as part of behavior. Its hypothetical-ball subscriber is idle when `ball_filter` is disabled; no synthetic search policy or hypotheses are supplied.
 All physical reference streams remain published under `ground_truth/` in every profile, regardless of which estimators are running.
 
 ### Common stack
