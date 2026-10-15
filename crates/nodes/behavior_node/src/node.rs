@@ -147,11 +147,20 @@ fn validate_behavior_parameters(
     if !parameters.kicking.target_speed.is_finite() || parameters.kicking.target_speed < 0.0 {
         errors.push("kicking.target_speed must be finite and non-negative".to_owned());
     }
-    let matching_distance = parameters.kicking.ball_velocity_matching_distance;
-    if !matching_distance.is_finite() || matching_distance < 0.0 {
-        errors.push(
-            "kicking.ball_velocity_matching_distance must be finite and non-negative".to_owned(),
-        );
+    for (name, value) in [
+        ("soft_target_speed", parameters.kicking.soft_target_speed),
+        (
+            "strong_target_speed",
+            parameters.kicking.strong_target_speed,
+        ),
+        (
+            "ball_velocity_matching_distance",
+            parameters.kicking.ball_velocity_matching_distance,
+        ),
+    ] {
+        if !value.is_finite() || value < 0.0 {
+            errors.push(format!("kicking.{name} must be finite and non-negative"));
+        }
     }
     if parameters.kicking.ball_observation_timeout.is_zero() {
         errors.push("kicking.ball_observation_timeout must be positive".to_owned());

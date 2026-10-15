@@ -472,6 +472,15 @@ pub struct KickingParameters {
     pub quick: bool,
     /// Desired outgoing ball speed in m/s.
     pub target_speed: f32,
+    /// Outgoing speed for short touches with the soft policy, in m/s.
+    #[serde(default = "default_soft_target_speed")]
+    pub soft_target_speed: f32,
+    /// Target speed for goal shots using the normal policy, in m/s.
+    #[serde(default = "default_strong_target_speed")]
+    pub strong_target_speed: f32,
+    /// Use the model's maximum-strength flag instead of a scaled goal shot.
+    #[serde(default)]
+    pub strong_uses_maximum_flag: bool,
     /// Maximum age of a visual kick observation before falling back to tracking.
     #[serde(default = "default_kick_ball_timeout")]
     pub ball_observation_timeout: Duration,
@@ -497,6 +506,9 @@ impl Default for KickingParameters {
             soft: false,
             quick: false,
             target_speed: 3.4,
+            soft_target_speed: default_soft_target_speed(),
+            strong_target_speed: default_strong_target_speed(),
+            strong_uses_maximum_flag: false,
             ball_observation_timeout: default_kick_ball_timeout(),
             ball_velocity_matching_distance: default_kick_ball_matching_distance(),
             allow_strong_kicks: false,
@@ -509,6 +521,12 @@ impl Default for KickingParameters {
     }
 }
 
+fn default_soft_target_speed() -> f32 {
+    0.1
+}
+fn default_strong_target_speed() -> f32 {
+    3.4
+}
 fn default_kick_ball_timeout() -> Duration {
     Duration::from_millis(100)
 }

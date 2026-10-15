@@ -6,7 +6,50 @@ use types::{
     behavior_tree::Status,
     motion_command::{BodyMotion, HeadMotion, ImageRegion, MotionCommand},
     motion_type::MotionType,
+    parameters::KickingParameters,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KickStrength {
+    Soft,
+    Medium,
+    Strong,
+}
+
+fn configure_strength(
+    motion: &mut BodyMotion,
+    parameters: &KickingParameters,
+    strength: KickStrength,
+) -> Status {
+    let BodyMotion::Kick {
+        soft,
+        quick,
+        strong,
+        target_speed,
+        ..
+    } = motion
+    else {
+        return Status::Failure;
+    };
+    *soft = strength == KickStrength::Soft;
+    *strong = strength == KickStrength::Strong && parameters.strong_uses_maximum_flag;
+    *quick = parameters.quick && !*soft;
+    *target_speed = match strength {
+        KickStrength::Soft => parameters.soft_target_speed,
+        KickStrength::Medium => parameters.target_speed,
+        KickStrength::Strong => parameters.strong_target_speed,
+    };
+    Status::Success
+}
+
+pub fn use_kick_strength(blackboard: &mut Blackboard, strength: KickStrength) -> Status {
+    blackboard
+        .body_motion
+        .as_mut()
+        .map_or(Status::Failure, |motion| {
+            configure_strength(motion, &blackboard.parameters.kicking, strength)
+        })
+}
 
 use crate::{
     action,
@@ -64,6 +107,7 @@ pub fn kick(blackboard: &mut Blackboard) -> Status {
             kick_direction: Default::default(),
             strong: false,
         });
+        use_kick(blackboard, false);
         if blackboard.last_motion_type == Some(MotionType::Kick) {
             use_last_kick_settings(blackboard);
         }
@@ -135,7 +179,7 @@ pub fn is_target_in_strong_kick_range(blackboard: &mut Blackboard) -> bool {
 }
 
 pub fn allow_strong_kicks(blackboard: &mut Blackboard) -> bool {
-    blackboard.parameters.kicking.allow_strong_kicks
+    blackboard.parameters.kicking.allow_strong_kicks && !blackboard.parameters.kicking.soft
 }
 
 pub fn use_last_kick_settings(blackboard: &mut Blackboard) -> Status {
@@ -165,16 +209,14 @@ pub fn use_last_kick_settings(blackboard: &mut Blackboard) -> Status {
 }
 
 pub fn use_kick(blackboard: &mut Blackboard, strong: bool) -> Status {
-    if let Some(BodyMotion::Kick {
-        strong: motion_strong,
-        ..
-    }) = blackboard.body_motion.as_mut()
-    {
-        *motion_strong = strong;
-
-        return Status::Success;
-    }
-    Status::Failure
+    let strength = if strong {
+        KickStrength::Strong
+    } else if blackboard.parameters.kicking.soft {
+        KickStrength::Soft
+    } else {
+        KickStrength::Medium
+    };
+    use_kick_strength(blackboard, strength)
 }
 
 pub fn use_strong_kick(blackboard: &mut Blackboard) -> Status {
@@ -276,4 +318,47 @@ fn kick_ball_position_in_ground(
                 .as_ref()
                 .map(|ball| ground_to_field.inverse() * ball.position)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strength_selection_clears_previous_policy_and_flags() {
+        let parameters = KickingParameters {
+            target_speed: 1.0,
+            soft_target_speed: 0.1,
+            quick: true,
+            ..Default::default()
+        };
+        let mut motion = BodyMotion::Kick {
+            ball_position: Point2::origin(),
+            ball_velocity: Vector2::zeros(),
+            target_speed: 3.4,
+            soft: false,
+            quick: true,
+            strong: true,
+            kick_direction: Orientation2::new(0.0),
+        };
+        configure_strength(&mut motion, &parameters, KickStrength::Soft);
+        assert!(
+            matches!(motion, BodyMotion::Kick {soft: true, strong: false, quick: false, target_speed, ..} if target_speed == 0.1)
+        );
+        configure_strength(&mut motion, &parameters, KickStrength::Strong);
+        assert!(matches!(
+            motion,
+            BodyMotion::Kick {
+                soft: false,
+                strong: false,
+                quick: true,
+                target_speed,
+                ..
+            } if target_speed == parameters.strong_target_speed
+        ));
+        configure_strength(&mut motion, &parameters, KickStrength::Medium);
+        assert!(
+            matches!(motion, BodyMotion::Kick {soft: false, strong: false, target_speed, ..} if target_speed == 1.0)
+        );
+    }
 }
