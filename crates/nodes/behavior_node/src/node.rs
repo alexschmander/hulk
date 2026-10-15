@@ -1,12 +1,7 @@
-use std::{
-    net::SocketAddr,
-    pin::Pin,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
 use color_eyre::Result;
-use types::fall_detection::FallDetection;
+use types::fall_detection::{FallDetection, Posture};
 
 use coordinate_systems::{Field, Ground};
 use hsl_network_messages::PlayerNumber;
@@ -303,6 +298,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         voronoi_map: None,
     };
 
+    let mut manual_stand_up_aborted = false;
     loop {
         timer.tick().await;
 
@@ -333,9 +329,14 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             .as_ref()
             .is_some_and(|input| input.is_pressed(Button::Start));
         blackboard.controller_input = controller_input_cache
-            .get_after(Time::from_wallclock(SystemTime::now()) - Duration::from_millis(250))
-            .filter(|input| input.connected)
-            .map(|input| input.as_ref().clone());
+            .get_latest_with_stamp()
+            .filter(|(stamp, input)| {
+                let now = node.clock().now();
+                input.connected
+                    && *stamp <= now
+                    && now.duration_since(*stamp) <= Duration::from_millis(250)
+            })
+            .map(|(_, input)| input.as_ref().clone());
         if let Some(input) = &blackboard.controller_input
             && input.is_pressed(Button::Start)
             && !was_start_pressed
@@ -353,10 +354,28 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             })
             .unwrap_or_default();
 
-        let primary_state = primary_state_cache
+        let now = node.clock().now();
+        let fall_detection = fall_detection_cache
             .get_latest()
-            .map(|state| *state)
+            .map(|detection| *detection);
+        let (primary_state, primary_is_fresh) = primary_state_cache
+            .get_latest_with_stamp()
+            .map(|(stamp, state)| {
+                (
+                    *state,
+                    stamp <= now && now.duration_since(stamp) <= Duration::from_millis(150),
+                )
+            })
             .unwrap_or_default();
+        let primary_state = guard_manual_stand_up(
+            primary_state,
+            primary_is_fresh,
+            fall_detection
+                .filter(|detection| detection.is_valid(now))
+                .map(|detection| detection.posture),
+            blackboard.controller_input.as_ref(),
+            &mut manual_stand_up_aborted,
+        );
         if primary_state != blackboard.world_state.robot.primary_state {
             blackboard.remote_control_enabled = false;
         }
@@ -373,9 +392,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         blackboard.visual_kick_ball_position = visual_kick_ball_position_cache
             .get_latest()
             .and_then(|ball_position| *ball_position);
-        blackboard.world_state.fall_detection = fall_detection_cache
-            .get_latest()
-            .map(|fall_detection| *fall_detection.as_ref());
+        blackboard.world_state.fall_detection = fall_detection;
         blackboard.world_state.filtered_game_controller_state =
             filtered_game_controller_state_cache.get_latest().map(
                 |filtered_game_controller_state| filtered_game_controller_state.as_ref().clone(),
@@ -384,7 +401,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             .get_latest()
             .map(|positions| positions.as_ref().clone())
             .unwrap_or_default();
-        blackboard.world_state.now = node.clock().now();
+        blackboard.world_state.now = now;
         blackboard.world_state.obstacles = obstacles_cache
             .get_latest()
             .map(|obstacles| obstacles.as_ref().clone())
@@ -473,5 +490,120 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             .publish_if_subscribed(|| async { blackboard.clone() })
             .await?;
         motion_command_pub.publish(&motion_command).await?;
+    }
+}
+
+fn guard_manual_stand_up(
+    primary_state: PrimaryState,
+    primary_is_fresh: bool,
+    posture: Option<Posture>,
+    controller: Option<&ControllerInput>,
+    aborted: &mut bool,
+) -> PrimaryState {
+    let controller = controller.filter(|input| input.connected);
+    let damping = controller.is_some_and(|input| input.is_pressed(Button::West));
+    if primary_state == PrimaryState::ManualStandUp {
+        // Keep an aborted attempt stopped until the primary state filter acknowledges it.
+        *aborted |= !primary_is_fresh
+            || controller.is_none()
+            || damping
+            || !matches!(
+                posture,
+                Some(
+                    Posture::Upright
+                        | Posture::StandingUp
+                        | Posture::Fallen {
+                            ready_for_standup: true
+                        }
+                )
+            );
+    } else {
+        *aborted = false;
+    }
+    if damping || *aborted {
+        PrimaryState::Damping
+    } else {
+        primary_state
+    }
+}
+
+#[cfg(test)]
+mod manual_stand_up_tests {
+    use super::*;
+    use types::controller_input::ControllerButton;
+
+    #[test]
+    fn failed_manual_attempt_stays_stopped_until_acknowledged() {
+        let controller = ControllerInput {
+            connected: true,
+            ..Default::default()
+        };
+        let stop = ControllerInput {
+            buttons: vec![ControllerButton {
+                name: Button::West,
+                pressed: true,
+                value: 1.0,
+            }],
+            ..controller.clone()
+        };
+        let ready = Some(Posture::Fallen {
+            ready_for_standup: true,
+        });
+        for (fresh, posture, input) in [
+            (false, ready, Some(&controller)),
+            (true, None, Some(&controller)),
+            (true, Some(Posture::Falling), Some(&controller)),
+            (
+                true,
+                Some(Posture::Fallen {
+                    ready_for_standup: false,
+                }),
+                Some(&controller),
+            ),
+            (true, ready, None),
+            (true, ready, Some(&stop)),
+        ] {
+            let mut aborted = false;
+            for posture in [ready, Some(Posture::StandingUp), Some(Posture::Upright)] {
+                assert_eq!(
+                    guard_manual_stand_up(
+                        PrimaryState::ManualStandUp,
+                        true,
+                        posture,
+                        Some(&controller),
+                        &mut aborted
+                    ),
+                    PrimaryState::ManualStandUp
+                );
+            }
+            assert_eq!(
+                guard_manual_stand_up(
+                    PrimaryState::ManualStandUp,
+                    fresh,
+                    posture,
+                    input,
+                    &mut aborted
+                ),
+                PrimaryState::Damping
+            );
+            assert_eq!(
+                guard_manual_stand_up(
+                    PrimaryState::ManualStandUp,
+                    true,
+                    ready,
+                    Some(&controller),
+                    &mut aborted
+                ),
+                PrimaryState::Damping
+            );
+            guard_manual_stand_up(
+                PrimaryState::Damping,
+                true,
+                ready,
+                Some(&controller),
+                &mut aborted,
+            );
+            assert!(!aborted);
+        }
     }
 }

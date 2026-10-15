@@ -155,6 +155,10 @@ pub fn is_fallen(blackboard: &mut Blackboard) -> bool {
     matches!(posture(blackboard), Some(Posture::Fallen { .. }))
 }
 
+pub fn is_upright(blackboard: &mut Blackboard) -> bool {
+    matches!(posture(blackboard), Some(Posture::Upright))
+}
+
 pub fn is_ready_for_stand_up(blackboard: &mut Blackboard) -> bool {
     matches!(
         posture(blackboard),

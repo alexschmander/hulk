@@ -45,7 +45,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
 
                 state_color = match primary_state {
                     PrimaryState::Damping => LedColor::BLUE,
-                    PrimaryState::Prepare => LedColor::YELLOW,
+                    PrimaryState::Prepare | PrimaryState::ManualStandUp => LedColor::YELLOW,
                     PrimaryState::Stop => state_color,
                     PrimaryState::Ready => LedColor::WHITE,
                     PrimaryState::Initial => LedColor::MAGENTA,
