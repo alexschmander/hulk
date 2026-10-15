@@ -66,6 +66,8 @@
     soft: false,
     quick: false,
     target_speed: 1.0, // Desired outgoing ball speed in m/s.
+    ball_observation_timeout: { secs: 0, nanos: 100000000 },
+    ball_velocity_matching_distance: 0.3,
     allow_strong_kicks: false,
     kick_activation_distance: 3.0,
     kick_activation_hysteresis: 0.5,

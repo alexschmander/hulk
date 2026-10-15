@@ -472,6 +472,12 @@ pub struct KickingParameters {
     pub quick: bool,
     /// Desired outgoing ball speed in m/s.
     pub target_speed: f32,
+    /// Maximum age of a visual kick observation before falling back to tracking.
+    #[serde(default = "default_kick_ball_timeout")]
+    pub ball_observation_timeout: Duration,
+    /// Maximum position disagreement when associating a visual ball with tracked velocity.
+    #[serde(default = "default_kick_ball_matching_distance")]
+    pub ball_velocity_matching_distance: f32,
     pub allow_strong_kicks: bool,
     /// Ball distance at the centre of the walk-to-kick handoff band, in metres.
     pub kick_activation_distance: f32,
@@ -491,6 +497,8 @@ impl Default for KickingParameters {
             soft: false,
             quick: false,
             target_speed: 3.4,
+            ball_observation_timeout: default_kick_ball_timeout(),
+            ball_velocity_matching_distance: default_kick_ball_matching_distance(),
             allow_strong_kicks: false,
             kick_activation_distance: 0.0,
             kick_activation_hysteresis: 0.0,
@@ -499,6 +507,13 @@ impl Default for KickingParameters {
             minimum_interception_forward_distance: 0.0,
         }
     }
+}
+
+fn default_kick_ball_timeout() -> Duration {
+    Duration::from_millis(100)
+}
+fn default_kick_ball_matching_distance() -> f32 {
+    0.3
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ros_z::Message)]

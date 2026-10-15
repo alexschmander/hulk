@@ -5,7 +5,7 @@ use color_eyre::{
     Result,
     eyre::{WrapErr, ensure, eyre},
 };
-use coordinate_systems::Ground;
+use coordinate_systems::{Ground, Odometry};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
@@ -15,7 +15,7 @@ use kinematics::joints::{
     body::{BodyJoints, LowerBodyJoints, UpperBodyJoints},
     head::HeadJoints,
 };
-use linear_algebra::{Vector2, vector};
+use linear_algebra::{Pose2, Vector2, vector};
 use motion_inference::{
     inference::{GetUpCommand, KickCommand, WalkCommand, joints_are_finite},
     locomotion::{KickRequest, leg},
@@ -44,6 +44,7 @@ use types::{
 
 use crate::walking::{WalkingParameters, step_from_walk_command};
 
+mod kick;
 pub mod walking;
 
 const ROBOT_COMMAND_TOPIC: &str = "commands/robot_command";
@@ -106,6 +107,12 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
     let serial_motor_states_sub = node
         .subscriber::<Joints<MotorState>>("inputs/serial_motor_states")
         .cache(1)
+        .build()
+        .await?;
+
+    let odometry = node
+        .subscriber::<Pose2<Odometry>>("inputs/odometry")
+        .cache(128)
         .build()
         .await?;
 
@@ -198,7 +205,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             walking_velocity_limits = *limits;
         }
 
-        let motion_command = match motion_command_cache.get_latest_with_stamp() {
+        let (motion_command, command_time) = match motion_command_cache.get_latest_with_stamp() {
             Some((timestamp, motion_command)) => {
                 let age = now.duration_since(timestamp);
 
@@ -211,23 +218,37 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
 
                     motion_state.send_emergency_stop_signal().await?;
 
-                    Arc::new(MotionCommand::Damping)
+                    (Arc::new(MotionCommand::Damping), now)
                 } else {
-                    motion_command
+                    (motion_command, timestamp)
                 }
             }
             None => {
                 warn!("behavior did not provide a motion command (yet)!");
 
-                Arc::new(MotionCommand::Damping)
+                (Arc::new(MotionCommand::Damping), now)
             }
         };
 
-        let motion_plan = MotionPlan::from_motion_command(
+        let mut motion_plan = MotionPlan::from_motion_command(
             &motion_command,
             &parameters.walking,
             walking_velocity_limits,
         );
+        if let MotionPlan::Kick { command, .. } = &mut motion_plan
+            && let Some((previous_time, previous)) = odometry.get_nearest_with_stamp(command_time)
+            && let Some((current_time, current)) = odometry.get_latest_with_stamp()
+            && previous_time.abs_diff(command_time) <= parameters.maximum_command_age
+            && current_time <= now
+            && now.duration_since(current_time) <= parameters.maximum_command_age
+        {
+            command.request = kick::compensate(
+                command.request,
+                now.duration_since(command_time),
+                *previous,
+                *current,
+            );
+        }
 
         cycles_since_last_inference += 1;
         let do_inference = cycles_since_last_inference >= 10;
@@ -336,8 +357,6 @@ impl MotionPlan {
                     request: KickRequest {
                         ball_position: *ball_position,
                         ball_velocity: *ball_velocity,
-                        // TODO: use timestamped odometry to compensate stale ball coordinates
-                        // and kick direction for robot motion before inference.
                         direction: *kick_direction,
                         target_speed: *target_speed,
                         strong: *strong,

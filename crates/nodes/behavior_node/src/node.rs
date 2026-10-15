@@ -9,7 +9,7 @@ use std::{
 use color_eyre::Result;
 use types::fall_detection::FallDetection;
 
-use coordinate_systems::{Field, Ground};
+use coordinate_systems::{Field, Ground, Odometry};
 use hsl_network_messages::PlayerNumber;
 use kinematics::joints::head::HeadJoints;
 use linear_algebra::{Isometry2, Point2, Pose2, Vector2};
@@ -147,6 +147,15 @@ fn validate_behavior_parameters(
     if !parameters.kicking.target_speed.is_finite() || parameters.kicking.target_speed < 0.0 {
         errors.push("kicking.target_speed must be finite and non-negative".to_owned());
     }
+    let matching_distance = parameters.kicking.ball_velocity_matching_distance;
+    if !matching_distance.is_finite() || matching_distance < 0.0 {
+        errors.push(
+            "kicking.ball_velocity_matching_distance must be finite and non-negative".to_owned(),
+        );
+    }
+    if parameters.kicking.ball_observation_timeout.is_zero() {
+        errors.push("kicking.ball_observation_timeout must be positive".to_owned());
+    }
 
     if errors.is_empty() {
         Ok(())
@@ -211,6 +220,11 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let visual_kick_ball_position_cache = node
         .subscriber::<Option<BallPosition<Ground>>>("visual_kick/ball_position")
         .cache(1)
+        .build()
+        .await?;
+    let kick_odometry = node
+        .subscriber::<Pose2<Odometry>>("inputs/odometry")
+        .cache(128)
         .build()
         .await?;
     let filtered_game_controller_state_cache = node
@@ -450,9 +464,25 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         };
 
         blackboard.world_state.ball = ball_state_cache.get_latest().and_then(|ball| *ball);
+        let now = node.clock().now();
         blackboard.visual_kick_ball_position = visual_kick_ball_position_cache
             .get_latest()
-            .and_then(|ball_position| *ball_position);
+            .and_then(|ball_position| *ball_position)
+            .and_then(|ball| {
+                let (time, previous) = kick_odometry.get_nearest_with_stamp(ball.last_seen)?;
+                let (current_time, current) = kick_odometry.get_nearest_with_stamp(now)?;
+                let timeout = blackboard.parameters.kicking.ball_observation_timeout;
+                if time.abs_diff(ball.last_seen) > timeout || current_time.abs_diff(now) > timeout {
+                    return None;
+                }
+                crate::kick::in_current_frame(
+                    ball,
+                    blackboard.world_state.ball,
+                    types::odometry::previous_to_current(*previous, *current),
+                    now,
+                    &blackboard.parameters.kicking,
+                )
+            });
         blackboard.world_state.fall_detection = fall_detection_cache
             .get_latest()
             .map(|fall_detection| *fall_detection.as_ref());

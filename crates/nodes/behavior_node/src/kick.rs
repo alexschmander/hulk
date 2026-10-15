@@ -1,4 +1,6 @@
 use coordinate_systems::{Field, Ground};
+mod ball;
+pub(crate) use ball::in_current_frame;
 use linear_algebra::{Isometry2, Orientation2, Point2, Vector2, point};
 use types::{
     behavior_tree::Status,
@@ -47,9 +49,15 @@ pub fn kick(blackboard: &mut Blackboard) -> Status {
         blackboard.body_motion = Some(BodyMotion::Kick {
             ball_position: ball_in_ground,
             ball_velocity: blackboard
-                .world_state
-                .ball
-                .map_or(Vector2::zeros(), |ball| ball.ball_in_ground_velocity),
+                .visual_kick_ball_position
+                .map(|ball| ball.velocity)
+                .or_else(|| {
+                    blackboard
+                        .world_state
+                        .ball
+                        .map(|ball| ball.ball_in_ground_velocity)
+                })
+                .unwrap_or(Vector2::zeros()),
             target_speed: blackboard.parameters.kicking.target_speed,
             soft: blackboard.parameters.kicking.soft,
             quick: blackboard.parameters.kicking.quick,
