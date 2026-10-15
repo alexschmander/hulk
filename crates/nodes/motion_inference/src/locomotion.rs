@@ -162,8 +162,14 @@ impl Locomotion {
             // RLWalkPhase::calcJoints retains these targets before downstream composition/clipping.
             self.previous_target[joint] = position[joint];
         }
-        let limit = self.parameters.locomotion.frequency_offset_limit;
-        self.frequency_offset = actions[LEGS.len()].clamp(-limit, limit);
+        // Kick training feeds back the action before gait clipping. The walk
+        // reference controller feeds back the clipped gait offset instead.
+        let frequency_limit = if policy == Policy::Walk {
+            self.parameters.locomotion.frequency_offset_limit
+        } else {
+            action_limit
+        };
+        self.frequency_offset = actions[LEGS.len()].clamp(-frequency_limit, frequency_limit);
         position_targets(position, kp, kd)
     }
 }
@@ -193,5 +199,73 @@ pub fn leg(angles: &LegJoints<f32>, left: bool) -> (Point3<Robot>, Point3<Robot>
             foot_to_robot * point![0.026, 0.0, -0.038],
             tibia_to_robot.translation(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observation::SensorFrame;
+    use linear_algebra::Vector3;
+
+    #[test]
+    fn frequency_feedback_preserves_the_trained_action_before_gait_clipping() {
+        let parameters: Parameters = serde_json::from_value(
+            json5::from_str::<serde_json::Value>(include_str!(
+                "../../../../etc/parameters/base/motion_inference.json5"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let position = Policy::Walk.offset(&parameters);
+        let sensor = SensorFrame {
+            timestamp: ros_z::time::Time::zero(),
+            position,
+            velocity: Joints::fill(0.0),
+            orientation: nalgebra::Quaternion::identity(),
+            gyro: Vector3::zeros(),
+            last_commanded_position: position,
+        };
+        let joints = JointLimits {
+            position: Joints::fill([-3.0, 3.0]),
+            maximum_torque: Joints::fill(50.0),
+        };
+        let mut state = Locomotion::new(&sensor, std::sync::Arc::new(parameters), &joints);
+        let mut actions = [0.0; 13];
+        actions[12] = 1.25;
+        state.decode(Policy::Kick, &actions, &sensor);
+        let request = KickRequest {
+            ball_position: point![0.5, 0.0],
+            ball_velocity: Vector2::zeros(),
+            direction: Orientation2::new(0.0),
+            target_speed: 1.0,
+            strong: false,
+            quick: false,
+        };
+        let tensor = kick::Observation::new(
+            &state,
+            &sensor,
+            &sensor.velocity,
+            false,
+            request,
+            false,
+            (request.ball_position, request.ball_position),
+            &joints,
+        )
+        .to_tensor();
+        assert_eq!(
+            tensor[47], 1.25,
+            "training feeds back the action clipped to 2.0, before gait clipping to 0.5"
+        );
+        state.advance(0.02, false);
+        assert!(
+            (state.phase - 0.04).abs() < 1e-6,
+            "physical gait frequency still clips to 2 Hz"
+        );
+        state.decode(Policy::Walk, &actions, &sensor);
+        assert_eq!(
+            state.frequency_offset, 0.5,
+            "the walk controller retains its clipped frequency feedback"
+        );
     }
 }

@@ -313,7 +313,9 @@ impl Execution {
                     kick::Observation::new(
                         state,
                         sensor,
-                        &velocity.walking,
+                        // Kick training uses the raw finite-difference velocity.
+                        // The walking estimator's slew limit delays a fast swing.
+                        &velocity.raw,
                         standing,
                         request,
                         soft,
@@ -344,15 +346,13 @@ impl Execution {
                 }
             },
             State::SlowGetUp(state) => {
-                slow::Observation::new(state, sensor, &velocity.get_up, now, joints)
+                slow::Observation::new(state, sensor, &velocity.raw, now, joints)
                     .to_tensor()
                     .to_vec()
             }
-            State::FastGetUp(state) => {
-                fast::Observation::new(state, sensor, &velocity.get_up, joints)
-                    .to_tensor()
-                    .to_vec()
-            }
+            State::FastGetUp(state) => fast::Observation::new(state, sensor, &velocity.raw, joints)
+                .to_tensor()
+                .to_vec(),
         }
     }
 
@@ -409,4 +409,64 @@ pub fn joints_are_finite(joints: &Joints<MotorCommand>) -> bool {
             ]
         })
         .all(f32::is_finite)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use linear_algebra::{Orientation2, Vector3, point};
+
+    #[test]
+    fn kick_observation_uses_the_raw_joint_velocity_from_training() {
+        let parameters: Parameters = serde_json::from_value(
+            json5::from_str::<serde_json::Value>(include_str!(
+                "../../../../etc/parameters/base/motion_inference.json5"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let position = Policy::Kick.offset(&parameters);
+        let sensor = SensorFrame {
+            timestamp: Time::zero(),
+            position,
+            velocity: Joints::fill(10.0),
+            orientation: nalgebra::Quaternion::identity(),
+            gyro: Vector3::zeros(),
+            last_commanded_position: position,
+        };
+        let joints = JointLimits {
+            position: Joints::fill([-3.0, 3.0]),
+            maximum_torque: Joints::fill(50.0),
+        };
+        let mut state = Execution::new(
+            Policy::Kick,
+            &sensor,
+            Time::zero(),
+            Arc::new(parameters),
+            &joints,
+        );
+        let mut velocity = VelocityEstimator::default();
+        velocity.walking = Joints::fill(1.0);
+        velocity.raw = Joints::fill(10.0);
+        let command = InferenceCommand::Kick(KickCommand {
+            soft: false,
+            request: KickRequest {
+                ball_position: point![0.5, 0.1],
+                ball_velocity: Vector2::zeros(),
+                direction: Orientation2::new(0.0),
+                target_speed: 1.0,
+                strong: false,
+                quick: false,
+            },
+        });
+        let tensor = state.prepare_input(Time::zero(), &sensor, &velocity, command, false, &joints);
+        assert_eq!(
+            tensor[23], 1.0,
+            "kick training uses raw finite-difference velocity scaled by 0.1"
+        );
+        assert_eq!(
+            tensor[56], 0.1,
+            "target speed in m/s is scaled by 0.1 exactly once"
+        );
+    }
 }

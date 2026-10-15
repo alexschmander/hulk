@@ -298,8 +298,11 @@ impl SensorLifetime {
             return Err(InferenceError::InputUnavailable {
                 input: self.origin.topic.clone(),
                 reason: format!(
-                    "{} has a future source timestamp",
-                    self.origin.publication_id
+                    "{} has a future source timestamp: source {:?}, received {:?}, now {:?}",
+                    self.origin.publication_id,
+                    self.origin.source_time,
+                    self.origin.received_at,
+                    source_clock_now
                 ),
             });
         }

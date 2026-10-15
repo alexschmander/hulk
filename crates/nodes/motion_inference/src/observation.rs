@@ -51,7 +51,7 @@ impl SensorFrame {
 pub struct VelocityEstimator {
     previous: Option<(Time, Joints<f32>)>,
     pub walking: Joints<f32>,
-    pub get_up: Joints<f32>,
+    pub raw: Joints<f32>,
 }
 
 impl VelocityEstimator {
@@ -82,7 +82,7 @@ impl VelocityEstimator {
                 }
                 None => sensor.velocity[joint],
             };
-            self.get_up[joint] = velocity;
+            self.raw[joint] = velocity;
             let previous_velocity = self.walking[joint];
             self.walking[joint] += (velocity - previous_velocity).clamp(
                 (-maximum_change).min(-previous_velocity),
