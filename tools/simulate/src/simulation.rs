@@ -427,6 +427,15 @@ impl PhysicsWorker {
     }
     #[cfg(test)]
     pub fn start(physics: SharedPhysics, io: Robotics) -> Self {
+        Self::start_observed(physics, io, |_, _| {})
+    }
+
+    #[cfg(test)]
+    pub fn start_observed(
+        physics: SharedPhysics,
+        io: Robotics,
+        mut observe: impl FnMut(&crate::robot_io::Data, ros_z::time::Time) + Send + 'static,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let ready = Arc::new(AtomicBool::new(false));
@@ -494,6 +503,7 @@ impl PhysicsWorker {
                             // advancing it, so inference never receives future data.
                             let time = io.now();
                             if world.mode == SimulationMode::Running {
+                                observe(world.data(), time);
                                 controller.apply(robot, world.data_mut(), &io.actuator_control());
                                 world.data_mut().step();
                             }

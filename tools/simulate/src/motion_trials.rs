@@ -5,10 +5,52 @@ use crate::{Competition, Configuration, RefereeMode};
 use ros_z::{parameter::RemoteParameterClient, prelude::*};
 use types::motion_command::{HeadMotion, MotionCommand};
 
+#[path = "motion_trials/contacts.rs"]
+mod contacts;
 #[path = "motion_trials/coordinates.rs"]
 mod coordinates;
 #[path = "motion_trials/kickoff.rs"]
 mod kickoff;
+
+#[test]
+#[ignore = "requires MuJoCo, ONNX Runtime and motion models; runs three live-policy trials"]
+fn kick_contact_regressions() {
+    for (scenario, speed, duration, ratio, moving) in [
+        ("normal", "3.4", "3", "0.9", false),
+        ("soft", "0.3", "3", "0.8", false),
+        ("behavior", "0.3", "9", "0.75", true),
+    ] {
+        // Separate processes isolate native runtimes and fixture environment.
+        let mut trial = std::process::Command::new(std::env::current_exe().unwrap());
+        for (name, _) in std::env::vars_os() {
+            if name
+                .to_str()
+                .is_some_and(|name| name.starts_with("MOTION_TRIAL"))
+            {
+                trial.env_remove(name);
+            }
+        }
+        trial
+            .args(["motion_policy_trial", "--ignored", "--nocapture"])
+            .env("MOTION_TRIAL", scenario)
+            .env("MOTION_TRIAL_SPEED", speed)
+            .env("MOTION_TRIAL_DURATION", duration)
+            .env("MOTION_TRIAL_CONTACT_AUDIT", "1")
+            .env("MOTION_TRIAL_MIN_CONTACT_SPEED_RATIO", ratio)
+            .env("MOTION_TRIAL_MIN_FOLLOWTHROUGH_MM", "0")
+            .env("MOTION_TRIAL_MAX_CONTACT_LINE_OFFSET_MM", "30")
+            .env("MOTION_TRIAL_REQUIRE_FOOT_FIRST", "1");
+        if moving {
+            trial
+                .env("MOTION_TRIAL_PROFILE", "filtering")
+                .env("MOTION_TRIAL_VX", "0.6");
+        }
+        assert!(
+            trial.status().unwrap().success(),
+            "{scenario} contact regression"
+        );
+    }
+}
 
 #[test]
 #[ignore = "requires MuJoCo, ONNX Runtime and motion models"]
@@ -139,7 +181,21 @@ fn motion_policy_trial() {
         .id();
     app.update();
     let physics = app.world().resource::<SharedPhysics>().clone();
-    let mut worker = PhysicsWorker::start(physics.clone(), io.clone());
+    let contact_audit =
+        (std::env::var("MOTION_TRIAL_CONTACT_AUDIT").as_deref() == Ok("1")).then(|| {
+            Arc::new(std::sync::Mutex::new(contacts::Audit::new(
+                physics.lock().data(),
+                &format!("object_{}_", robot.to_bits()),
+                &format!("object_{}_", ball.to_bits()),
+            )))
+        });
+    let observed = contact_audit.clone();
+    let mut worker =
+        PhysicsWorker::start_observed(physics.clone(), io.clone(), move |data, time| {
+            if let Some(audit) = &observed {
+                audit.lock().unwrap().capture(data, time);
+            }
+        });
     let start = Instant::now();
     while !worker.ready() {
         assert!(
@@ -550,6 +606,13 @@ fn motion_policy_trial() {
     );
     if let Some(trial) = kickoff_trial {
         trial.finish(&commands, started, io.now());
+    }
+    if let Some(audit) = contact_audit {
+        audit.lock().unwrap().finish(
+            started,
+            &scenario,
+            f64::from(io.field_dimensions.length) * 0.5,
+        );
     }
     assert!(
         !io.status().contains("Emergency stop"),
