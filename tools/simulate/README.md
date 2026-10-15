@@ -412,6 +412,32 @@ The selected commands and tensor feature 56 are included in the result.
 The [kick documentation](../../docs/robotics/motion/kicking.md) records policy
 contracts, calibrated strengths and remaining distance/lift limitations.
 
+Set `MOTION_TRIAL_AUDIT=1` with `MOTION_TRIAL=behavior` to compare live inference
+requests and tensor features with independently sampled MuJoCo sole origins,
+trunk yaw, ball position and absolute ball velocity. The `MOTION_COORDINATES`
+output reports position, velocity and aim errors before first contact, after
+a 250 ms observation warmup. The tensor-position comparison includes the
+configured foot-avoidance bias of up to 4 cm. It checks both direction encodings
+and velocity axes without rotating velocity into the desired kick direction.
+The aim assertion assumes the ordinary striker's goal-centre target;
+interception and set-play targets need their own expected target.
+`MOTION_TRIAL_YAW` sets initial robot yaw in degrees; `MOTION_TRIAL_ROBOT_X/Y`
+set its world position. Ball position and velocity remain world coordinates.
+
+```sh
+LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=behavior MOTION_TRIAL_AUDIT=1 \
+  MOTION_TRIAL_PROFILE=motion_behavior MOTION_TRIAL_STRENGTH=medium \
+  MOTION_TRIAL_SPEED=1 MOTION_TRIAL_YAW=45 \
+  MOTION_TRIAL_X=0.65 MOTION_TRIAL_Y=0.65 MOTION_TRIAL_VY=-0.5 \
+  cargo test -p simulate motion_policy_trial -- --ignored --nocapture
+```
+
+Repeat with `filtering` and `body_state_odometry`. For the mirrored fixture use
+yaw -45 degrees, ball y -0.65 m and ball vy +0.5 m/s. Motion & behavior publishes
+exact truth at scene-frame timestamps, roughly every 33 ms; asynchronous consumers
+still need to compensate for elapsed time and rotation. A successful coordinate
+audit establishes input-frame consistency, not kick range or outgoing aim quality.
+
 ## Robot logs and recordings
 
 Every simulator robot records automatically, including robots added during a match.

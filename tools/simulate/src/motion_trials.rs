@@ -5,6 +5,9 @@ use crate::{Competition, Configuration, RefereeMode};
 use ros_z::{parameter::RemoteParameterClient, prelude::*};
 use types::motion_command::{HeadMotion, MotionCommand};
 
+#[path = "motion_trials/coordinates.rs"]
+mod coordinates;
+
 #[test]
 #[ignore = "requires MuJoCo, ONNX Runtime and motion models"]
 fn motion_policy_trial() {
@@ -174,9 +177,9 @@ fn motion_policy_trial() {
     {
         let mut world = physics.lock();
         let mut pose = world.object_pose(robot).unwrap();
-        pose.translation.x = 0.0;
-        pose.translation.z = 0.0;
-        pose.rotation = Quat::IDENTITY;
+        pose.translation.x = parse("MOTION_TRIAL_ROBOT_X", 0.0) as f32;
+        pose.translation.z = -parse("MOTION_TRIAL_ROBOT_Y", 0.0) as f32;
+        pose.rotation = Quat::from_rotation_y(parse("MOTION_TRIAL_YAW", 0.0).to_radians() as f32);
         world.set_object_pose(robot, pose).unwrap();
         world.mode = SimulationMode::Running;
     }
@@ -240,6 +243,12 @@ fn motion_policy_trial() {
     let mut cruise_start = None;
     let mut minimum_robot_height = f32::INFINITY;
     let mut maximum_position_error = 0.0f32;
+    let mut coordinate_audit = (std::env::var("MOTION_TRIAL_AUDIT").as_deref() == Ok("1"))
+        .then(coordinates::Audit::default);
+    assert!(
+        coordinate_audit.is_none() || scenario == "behavior",
+        "coordinate audit requires autonomous behavior"
+    );
     physics.lock().mode = SimulationMode::Running;
     while io.now().duration_since(started).as_secs_f64() < parse("MOTION_TRIAL_DURATION", 6.0) {
         assert!(
@@ -250,6 +259,14 @@ fn motion_policy_trial() {
         let (ball_position, ball_velocity, contact) = {
             let world = physics.lock();
             let data = world.data();
+            if let Some(audit) = &mut coordinate_audit {
+                audit.capture(
+                    data,
+                    &format!("object_{}_", robot.to_bits()),
+                    &format!("object_{}_", ball.to_bits()),
+                    io.now(),
+                );
+            }
             let body = data
                 .body(&format!("object_{}_ball", ball.to_bits()))
                 .unwrap();
@@ -410,6 +427,17 @@ fn motion_policy_trial() {
     let mut service_delays = Vec::new();
     let mut target_speed_features = Vec::new();
     for record in records {
+        if let Some(audit) = &mut coordinate_audit {
+            audit.inspect(
+                &record,
+                started + Duration::from_millis(250),
+                started
+                    + Duration::from_secs_f64(
+                        first_contact.unwrap_or(parse("MOTION_TRIAL_DURATION", 6.0)),
+                    ),
+                f64::from(io.field_dimensions.length) * 0.5,
+            );
+        }
         match &record.event {
             motion_inference::trace::Event::Request(_) => {
                 request_times.insert(record.request_id.clone(), record.time);
@@ -459,6 +487,9 @@ fn motion_policy_trial() {
         serde_json::json!({"count":samples.len(), "median":samples.get(samples.len()/2),"p95":samples.get(samples.len()*95/100),"max":samples.last()})
     };
     let robot_pose = physics.lock().object_pose(robot).unwrap();
+    let coordinate_errors = coordinate_audit
+        .as_mut()
+        .map(|audit| audit.finish(io.profile.filtering()));
     let cruise_velocity = cruise_start.map(|(time, pose)| {
         let elapsed = io.now().duration_since(started).as_secs_f64() - time;
         [
@@ -473,7 +504,7 @@ fn motion_policy_trial() {
         "final_velocity":final_velocity,"final_ball_speed":final_velocity[0].hypot(final_velocity[1]),"duration_seconds":io.now().duration_since(started).as_secs_f64(),"maximum_command_position_error":maximum_position_error,
         "command_position_error":stats(position_errors),"direction_error_degrees":direction_error,"contact_direction_degrees":contact_direction,"contact_position":contact_position,
         "policy_interval_ms":stats(intervals),"sensor_age_ms":stats(sensor_ages),"command_age_ms":stats(command_ages),"service_delay_ms":stats(service_delays),
-        "robot_position":robot_pose.translation.to_array(),"cruise_velocity":cruise_velocity,"minimum_robot_height":minimum_robot_height,"kick_commands":kick_commands,"status":io.status()})
+        "robot_position":robot_pose.translation.to_array(),"coordinate_errors":coordinate_errors,"cruise_velocity":cruise_velocity,"minimum_robot_height":minimum_robot_height,"kick_commands":kick_commands,"status":io.status()})
     );
     assert!(
         !io.status().contains("Emergency stop"),

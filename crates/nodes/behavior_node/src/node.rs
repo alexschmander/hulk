@@ -226,6 +226,11 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .cache(1)
         .build()
         .await?;
+    let own_kick_ball_cache = node
+        .subscriber::<Option<BallPosition<Ground>>>("ball_filter/ball_position")
+        .cache(1)
+        .build()
+        .await?;
     let visual_kick_ball_position_cache = node
         .subscriber::<Option<BallPosition<Ground>>>("visual_kick/ball_position")
         .cache(1)
@@ -464,30 +469,68 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             blackboard.remote_control_enabled = false;
         }
 
+        // Ball observations, field pose and borrowed velocity must describe one
+        // Ground frame, even when their publishers run at different rates.
+        let now = node.clock().now();
+        let current_odometry = kick_odometry.get_nearest_with_stamp(now);
+        let to_current = |source_time: Time| {
+            let (previous_time, previous) = kick_odometry.get_nearest_with_stamp(source_time)?;
+            let (current_time, current) = current_odometry.as_ref()?;
+            let timeout = blackboard.parameters.kicking.ball_observation_timeout;
+            if source_time > now
+                || previous_time.abs_diff(source_time) > timeout
+                || current_time.abs_diff(now) > timeout
+            {
+                return None;
+            }
+            Some(types::odometry::previous_to_current(*previous, **current))
+        };
         blackboard.world_state.robot = RobotState {
             ground_to_field: ground_to_field_cache
-                .get_latest()
-                .map(|ground_to_field| *ground_to_field),
+                .get_latest_with_stamp()
+                .and_then(|(time, pose)| Some(*pose * to_current(time)?.inverse())),
             player_number,
             primary_state,
         };
 
-        blackboard.world_state.ball = ball_state_cache.get_latest().and_then(|ball| *ball);
-        let now = node.clock().now();
+        let tracked_kick_ball =
+            own_kick_ball_cache
+                .get_latest_with_stamp()
+                .and_then(|(time, ball)| {
+                    let ball = (*ball)?;
+                    let transform = to_current(time)?;
+                    Some(BallPosition {
+                        position: transform
+                            * (ball.position
+                                + ball.velocity * now.duration_since(time).as_secs_f32()),
+                        velocity: transform * ball.velocity,
+                        last_seen: ball.last_seen,
+                    })
+                });
+        blackboard.world_state.ball =
+            ball_state_cache
+                .get_latest()
+                .and_then(|ball| *ball)
+                .map(|mut ball| {
+                    if ball.source == BallSource::Own
+                        && let Some(tracked) = tracked_kick_ball
+                    {
+                        ball.ball_in_ground = tracked.position;
+                        ball.ball_in_ground_velocity = tracked.velocity;
+                        if let Some(pose) = blackboard.world_state.robot.ground_to_field {
+                            ball.ball_in_field = pose * tracked.position;
+                        }
+                    }
+                    ball
+                });
         blackboard.visual_kick_ball_position = visual_kick_ball_position_cache
             .get_latest()
             .and_then(|ball_position| *ball_position)
             .and_then(|ball| {
-                let (time, previous) = kick_odometry.get_nearest_with_stamp(ball.last_seen)?;
-                let (current_time, current) = kick_odometry.get_nearest_with_stamp(now)?;
-                let timeout = blackboard.parameters.kicking.ball_observation_timeout;
-                if time.abs_diff(ball.last_seen) > timeout || current_time.abs_diff(now) > timeout {
-                    return None;
-                }
                 crate::kick::in_current_frame(
                     ball,
-                    blackboard.world_state.ball,
-                    types::odometry::previous_to_current(*previous, *current),
+                    tracked_kick_ball,
+                    to_current(ball.last_seen)?,
                     now,
                     &blackboard.parameters.kicking,
                 )
@@ -503,7 +546,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             .get_latest()
             .map(|positions| positions.as_ref().clone())
             .unwrap_or_default();
-        blackboard.world_state.now = node.clock().now();
+        blackboard.world_state.now = now;
         blackboard.world_state.obstacles = obstacles_cache
             .get_latest()
             .map(|obstacles| obstacles.as_ref().clone())
@@ -592,6 +635,8 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         additional_black_board_pub
             .publish_if_subscribed(|| async { blackboard.clone() })
             .await?;
-        motion_command_pub.publish(&motion_command).await?;
+        motion_command_pub
+            .publish_with_source_time(&motion_command, now)
+            .await?;
     }
 }

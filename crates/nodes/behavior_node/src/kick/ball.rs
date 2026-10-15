@@ -1,15 +1,11 @@
 use coordinate_systems::Ground;
 use linear_algebra::{Isometry2, Vector2};
 use ros_z::time::Time;
-use types::{
-    ball_position::BallPosition,
-    parameters::KickingParameters,
-    world_state::{BallSource, BallState},
-};
+use types::{ball_position::BallPosition, parameters::KickingParameters};
 
 pub(crate) fn in_current_frame(
     mut ball: BallPosition<Ground>,
-    tracked: Option<BallState>,
+    tracked: Option<BallPosition<Ground>>,
     observation_to_current: Isometry2<Ground, Ground>,
     now: Time,
     parameters: &KickingParameters,
@@ -19,17 +15,14 @@ pub(crate) fn in_current_frame(
         return None;
     }
     ball.position = observation_to_current * ball.position;
-    // Keep percept position authoritative. A different tracked ball must not
-    // lend it velocity, including a teammate's remote estimate.
+    // Keep percept position authoritative. The caller supplies our local filter,
+    // and a different tracked ball must not lend this percept its velocity.
     ball.velocity = tracked
-        .filter(|tracked| tracked.source == BallSource::Own)
         .filter(|tracked| {
-            (tracked.ball_in_ground
-                - (ball.position + tracked.ball_in_ground_velocity * age.as_secs_f32()))
-            .norm()
+            (tracked.position - (ball.position + tracked.velocity * age.as_secs_f32())).norm()
                 <= parameters.ball_velocity_matching_distance
         })
-        .map_or(Vector2::zeros(), |tracked| tracked.ball_in_ground_velocity);
+        .map_or(Vector2::zeros(), |tracked| tracked.velocity);
     ball.position += ball.velocity * age.as_secs_f32();
     Some(ball)
 }
@@ -47,11 +40,10 @@ mod tests {
             velocity: Vector2::zeros(),
             last_seen: Time::zero(),
         };
-        let tracked = BallState {
-            ball_in_ground: point![0.66, -0.1],
-            ball_in_ground_velocity: vector![-1.0, 0.0],
-            source: BallSource::Own,
-            ..Default::default()
+        let tracked = BallPosition {
+            position: point![0.66, -0.1],
+            velocity: vector![-1.0, 0.0],
+            last_seen: Time::zero(),
         };
         let updated = in_current_frame(
             ball,
@@ -72,11 +64,10 @@ mod tests {
             velocity: Vector2::zeros(),
             last_seen: Time::zero(),
         };
-        let tracked = BallState {
-            ball_in_ground: point![2.0, 1.0],
-            ball_in_ground_velocity: vector![-1.0, 0.0],
-            source: BallSource::Own,
-            ..Default::default()
+        let tracked = BallPosition {
+            position: point![2.0, 1.0],
+            velocity: vector![-1.0, 0.0],
+            last_seen: Time::zero(),
         };
         let updated = in_current_frame(
             ball,
