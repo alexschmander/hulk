@@ -468,5 +468,36 @@ mod tests {
             tensor[56], 0.1,
             "target speed in m/s is scaled by 0.1 exactly once"
         );
+        for (angle, normalized, sine, cosine) in [
+            (std::f32::consts::FRAC_PI_2, 0.5, 1.0, 0.0),
+            (-std::f32::consts::FRAC_PI_2, -0.5, -1.0, 0.0),
+            (std::f32::consts::PI, -1.0, 0.0, -1.0),
+        ] {
+            let InferenceCommand::Kick(mut kick) = command else {
+                unreachable!()
+            };
+            kick.request.direction = Orientation2::new(angle);
+            kick.request.ball_velocity = linear_algebra::vector![1.2, -0.4];
+            let tensor = state.prepare_input(
+                Time::zero(),
+                &sensor,
+                &velocity,
+                InferenceCommand::Kick(kick),
+                false,
+                &joints,
+            );
+            for (actual, expected) in [
+                (tensor[8], normalized),
+                (tensor[54], sine),
+                (tensor[55], cosine),
+                (tensor[51], 0.12),
+                (tensor[52], -0.04),
+            ] {
+                assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "direction and velocity retain the robot-yaw frame"
+                );
+            }
+        }
     }
 }

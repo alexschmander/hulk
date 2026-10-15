@@ -1,7 +1,7 @@
 use std::f32::consts::{PI, TAU};
 use types::joint_limits::JointLimits;
 
-use ::kinematics::joints::Joints;
+use ::kinematics::{forward, joints::Joints};
 use coordinate_systems::{Ground, Robot};
 use linear_algebra::{Orientation2, Point2, Vector3};
 use nalgebra::{UnitComplex, UnitQuaternion};
@@ -133,10 +133,20 @@ pub(super) fn shifted_ball(
     let to_kick_direction = UnitComplex::new(-direction);
     let (roll, pitch, _) = sensor.rotation().euler_angles();
     let level = UnitQuaternion::from_euler_angles(roll, pitch, 0.0);
-    let left =
-        to_kick_direction * (level * leg(&sensor.position.left_leg, true).0.inner.coords).xy();
-    let right =
-        to_kick_direction * (level * leg(&sensor.position.right_leg, false).0.inner.coords).xy();
+    let sole_midpoint = (forward::left_sole_to_robot(&sensor.position.left_leg)
+        .translation()
+        .inner
+        .coords
+        + forward::right_sole_to_robot(&sensor.position.right_leg)
+            .translation()
+            .inner
+            .coords)
+        * 0.5;
+    let origin = (level * sole_midpoint).xy();
+    let left = to_kick_direction
+        * ((level * leg(&sensor.position.left_leg, true).0.inner.coords).xy() - origin);
+    let right = to_kick_direction
+        * ((level * leg(&sensor.position.right_leg, false).0.inner.coords).xy() - origin);
     let mut ball = to_kick_direction * kick.ball_position.inner.coords;
     let angle_weight = 1.0
         - ramp(
@@ -159,4 +169,50 @@ pub(super) fn shifted_ball(
             .cap_magnitude(parameters.ball_position_limit)
             .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Parameters;
+
+    #[test]
+    fn foot_shift_uses_the_sole_midpoint_instead_of_the_torso_origin() {
+        let parameters: Parameters = serde_json::from_value(
+            json5::from_str::<serde_json::Value>(include_str!(
+                "../../../../../etc/parameters/base/motion_inference.json5"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let position = Joints::fill(0.0);
+        let mut sensor = SensorFrame {
+            timestamp: ros_z::time::Time::zero(),
+            position,
+            velocity: Joints::fill(0.0),
+            orientation: nalgebra::Quaternion::identity(),
+            gyro: Vector3::zeros(),
+            last_commanded_position: position,
+        };
+        let request = KickRequest {
+            ball_position: linear_algebra::point![0.5, 0.24],
+            ball_velocity: linear_algebra::Vector2::zeros(),
+            direction: Orientation2::new(0.0),
+            target_speed: 1.0,
+            strong: false,
+            quick: false,
+        };
+        let centered = shifted_ball(&sensor, request, &parameters.kick);
+        // Move both soles sideways relative to the torso while preserving
+        // their orientation and separation in the Ground frame.
+        sensor.position.left_leg.hip_roll = 0.25;
+        sensor.position.right_leg.hip_roll = 0.25;
+        sensor.position.left_leg.ankle_down = -0.25;
+        sensor.position.right_leg.ankle_down = -0.25;
+        let translated = shifted_ball(&sensor, request, &parameters.kick);
+        assert!(
+            (centered - translated).norm() < 1e-5,
+            "moving the sole midpoint relative to the torso changed the foot bias: {centered:?} vs {translated:?}"
+        );
+    }
 }
