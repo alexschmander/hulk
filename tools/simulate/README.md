@@ -375,12 +375,12 @@ LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=normal MOTION_TRIAL_SPEED=3.4 \
 
 LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=behavior \
   MOTION_TRIAL_PROFILE=filtering MOTION_TRIAL_STRENGTH=medium \
-  MOTION_TRIAL_SPEED=1.0 MOTION_TRIAL_VX=-0.5 \
+  MOTION_TRIAL_SPEED=0.3 MOTION_TRIAL_VX=-0.5 \
   cargo test -p simulate motion_policy_trial -- --ignored --nocapture
 
 LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=behavior \
   MOTION_TRIAL_PROFILE=filtering MOTION_TRIAL_STRENGTH=medium \
-  MOTION_TRIAL_SPEED=1.0 MOTION_TRIAL_X=0.6 MOTION_TRIAL_Y=-0.5 MOTION_TRIAL_VY=0.8 \
+  MOTION_TRIAL_SPEED=0.3 MOTION_TRIAL_X=0.6 MOTION_TRIAL_Y=-0.5 MOTION_TRIAL_VY=0.8 \
   cargo test -p simulate motion_policy_trial -- --ignored --nocapture
 ```
 
@@ -389,7 +389,7 @@ Direct trials inject current ball coordinates and a fixed field direction every
 soft policy, `strong` sets the network's strong flag, `quick` sets its quick flag
 and `shot` sets both flags. These names describe injected policy inputs;
 behavior's Strong profile uses `normal` at 3.4 m/s by default.
-Medium uses `soft` at 1.0 m/s; Soft uses `soft` at 0.1 m/s.
+Medium uses `soft` at 0.3 m/s with contact extension; Soft uses `soft` at 0.1 m/s.
 `behavior` releases injection and lets the chosen profile observe and approach
 the ball. `walk` injects velocity and reports measured cruise velocity over the
 second half of the trial.
@@ -427,7 +427,7 @@ and ended at 0.003 m/s.
 
 `MOTION_TRIAL_MIN_DISTANCE` and `MOTION_TRIAL_MIN_BALL_SPEED` add fixture-specific
 quality assertions. For example, the rolling-away regression uses default
-behavior, `MOTION_TRIAL_SPEED=1`, `MOTION_TRIAL_VX=0.6`, a 20-second duration,
+behavior, `MOTION_TRIAL_SPEED=0.3`, `MOTION_TRIAL_VX=0.6`, a 30-second duration,
 a minimum travel of 3 m and minimum peak speed of 1.3 m/s.
 `MOTION_TRIAL_INPUT_SAMPLES=1` includes inference requests every 250 ms during
 the first four seconds, to inspect handoff timing and ball-velocity warmup.
@@ -444,7 +444,8 @@ Set `MOTION_TRIAL_AUDIT=1` with `MOTION_TRIAL=behavior` to compare live inferenc
 requests and tensor features with independently sampled MuJoCo sole origins,
 trunk yaw, ball position and absolute ball velocity. The `MOTION_COORDINATES`
 output reports position, velocity and aim errors before first contact, after
-a 250 ms observation warmup. The tensor-position comparison includes the
+a 250 ms observation warmup. The tensor-position comparison removes the explicit
+contact extension read from the live inference parameters and includes the
 configured foot-avoidance bias of up to 4 cm. It checks both direction encodings
 and velocity axes without rotating velocity into the desired kick direction.
 The aim assertion assumes the ordinary striker's goal-centre target;
@@ -455,7 +456,7 @@ set its world position. Ball position and velocity remain world coordinates.
 ```sh
 LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=behavior MOTION_TRIAL_AUDIT=1 \
   MOTION_TRIAL_PROFILE=motion_behavior MOTION_TRIAL_STRENGTH=medium \
-  MOTION_TRIAL_SPEED=1 MOTION_TRIAL_YAW=45 \
+  MOTION_TRIAL_SPEED=0.3 MOTION_TRIAL_YAW=45 \
   MOTION_TRIAL_X=0.65 MOTION_TRIAL_Y=0.65 MOTION_TRIAL_VY=-0.5 \
   cargo test -p simulate motion_policy_trial -- --ignored --nocapture
 ```
@@ -465,6 +466,48 @@ yaw -45 degrees, ball y -0.65 m and ball vy +0.5 m/s. Motion & behavior publishe
 exact truth at scene-frame timestamps, roughly every 33 ms; asynchronous consumers
 still need to compensate for elapsed time and rotation. A successful coordinate
 audit establishes input-frame consistency, not kick range or outgoing aim quality.
+
+`MOTION_TRIAL_CONTACT_AUDIT=1` records contacts at every physics step, normally
+2 ms. Its `MOTION_CONTACTS` record identifies foot and other body contacts, and
+tracks the actual material point on the contacting foot throughout the swing.
+It reports forward foot speed from the preceding unloaded step, its ratio to
+the preceding 300 ms peak, the peak's lead time, contact offsets and incidence,
+and maximum follow-through during the next 150 ms past the ball's original centre.
+`velocity_line_offset_mm` measures how far the relative foot/ball velocity line
+misses the ball centre. `centre_offset_mm` instead measures perpendicular distance
+from contact to the intended horizontal shot axis through the ball centre.
+The two differ for rising strikes and moving balls. Post-impact braking is not
+counted as pre-impact deceleration.
+Direct trials use world +x as the shot axis; ordinary behavior uses the goal
+centre, and kickoff uses its 45-degree opening touch followed by the goal centre.
+Other behavior targets need their own expected axis.
+
+`MOTION_TRIAL_CONTACT_OUTPUT=/tmp/contacts.json` saves the detailed per-strike
+2 ms histories for plots. Optional contact assertions are
+`MOTION_TRIAL_MIN_CONTACT_SPEED_RATIO`, `MOTION_TRIAL_MIN_FOLLOWTHROUGH_MM`,
+`MOTION_TRIAL_MAX_CONTACT_LINE_OFFSET_MM` and `MOTION_TRIAL_REQUIRE_FOOT_FIRST=1`.
+`MOTION_TRIAL_CONTACT_INDEX` selects a foot-contact event, default zero; use one
+for the kickoff's strong follow-up. Non-foot impacts remain in the output and do
+not count toward this index. The minimum-speed soft touch deliberately brakes
+before contact and needs its own range check rather than a strong-strike threshold.
+
+```sh
+LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=normal MOTION_TRIAL_CONTACT_AUDIT=1 \
+  MOTION_TRIAL_MIN_CONTACT_SPEED_RATIO=0.9 MOTION_TRIAL_MIN_FOLLOWTHROUGH_MM=0 \
+  MOTION_TRIAL_MAX_CONTACT_LINE_OFFSET_MM=30 MOTION_TRIAL_REQUIRE_FOOT_FIRST=1 \
+  MOTION_TRIAL_CONTACT_OUTPUT=/tmp/strong-contact.json \
+  cargo test -p simulate motion_policy_trial -- --ignored --nocapture
+```
+
+Repeat with `MOTION_TRIAL_POLICY='{"kick":{"contact":{"forward_offset":0,"soft_forward_offset":0}}}'`
+to disable the contact calibration. The default stationary strong fixture fails
+the 90% speed-ratio screen without extension. For the old medium-pass baseline,
+also set `MOTION_TRIAL=soft MOTION_TRIAL_SPEED=1`.
+
+Run `cargo test -p simulate kick_contact_regressions -- --ignored --nocapture`
+with the same native-library environment for the strong, medium and filtered
+rolling-away contact fixtures. Each runs in a separate process and checks foot
+contact before other bodies, speed ratio, centre-line alignment and follow-through.
 
 ## Robot logs and recordings
 

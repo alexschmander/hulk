@@ -50,7 +50,7 @@ The base configuration selects these profiles:
 | Strength | Policy | Requested speed | `strong` flag | `quick` flag |
 | --- | --- | --- | --- | --- |
 | Soft | SoftKick | 0.1 m/s | false | false |
-| Medium | SoftKick | 1.0 m/s | false | false |
+| Medium | SoftKick | 0.3 m/s | false | false |
 | Strong | Kick | 3.4 m/s | false | false |
 
 Soft and Medium use the same soft policy at different requested speeds. Both
@@ -79,7 +79,7 @@ These parameters belong to `behavior_node.kicking`. All distances are in metres.
 
 | Parameter | Base default | Purpose |
 | --- | --- | --- |
-| `target_speed` | `1.0` | Medium profile's requested outgoing speed in m/s. |
+| `target_speed` | `0.3` | Medium soft-policy request, calibrated with strike extension for 3 to 5 m passes. |
 | `soft_target_speed` | `0.1` | Soft profile's requested outgoing speed in m/s. |
 | `strong_target_speed` | `3.4` | Strong profile's requested outgoing speed in m/s. |
 | `strong_uses_maximum_flag` | `false` | Also set the network's strong flag for the Strong profile. |
@@ -145,6 +145,33 @@ its reference controller's clipped frequency feedback.
 The foot-avoidance bias uses foot points relative to the leveled sole midpoint,
 matching the ball frame; torso-relative foot points would introduce a false
 bias as the robot leans sideways.
+
+### Contact calibration
+
+`motion_inference.kick.contact` extends the learned strike along the requested
+kick direction. It changes the policy's current and previous ball-position
+features together, after foot avoidance. It leaves the ball estimate, command,
+velocity, direction and target-speed scaling unchanged. This is a strike
+calibration, not additional observation-age compensation.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `forward_offset` | `0.12 m` | Normal-policy extension along the kick direction. |
+| `soft_forward_offset` | `0.12 m` | Maximum soft-policy extension. |
+| `soft_speed_range` | `[0.1, 0.3] m/s` | Ramp soft extension from zero to its maximum as the requested speed increases. |
+| `incoming_speed_limit` | `0.05 m/s` | Ramp extension to zero when ball velocity opposes the kick direction at this speed. |
+
+Both offsets can be set to zero to reproduce the uncalibrated policy. They are
+limited to 0.15 m and require a node restart, like the other inference parameters.
+The final position observation retains its 2 m magnitude cap.
+The minimum-speed soft touch keeps its short stroke. Medium uses a lower speed
+request with extension to preserve pass range while improving contact timing
+and follow-through. Requested speed is a network input, not a prediction of the
+calibrated shot's measured speed.
+
+Incoming balls need the original strike location. Applying the full extension
+to a filtered 0.5 m/s approaching ball increased direction error from about
+2 degrees to 14 degrees. The incoming-speed ramp disables that extension.
 
 Inference caps the ball-position observation at 2.0 m. The handoff band stays
 inside this cap. Behavior approaches balls at up to 1.8 m/s using
@@ -266,7 +293,7 @@ corrections alone do not establish reliable moving-ball control.
 ## Soft-policy passes and autonomous kickoff calibration
 
 The coordinate-audit results above used the earlier normal-policy Medium profile.
-Medium now selects SoftKick at a 1.0 m/s request. Direct stationary-ball trials
+At this earlier calibration, Medium selected SoftKick at a 1.0 m/s request. Direct stationary-ball trials
 at 350, 370 and 390 g, including centre and both lateral approach offsets,
 travelled 3.52 to 4.01 m in 20 s. Final speeds were 0.0013 to 0.0025 m/s and direction
 errors about 1.5 to 3 degrees. A default autonomous Filtering trial travelled
@@ -311,6 +338,60 @@ direction by about 15 degrees. An approaching-ball fixture reached 3.68 m in
 10 s with about 1.7 degrees of direction error. Those ten-second measurements
 still had 0.057 to 0.070 m/s of ball speed. Further moving-ball accuracy tuning is
 needed, especially for crossing balls.
+
+### Contact timing and strike extension
+
+The physics-step contact audit reproduced late strikes with the preceding calibration.
+These comparisons use a 370 g, 105 mm radius ball, unchanged motor gains and the same physical initial conditions.
+Baseline trials disable both contact offsets; their Medium request is 1.0 m/s.
+Calibrated trials use the settings above, including the 0.3 m/s Medium request.
+
+| Fixture | Contact / peak foot speed | Peak lead before contact | Velocity-line miss from centre | Follow-through past original centre |
+| --- | --- | --- | --- | --- |
+| Strong kickoff follow-up, Filtering | 80% → 97% | 46 → 14 ms | 7.6 → 4.1 mm | 89 → 149 mm |
+| Stationary Medium, direct policy | 59% → 85% | 96 → 48 ms | 27.3 → 24.2 mm | -14 → 41 mm |
+| Medium chasing 0.6 m/s initial ball velocity, Filtering | 55% → 81% | 110 → 64 ms | 35.7 → 20.7 mm | -41 → 37 mm |
+
+Speed refers to the actual contacting material point on the foot, projected along the intended shot axis, sampled one physics step before loaded contact.
+Peak speed is the preceding 300 ms maximum of that point, rather than a hypothetical no-ball replay.
+The audit also reports trunk-relative swing speed, relative foot/ball velocity, contact height, lateral offset and incidence angle.
+Follow-through is the maximum in the next 150 ms relative to the ball's original centre.
+The independent velocity-line metric measures whether the relative contact trajectory passes through the ball centre.
+A below-centre contact can still have a nearly central rising trajectory.
+
+The strong kickoff follow-up increased from 3.12 to 3.79 m/s, with about 3.7 degrees of field-goal direction error after calibration.
+Direct normal-policy shots at the 350 and 390 g mass limits reached 4.55 to 4.59 m/s and contacted at about 94% of their pre-impact peak.
+The stationary Medium comparison increased from 1.76 to 1.93 m/s; its physical contact was farther below centre, about 33 mm versus 20 mm.
+For the chased ball the contact height changed from 14 to 27 mm below centre, while trajectory alignment and follow-through improved.
+These settings improve timing and trajectory; they do not produce an equatorial contact in every approach.
+
+Trials continued long enough to measure near-rest travel:
+
+| Fixture | Duration | Travel from relevant contact | Final ball speed |
+| --- | --- | --- | --- |
+| Direct Medium, 350 g | 20 s | 4.14 m | 0.0016 m/s |
+| Direct Medium, 390 g | 20 s | 4.44 m | 0.0032 m/s |
+| Default Filtering chase, initial 0.6 m/s | 30 s | 4.17 m | 0.0003 m/s |
+| Default Filtering chase, initial 1.0 m/s | 30 s | 4.17 m | 0.0005 m/s |
+| Default Filtering kickoff, strong follow-up | 35 s | 9.06 m | 0.0018 m/s |
+
+The chase fixtures contact after about 5.8 and 7.2 s, when rolling friction has reduced ball speed to approximately 0.05 m/s.
+They establish improved chase completion, not accurate interception of a ball still rolling at its initial speed.
+Starting the 0.6 m/s rolling ball closer, at x = 0.35 m, also improved contact ratio from 54% to 79%, but the policy still chased until the ball slowed to about 0.053 m/s.
+The 0.8 m/s crossing fixture contacted at about 0.26 m/s, travelled 3.76 m in 20 s and ended at 0.0023 m/s, with 13.1 degrees of direction error.
+
+The approaching-ball fixture at `[0.8, 0.08]` m and `[-0.5, 0]` m/s still contacts the right shin before the foot, including with the previous settings.
+Increasing the soft-policy request up to 1.7 m/s did not remove that failure.
+Starting at y = 0 or -0.08 m produced clean foot contacts, implicating approach placement rather than insufficient requested power alone.
+With the incoming extension disabled, the original +0.08 m fixture travelled 3.34 m and stayed within 1.3 degrees of aim, but fails the foot-first contact check.
+Off-angle moving approaches also retain glancing-contact and direction errors.
+Mirrored 45-degree input-frame audits passed their position, velocity and aim checks; this does not establish strike quality.
+
+Soft at 0.1 m/s retains its decelerating stroke and no contact extension.
+It travelled 1.57 m in 12 s with 0.015 m/s remaining; extending this stroke during probes made it too powerful for the short-touch profile.
+The calibrated Medium mass-boundary trials lifted by less than 1 cm.
+All 127 unit checks and the three opt-in live contact regression fixtures passed during this calibration.
+Disabling extension reproduced the strong, Medium, chase and kickoff late-contact quality failures.
 
 ## Serialized commands
 
