@@ -389,20 +389,48 @@ Direct trials inject current ball coordinates and a fixed field direction every
 soft policy, `strong` sets the network's strong flag, `quick` sets its quick flag
 and `shot` sets both flags. These names describe injected policy inputs;
 behavior's Strong profile uses `normal` at 3.4 m/s by default.
+Medium uses `soft` at 1.0 m/s; Soft uses `soft` at 0.1 m/s.
 `behavior` releases injection and lets the chosen profile observe and approach
 the ball. `walk` injects velocity and reports measured cruise velocity over the
 second half of the trial.
+`MOTION_TRIAL_STRENGTH` overrides behavior's strength parameters. Omit it when
+checking the default autonomous selection; `behavior` enters Playing with the
+robot's walking button and does not run a kickoff.
 
-`MOTION_TRIAL_X/Y` set initial ball position, default `[0.8, 0.08]` m.
+`kickoff` starts the robot at `[-1.5, 0]` m and the ball at the field centre.
+It supplies Ready and Set messages through the production game-controller and
+game-state filters, pulses the whistle, then supplies ordinary Playing messages.
+Behavior chooses both kicks with its normal parameters. The trial commands Stand
+one second after the strong contact to isolate the two-kick sequence. Its separate
+`KICKOFF_TRIAL` record reports each kick's direction and the strong shot's speed
+and travel, plus stage changes and periodic command/pose samples. The overall
+`MOTION_TRIAL` displacement and direction combine both kicks.
+
+```sh
+LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=kickoff MOTION_TRIAL_PROFILE=filtering \
+  MOTION_TRIAL_DURATION=35 \
+  cargo test -p simulate motion_policy_trial -- --ignored --nocapture
+```
+
+`MOTION_TRIAL_X/Y` set initial ball position, default `[0.8, 0.08]` m outside kickoff.
 `MOTION_TRIAL_VX/VY` set ball velocity, or walking velocity for `walk`.
-`MOTION_TRIAL_SPEED` defaults to 3.4 m/s and `MOTION_TRIAL_DURATION` to six seconds.
-Trials switch to Stand one second after first contact; override that
+`MOTION_TRIAL_SPEED` defaults to 3.4 m/s and `MOTION_TRIAL_DURATION` to six seconds,
+or 25 seconds for kickoff. Use 35 seconds for kickoff stopping distance, since
+the second contact occurs well into the run.
+Single-kick trials switch to Stand one second after first contact; override that
 interval with `MOTION_TRIAL_FOLLOWTHROUGH`. Travel measures displacement during
 the trial, not distance to rest. Use ten seconds for short touches. For stopping
 distance, set `MOTION_TRIAL_DURATION=20` and check `final_ball_speed`; the output
 also records the actual `duration_seconds`. The six-second 3.52 m/s shot still
 had 0.42 m/s of ball speed at the end. A twenty-second repeat reached 7.43 m
 and ended at 0.003 m/s.
+
+`MOTION_TRIAL_MIN_DISTANCE` and `MOTION_TRIAL_MIN_BALL_SPEED` add fixture-specific
+quality assertions. For example, the rolling-away regression uses default
+behavior, `MOTION_TRIAL_SPEED=1`, `MOTION_TRIAL_VX=0.6`, a 20-second duration,
+a minimum travel of 3 m and minimum peak speed of 1.3 m/s.
+`MOTION_TRIAL_INPUT_SAMPLES=1` includes inference requests every 250 ms during
+the first four seconds, to inspect handoff timing and ball-velocity warmup.
 
 `MOTION_TRIAL_BALL_MASS` overrides mass in kg. The simulator default is 0.370 kg;
 repeat boundary cases at 0.350 and 0.390 kg. `MOTION_TRIAL_POLICY` accepts a JSON

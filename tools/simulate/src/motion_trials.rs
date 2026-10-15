@@ -7,6 +7,8 @@ use types::motion_command::{HeadMotion, MotionCommand};
 
 #[path = "motion_trials/coordinates.rs"]
 mod coordinates;
+#[path = "motion_trials/kickoff.rs"]
+mod kickoff;
 
 #[test]
 #[ignore = "requires MuJoCo, ONNX Runtime and motion models"]
@@ -19,7 +21,7 @@ fn motion_policy_trial() {
     assert!(
         matches!(
             scenario.as_str(),
-            "normal" | "soft" | "strong" | "quick" | "shot" | "behavior" | "walk"
+            "normal" | "soft" | "strong" | "quick" | "shot" | "behavior" | "kickoff" | "walk"
         ),
         "unknown motion trial: {scenario}"
     );
@@ -31,7 +33,13 @@ fn motion_policy_trial() {
     };
     let speed = parse("MOTION_TRIAL_SPEED", 3.4) as f32;
     let velocity = [parse("MOTION_TRIAL_VX", 0.0), parse("MOTION_TRIAL_VY", 0.0)];
-    let position = [parse("MOTION_TRIAL_X", 0.8), parse("MOTION_TRIAL_Y", 0.08)];
+    let is_kickoff = scenario == "kickoff";
+    let autonomous = scenario == "behavior" || is_kickoff;
+    let duration = parse("MOTION_TRIAL_DURATION", if is_kickoff { 25.0 } else { 6.0 });
+    let position = [
+        parse("MOTION_TRIAL_X", if is_kickoff { 0.0 } else { 0.8 }),
+        parse("MOTION_TRIAL_Y", if is_kickoff { 0.0 } else { 0.08 }),
+    ];
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let router = runtime
         .block_on(
@@ -86,6 +94,7 @@ fn motion_policy_trial() {
             },
         ))
         .unwrap();
+    let mut kickoff_trial = is_kickoff.then(|| kickoff::Trial::new(&runtime, &io));
     let traces = runtime
         .block_on(
             io.node()
@@ -177,7 +186,8 @@ fn motion_policy_trial() {
     {
         let mut world = physics.lock();
         let mut pose = world.object_pose(robot).unwrap();
-        pose.translation.x = parse("MOTION_TRIAL_ROBOT_X", 0.0) as f32;
+        pose.translation.x =
+            parse("MOTION_TRIAL_ROBOT_X", if is_kickoff { -1.5 } else { 0.0 }) as f32;
         pose.translation.z = -parse("MOTION_TRIAL_ROBOT_Y", 0.0) as f32;
         pose.rotation = Quat::from_rotation_y(parse("MOTION_TRIAL_YAW", 0.0).to_radians() as f32);
         world.set_object_pose(robot, pose).unwrap();
@@ -210,7 +220,11 @@ fn motion_policy_trial() {
         });
         data.forward();
     }
-    if scenario == "behavior" {
+    if let Some(trial) = &mut kickoff_trial {
+        physics.lock().mode = SimulationMode::Running;
+        set("control.injected_motion_command", serde_json::Value::Null);
+        trial.start(&runtime, &io);
+    } else if scenario == "behavior" {
         physics.lock().mode = SimulationMode::Running;
         for event in [
             booster::ButtonEventType::PressDown,
@@ -250,9 +264,9 @@ fn motion_policy_trial() {
         "coordinate audit requires autonomous behavior"
     );
     physics.lock().mode = SimulationMode::Running;
-    while io.now().duration_since(started).as_secs_f64() < parse("MOTION_TRIAL_DURATION", 6.0) {
+    while io.now().duration_since(started).as_secs_f64() < duration {
         assert!(
-            deadline.elapsed() < Duration::from_secs(40),
+            deadline.elapsed() < Duration::from_secs(60),
             "trial stopped: {}",
             io.status()
         );
@@ -288,6 +302,25 @@ fn motion_policy_trial() {
             ([p[0], p[1], p[2]], [v[0], v[1]], contact)
         };
         let elapsed = io.now().duration_since(started).as_secs_f64();
+        if let Some(trial) = &mut kickoff_trial {
+            if trial.observe(
+                &runtime,
+                &io,
+                elapsed,
+                ball_position,
+                ball_velocity,
+                contact,
+                &physics,
+                robot,
+            ) && !followthrough_finished
+            {
+                set(
+                    "control.injected_motion_command",
+                    serde_json::to_value(MotionCommand::Stand { head }).unwrap(),
+                );
+                followthrough_finished = true;
+            }
+        }
         let current_robot = physics.lock().object_pose(robot).unwrap();
         minimum_robot_height = minimum_robot_height.min(current_robot.translation.y);
         if scenario == "walk"
@@ -351,7 +384,7 @@ fn motion_policy_trial() {
             );
             followthrough_finished = true;
         }
-        if scenario != "behavior" && io.now() >= next_command {
+        if !autonomous && io.now() >= next_command {
             next_command = io.now() + Duration::from_millis(20);
             let world = physics.lock();
             let binding = crate::robot_io::RobotBinding::new(
@@ -426,6 +459,8 @@ fn motion_policy_trial() {
     let mut request_times = std::collections::HashMap::new();
     let mut service_delays = Vec::new();
     let mut target_speed_features = Vec::new();
+    let mut request_samples = Vec::new();
+    let mut next_request_sample = started;
     for record in records {
         if let Some(audit) = &mut coordinate_audit {
             audit.inspect(
@@ -439,8 +474,15 @@ fn motion_policy_trial() {
             );
         }
         match &record.event {
-            motion_inference::trace::Event::Request(_) => {
+            motion_inference::trace::Event::Request(command) => {
                 request_times.insert(record.request_id.clone(), record.time);
+                if std::env::var("MOTION_TRIAL_INPUT_SAMPLES").as_deref() == Ok("1")
+                    && record.time >= next_request_sample
+                    && record.time.duration_since(started) < Duration::from_secs(4)
+                {
+                    request_samples.push(serde_json::json!({"time":record.time.duration_since(started).as_secs_f64(),"command":command}));
+                    next_request_sample = record.time + Duration::from_millis(250);
+                }
             }
             motion_inference::trace::Event::Input {
                 sources,
@@ -499,13 +541,16 @@ fn motion_policy_trial() {
     });
     eprintln!(
         "MOTION_TRIAL {}",
-        serde_json::json!({"scenario":scenario,"requested_speed":speed,"ball_mass":io.parameters.snapshot().typed().ball.mass,"target_speed_feature":stats(target_speed_features),"input_position":position,"input_velocity":velocity,
+        serde_json::json!({"scenario":scenario,"profile":io.profile,"strength_override":std::env::var("MOTION_TRIAL_STRENGTH").ok(),"requested_speed":speed,"ball_mass":io.parameters.snapshot().typed().ball.mass,"target_speed_feature":stats(target_speed_features),"input_position":position,"input_velocity":velocity,
         "first_contact_seconds":first_contact,"maximum_ball_speed":maximum_speed,"distance":distance,"lift":maximum_height,"final_position":final_position,
         "final_velocity":final_velocity,"final_ball_speed":final_velocity[0].hypot(final_velocity[1]),"duration_seconds":io.now().duration_since(started).as_secs_f64(),"maximum_command_position_error":maximum_position_error,
         "command_position_error":stats(position_errors),"direction_error_degrees":direction_error,"contact_direction_degrees":contact_direction,"contact_position":contact_position,
-        "policy_interval_ms":stats(intervals),"sensor_age_ms":stats(sensor_ages),"command_age_ms":stats(command_ages),"service_delay_ms":stats(service_delays),
+        "policy_interval_ms":stats(intervals),"sensor_age_ms":stats(sensor_ages),"command_age_ms":stats(command_ages),"service_delay_ms":stats(service_delays),"request_samples":request_samples,
         "robot_position":robot_pose.translation.to_array(),"coordinate_errors":coordinate_errors,"cruise_velocity":cruise_velocity,"minimum_robot_height":minimum_robot_height,"kick_commands":kick_commands,"status":io.status()})
     );
+    if let Some(trial) = kickoff_trial {
+        trial.finish(&commands, started, io.now());
+    }
     assert!(
         !io.status().contains("Emergency stop"),
         "invalid trial: {}",
@@ -521,6 +566,14 @@ fn motion_policy_trial() {
         return;
     }
     assert!(first_contact.is_some(), "policy missed the ball");
+    assert!(
+        distance >= parse("MOTION_TRIAL_MIN_DISTANCE", 0.0),
+        "kick travelled only {distance:.2} m"
+    );
+    assert!(
+        maximum_speed >= parse("MOTION_TRIAL_MIN_BALL_SPEED", 0.0),
+        "ball reached only {maximum_speed:.2} m/s"
+    );
     let effective_speed = if scenario == "soft" {
         speed.min(1.7)
     } else {
