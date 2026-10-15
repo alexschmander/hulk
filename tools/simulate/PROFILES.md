@@ -1,7 +1,7 @@
 # Simulator profiles implementation plan
 
 Status: implemented on `twix/motion-simulator`.
-The authorized localization, preferred ball-filter and ball-search branches are squashed beneath the simulator commits.
+The authorized localization, ball-filter realism and ball-search branches are squashed beneath the simulator commits.
 The camera-mount correction and sideline spawn/reset placement have been implemented separately as prerequisites.
 The [README](README.md) describes the current simulator.
 
@@ -564,7 +564,7 @@ The obsolete `current_odometry_to_last_odometry` topic remains unproduced.
 The obstacle filter's fixed map still offsets post centers by `(goal_post_diameter - line_width)/2` relative to the shared field helper, or 0.02 m with the default dimensions.
 These findings do not authorize further robotics changes.
 
-The user explicitly authorized the localization-improvements branch, preferred ball-filter branch and ball-search-behavior branch as three squashes below the simulator history.
+The user explicitly authorized the localization-improvements branch, ball-filter-realism branch and ball-search-behavior branch as three squashes below the simulator history.
 The localization branch replaces the old solver and its lookup-budget limitation; the previously declined one-line budget patch was not applied.
 The captured 13-landmark startup frame now passes the production global association solver and runs in the ordinary unit suite.
 Live localization acquired with 0.0013 m stationary position error and 0.0001 rad yaw error.
