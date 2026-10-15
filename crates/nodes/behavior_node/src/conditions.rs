@@ -44,12 +44,25 @@ pub fn is_close_to_ball(blackboard: &mut Blackboard) -> bool {
         &blackboard.ball,
         &blackboard.world_state.robot.ground_to_field,
     ) {
-        let distance_to_ball = (ground_to_field.inverse() * ball.position).coords().norm();
+        let robot_position = ground_to_field * point![0.0, 0.0];
+        let to_ball = ball.position - robot_position;
+        let distance_to_ball = to_ball.norm();
         let parameters = &blackboard.parameters.kicking;
+        let radial_speed = to_ball.dot(&ball.velocity) / distance_to_ball.max(f32::EPSILON);
+        let receding = radial_speed > 0.05;
+        let activation_distance = if receding {
+            // A newly estimated velocity must also release an early kick entry.
+            // The wide stationary band can otherwise keep the kick policy chasing.
+            parameters.receding_ball_kick_activation_distance
+        } else {
+            parameters.kick_activation_distance
+        };
+        let was_close = blackboard.last_close_enough_to_kick
+            && !(receding && distance_to_ball > activation_distance + 0.05);
         is_close = less_than_with_hysteresis(
-            blackboard.last_close_enough_to_kick,
+            was_close,
             distance_to_ball,
-            parameters.kick_activation_distance,
+            activation_distance,
             parameters.kick_activation_hysteresis,
         );
         blackboard.last_close_enough_to_kick = is_close;

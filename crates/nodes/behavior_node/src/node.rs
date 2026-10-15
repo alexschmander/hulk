@@ -157,6 +157,10 @@ fn validate_behavior_parameters(
             "ball_velocity_matching_distance",
             parameters.kicking.ball_velocity_matching_distance,
         ),
+        (
+            "receding_ball_kick_activation_distance",
+            parameters.kicking.receding_ball_kick_activation_distance,
+        ),
     ] {
         if !value.is_finite() || value < 0.0 {
             errors.push(format!("kicking.{name} must be finite and non-negative"));

@@ -492,6 +492,9 @@ pub struct KickingParameters {
     pub kick_activation_distance: f32,
     /// Total width of the handoff hysteresis band, in metres.
     pub kick_activation_hysteresis: f32,
+    /// Closer handoff for a ball rolling away from the robot, in metres.
+    #[serde(default = "default_receding_ball_kick_distance")]
+    pub receding_ball_kick_activation_distance: f32,
     /// Minimum ball-to-target distance for a strong striker kick, in metres.
     pub strong_kick_min_target_distance: f32,
     /// Distance behind the ball for walking and set-play alignment, in metres.
@@ -514,6 +517,7 @@ impl Default for KickingParameters {
             allow_strong_kicks: false,
             kick_activation_distance: 0.0,
             kick_activation_hysteresis: 0.0,
+            receding_ball_kick_activation_distance: default_receding_ball_kick_distance(),
             strong_kick_min_target_distance: 0.0,
             approach_ball_standoff: 0.0,
             minimum_interception_forward_distance: 0.0,
@@ -523,6 +527,9 @@ impl Default for KickingParameters {
 
 fn default_soft_target_speed() -> f32 {
     0.1
+}
+fn default_receding_ball_kick_distance() -> f32 {
+    0.6
 }
 fn default_strong_target_speed() -> f32 {
     3.4

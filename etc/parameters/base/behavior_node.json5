@@ -74,6 +74,7 @@
     allow_strong_kicks: true,
     kick_activation_distance: 1.5,
     kick_activation_hysteresis: 0.4,
+    receding_ball_kick_activation_distance: 0.6,
     strong_kick_min_target_distance: 6.0,
     approach_ball_standoff: 0.3,
     minimum_interception_forward_distance: 0.3,

@@ -309,6 +309,58 @@ mod tests {
     }
 
     #[test]
+    fn receding_ball_handoff_keeps_walking_until_close() {
+        use behavior_node::{conditions::is_close_to_ball, node::LastBall};
+        use linear_algebra::{Isometry2, point, vector};
+
+        for (distance, velocity, expected) in [
+            (0.8, vector![0.6, 0.0], false),
+            (0.35, vector![0.6, 0.0], true),
+            (0.8, vector![-0.6, 0.0], true),
+            (0.8, vector![0.0, 0.6], true),
+            (0.8, Vector2::zeros(), true),
+        ] {
+            // Rotate and translate the entire situation to catch mixed coordinate frames.
+            for angle in [0.0, std::f32::consts::FRAC_PI_2] {
+                let mut blackboard = kick_blackboard(point![distance, 0.0]);
+                let pose = Isometry2::from_parts(vector![1.0, -0.5], angle);
+                blackboard.world_state.robot.ground_to_field = Some(pose);
+                blackboard.ball = Some(LastBall {
+                    position: pose * point![distance, 0.0],
+                    velocity: pose * velocity,
+                    age: ros_z::time::Time::zero(),
+                    field_side: types::field_dimensions::Side::Left,
+                    source: Default::default(),
+                });
+                assert_eq!(is_close_to_ball(&mut blackboard), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn rolling_velocity_warmup_cannot_latch_an_early_kick() {
+        use behavior_node::{conditions::is_close_to_ball, node::LastBall};
+        use linear_algebra::{point, vector};
+        let mut blackboard = kick_blackboard(point![0.8, 0.0]);
+        blackboard
+            .parameters
+            .kicking
+            .receding_ball_kick_activation_distance = 0.6;
+        blackboard.ball = Some(LastBall {
+            position: point![0.8, 0.0],
+            velocity: Vector2::zeros(),
+            age: ros_z::time::Time::zero(),
+            field_side: types::field_dimensions::Side::Left,
+            source: Default::default(),
+        });
+        assert!(is_close_to_ball(&mut blackboard));
+        let ball = blackboard.ball.as_mut().unwrap();
+        ball.position = point![0.78, 0.0];
+        ball.velocity = vector![0.1, 0.0];
+        assert!(!is_close_to_ball(&mut blackboard));
+    }
+
+    #[test]
     fn strong_kick_selection_uses_ball_to_target_distance() {
         use behavior_node::kick::{apply_kick_target, kick, kick_strength_subtree};
         use linear_algebra::point;
