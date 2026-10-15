@@ -6,7 +6,7 @@ The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did.
 All simulator wiring and hardware substitutes live under `tools/simulate`; robotics crates need no simulator integration code.
 
 Select a profile before starting.
-The simulator sits on three explicitly requested upstream squashes: `oleflb/feat/localization-improvements`, `schluis/dev/ball-filter-preferred-20261004` and `BenSampaolo/ball-search-behavior`.
+The simulator sits on three explicitly requested upstream squashes: `oleflb/feat/localization-improvements`, `schluis/codex/ball-filter-realism-20261002` and `BenSampaolo/ball-search-behavior`.
 The new localization solver acquires at the default spawn; the former lookup-budget limitation no longer applies.
 The walking/head-motion fixture measured 0.0209 m maximum position error and 0.0072 rad maximum yaw error over three seconds of simulation time, using production parameters and no truth pose injection.
 The [profile plan](PROFILES.md) records topic ownership and validation contracts.
