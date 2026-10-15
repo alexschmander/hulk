@@ -2,7 +2,8 @@
   goal_height: 1.6,
   observations: {pixel_noise_std_dev: 0.0, detection_dropout_probability: 0.0, seed: 0},
   ball: {
-    mass: 0.450,
+    // Midpoint of the measured 350–390 g match-ball range.
+    mass: 0.370,
     joint_damping: 0.002,
     joint_friction_loss: 0.0,
     // MuJoCo friction: sliding, torsional, rolling.
