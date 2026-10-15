@@ -50,10 +50,12 @@ The base configuration selects these profiles:
 | Strength | Policy | Requested speed | `strong` flag | `quick` flag |
 | --- | --- | --- | --- | --- |
 | Soft | SoftKick | 0.1 m/s | false | false |
-| Medium | Kick | 1.0 m/s | false | false |
+| Medium | SoftKick | 1.0 m/s | false | false |
 | Strong | Kick | 3.4 m/s | false | false |
 
-The strong behavior profile uses the normal policy at maximum target speed.
+Soft and Medium use the same soft policy at different requested speeds. Both
+clear the strong and quick flags. The strong behavior profile uses the normal
+policy at maximum target speed.
 `strong_uses_maximum_flag` enables the network's separate maximum-strength flag
 if needed. Trials found this flag weaker on one approach side and less precise
 on the other than the scaled maximum-speed request. `quick` enables the training
@@ -81,10 +83,11 @@ These parameters belong to `behavior_node.kicking`. All distances are in metres.
 | `soft_target_speed` | `0.1` | Soft profile's requested outgoing speed in m/s. |
 | `strong_target_speed` | `3.4` | Strong profile's requested outgoing speed in m/s. |
 | `strong_uses_maximum_flag` | `false` | Also set the network's strong flag for the Strong profile. |
-| `allow_strong_kicks` | `true` | Permit strong striker and penalty kicks. |
+| `allow_strong_kicks` | `true` | Permit strong striker, kickoff follow-up and penalty kicks. |
 | `strong_kick_min_target_distance` | `6.0` | Select strong striker kicks at or beyond this ball-to-target distance. Penalty selection only checks permission. |
 | `kick_activation_distance` | `1.5` | Centre of the normal striker's walk-to-kick handoff band. |
 | `kick_activation_hysteresis` | `0.4` | Total width of that band: enter below 1.3, leave above 1.7. |
+| `receding_ball_kick_activation_distance` | `0.6` | Handoff centre when the ball's field velocity projects away from the robot faster than 0.05 m/s. With default hysteresis, enter below 0.4 m. Release an early kick above 0.65 m. |
 | `ball_observation_timeout` | `100 ms` | Maximum visual observation age and odometry association gap. |
 | `ball_velocity_matching_distance` | `0.3` | Maximum disagreement between projected visual position and own tracked ball before using tracked velocity. |
 | `approach_ball_standoff` | `0.3` | Walking standoff behind the ball and set-play alignment position. |
@@ -97,6 +100,31 @@ a kick continues.
 Strength selection and kick direction use the same target position. The separate
 `substates.distance_for_kick` and `substates.distance_for_kick_hysteresis`
 parameters control proximity to the set-play alignment position.
+
+## Kickoff
+
+Our striker arms a single kickoff sequence in Set. It also accepts the filtered
+whistle-in-Set kickoff flag when joining Playing. The sequence survives the GC
+clearing that flag and resets on leaving Playing. Opponent restarts, set plays
+and penalty shootouts do not arm it. A ball already more than 0.4 m from the
+centre does not start the routine, and an unfinished routine expires after 20 s.
+
+The opening touch uses Soft at 45 degrees to the left of the attacking field
+axis. Its field target stays fixed while the robot turns. Walking aligns with
+the kick direction and stops 0.6 m behind the ball before handing over. The soft
+policy remains active until the ball has moved 0.25 m, followed by 350 ms of
+follow-through.
+
+The striker then uses walking to recover behind the ball, facing the opponent
+goal centre. It aims for a standoff of 0.85 m with the ball 0.08 m to its left,
+waits for ball speed below 0.2 m/s, and stands for 600 ms before selecting Strong.
+That stand lets the walking gait settle and its phase return to zero. A direct
+handoff from walking produced substantially weaker shots in the calibration.
+Disabling strong kicks selects the configured ordinary profile for the follow-up.
+
+The behavior blackboard exposes `kickoff` stages for simulator inspection. Once
+the strong shot has moved the ball 0.5 m and completed 500 ms of follow-through,
+ordinary striker behavior resumes.
 
 ## Inference and simulation
 
@@ -234,6 +262,55 @@ These checks establish frame consistency for the tested cases. Moving balls,
 especially at oblique angles, still produced weak or inaccurate medium kicks
 despite accurate ideal inputs. Filtered velocity also has measurable estimation error; coordinate
 corrections alone do not establish reliable moving-ball control.
+
+## Soft-policy passes and autonomous kickoff calibration
+
+The coordinate-audit results above used the earlier normal-policy Medium profile.
+Medium now selects SoftKick at a 1.0 m/s request. Direct stationary-ball trials
+at 350, 370 and 390 g, including centre and both lateral approach offsets,
+travelled 3.52 to 4.01 m in 20 s. Final speeds were 0.0013 to 0.0025 m/s and direction
+errors about 1.5 to 3 degrees. A default autonomous Filtering trial travelled
+3.78 m and ended at 0.0018 m/s. The requested speed is a policy input; measured
+peak speeds in those trials were about 1.5 to 1.8 m/s.
+
+Kickoff trials used one robot at `[-1.5, 0]` m, a stationary centre ball and
+scripted Ready, Set, whistle and Playing inputs through the production GC filters.
+They used default behavior parameters without a strength override. Motion &
+behavior passed at 350, 370 and 390 g; Filtering passed at 370 g. The soft opening
+touch travelled at 48.5 to 48.7 degrees against a 45-degree target and moved the ball
+about 1.8 m before the follow-up. The strong shot reached about 3.0 to 3.14 m/s with
+1.3 to 1.7 degrees of error against the actual field goal centre. The first contact
+occurred around 2.3 s and the strong contact around 13.8 s. Measured lift remained
+about 3 cm.
+
+The kickoff trial compares the strong trajectory directly with the field goal,
+rather than transforming a potentially older behavior command using the robot's
+current yaw. Those two aim measurements can differ during the kicking motion.
+Thirty-five-second Filtering runs measured 6.57 to 7.05 m from strong contact,
+ending at 0.0014 to 0.0016 m/s. The 25-second kickoff runs still had 0.036 to 0.071 m/s
+of ball speed, so their distances are not stopping distances. These are isolated
+two-kick trials with a scripted referee, not full matches with other players.
+
+For rolling-away balls, walking now retains the approach until a closer handoff.
+Velocity estimation initially reported only about 0.14 to 0.17 m/s after a 0.6 m/s
+velocity step, so the receding detector uses a 0.05 m/s threshold. It also releases
+an early kick above 0.65 m rather than retaining the wide stationary hysteresis
+band. The sequential regression covers a stationary estimate becoming receding.
+Coordinate tests rotate and translate the approach to check the velocity projection.
+
+With a 0.6 m/s rolling-away ball, default autonomous Filtering improved from
+0.60 m/s peak and 1.47 m travel to 1.31 m/s and 3.12 m. The latter ended at
+0.00018 m/s after 30 s. Motion & behavior reached 1.60 m/s and 3.61 m at 20 s,
+with 0.012 m/s remaining. These trials use the normal behavior selection and
+isolate the kick by standing one second after contact.
+
+Moving-ball quality still varies. At 1.0 m/s initial rolling-away speed,
+Filtering reached 1.25 m/s and 2.98 m travel, just short of the 3 m quality check.
+The 0.8 m/s crossing fixture travelled 3.29 m in 10 s but missed the target
+direction by about 15 degrees. An approaching-ball fixture reached 3.68 m in
+10 s with about 1.7 degrees of direction error. Those ten-second measurements
+still had 0.057 to 0.070 m/s of ball speed. Further moving-ball accuracy tuning is
+needed, especially for crossing balls.
 
 ## Serialized commands
 
