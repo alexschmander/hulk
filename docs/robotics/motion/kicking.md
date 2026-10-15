@@ -17,6 +17,11 @@ through the motion node to inference. Motion publishes `RobotCommand` on
 - `quick`: enable the normal kick policy's quick flag.
 - `strong`: enable the normal kick policy's strong flag, requesting maximum speed.
 
+Ground has +x forward and +y left, with robot yaw and an origin halfway between
+the soles. Position, absolute ball velocity and aim all use these axes. Velocity
+does not subtract robot motion and does not rotate into the requested kick
+direction. Aim is a counterclockwise angle from forward.
+
 Behavior stores its selected target in `Blackboard::kick_target` for strength
 selection. The kick command carries the resulting direction and inference
 inputs. `last_kick_target` holds the Field target across ticks for remote and
@@ -24,11 +29,17 @@ penalty kicks.
 
 The behavior `kick` action prefers the visual percept for position. It transforms
 that observation through timestamped odometry and advances it by its age using
-`world_state.ball.ball_in_ground_velocity`. The tracked ball must be our own
-estimate and agree with the visual ball within `ball_velocity_matching_distance`.
+velocity from the local `ball_filter/ball_position` topic. The tracked snapshot
+has its own source timestamp; behavior rotates its velocity and advances its
+position into the same Ground frame before matching it to the visual ball.
+The tracked position must agree within `ball_velocity_matching_distance`.
 Otherwise the visual position uses zero velocity. Observations older than
 `ball_observation_timeout` fall back to tracking. Motion compensates the remaining
 command age and robot movement before submitting the inference request.
+Behavior also propagates the field pose through odometry before computing aim,
+and publishes the command with the timestamp of that common frame. Own tracked
+ball positions in the behavior state use this updated field pose as well.
+A field pose without matching odometry is unavailable to behavior.
 Interception computes a future point locally to choose direction; the request
 still describes the ball at the current time.
 
@@ -103,6 +114,9 @@ raw finite differences, scaled by 0.1, rather than the walking slew limiter.
 The previous frequency action uses the policy action limit of 2.0 for kick
 observations; only physical phase integration clips it to 0.5. Walking retains
 its reference controller's clipped frequency feedback.
+The foot-avoidance bias uses foot points relative to the leveled sole midpoint,
+matching the ball frame; torso-relative foot points would introduce a false
+bias as the robot leans sideways.
 
 Inference caps the ball-position observation at 2.0 m. The handoff band stays
 inside this cap. Behavior approaches balls at up to 1.8 m/s using
@@ -126,6 +140,9 @@ quick input is `flag_allow_deviation`. Training used a 290 g, 95 mm radius ball.
 The simulator uses a 370 g ball, the midpoint of the robot's 350 to 390 g range,
 and retains its 105 mm radius.
 
+### Initial calibration at 2060822ca
+
+These baseline measurements precede the coordinate audit corrections below.
 Headless trials use production behavior, motion, inference and MuJoCo contacts.
 With the filtering profile, medium requests contacted both an approaching ball
 at 0.5 m/s and a crossing ball at 0.8 m/s at each of 350, 370 and 390 g.
@@ -167,6 +184,56 @@ The simulator's range depends on carpet and contact settings;
 these measurements do not establish a speed-to-distance formula for the robot.
 See the simulator's [motion trial instructions](../../../tools/simulate/README.md#motion-policy-trials)
 to repeat these measurements.
+
+### Coordinate audit
+
+The Motion & behavior profile supplies exact ball truth at the published scene
+timestamp, approximately every 33 ms. It still needs age and frame compensation
+at the 500 Hz behavior and 50 Hz policy loops. Filtering supplies synthetic camera
+detections to the real visual selector and ball filter, so its velocity is an
+estimate rather than perfect truth.
+
+An independent physical-frame audit found three mismatches:
+
+- Simulator Ground used foot-body origins instead of the sole midpoint. A tilted
+  ankle regression measured an 18 mm horizontal origin error before correction.
+- Behavior computed aim with the older field pose while the ball was already
+  advanced to a newer Ground frame. A +45 degree ideal-profile trial had
+  3.75 degrees of 95th-percentile request aim error before correction.
+- The foot-avoidance bias compared torso-relative foot points with a Ground
+  ball position. Translating both soles relative to the torso changed the bias
+  by 20 mm even with their separation unchanged.
+
+The corrected implementation uses the physical sole midpoint, aligns field pose,
+visual ball and own tracked velocity to a common timestamp, and expresses the
+foot points in that same Ground frame. The coordinate audit compares actual
+inference requests and tensor inputs with physical sole positions, trunk yaw and
+ball state without calling the simulator's Ground transform helper.
+
+Eight trials cover +45 and -45 degree starts in Motion & behavior, Filtering and
+Body state & odometry, a translated +45 degree start, and a stationary ball during
+a turn from 90 degrees. Each audits inputs after a 250 ms observation warmup and
+before contact. The stationary-ball case retains zero world ball velocity while
+the robot translates and rotates. The tensor's deliberate foot bias is reported
+separately from raw request position error.
+
+Largest scenario 95th-percentile errors in those eight trials:
+
+| Profile | Request position | Absolute velocity | Request aim |
+| --- | --- | --- | --- |
+| Motion & behavior | 3.1 mm | 0.006 m/s | 0.29 degrees |
+| Filtering | 13 mm | 0.184 m/s | 0.37 degrees |
+| Body state & odometry | 61 mm | 0.192 m/s | 0.57 degrees |
+
+After these corrections, representative twenty-second stationary-ball runs
+travelled 1.69 m for Soft, 4.48 m for Medium and 7.25 m for Strong. Their final
+speeds were 0.0009, 0.0020 and 0.0030 m/s, respectively. These runs used 370 g,
+with the ball starting at world coordinates `[0.8, 0.08]` m.
+
+These checks establish frame consistency for the tested cases. Moving balls,
+especially at oblique angles, still produced weak or inaccurate medium kicks
+despite accurate ideal inputs. Filtered velocity also has measurable estimation error; coordinate
+corrections alone do not establish reliable moving-ball control.
 
 ## Serialized commands
 
