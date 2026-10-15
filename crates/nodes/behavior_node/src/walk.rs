@@ -136,20 +136,34 @@ pub fn walk_to(
 }
 
 pub fn walk_to_ball(blackboard: &mut Blackboard) -> Status {
+    walk_to_ball_target(
+        blackboard,
+        point!(blackboard.field_dimensions.length / 2.0, 0.0),
+        blackboard.parameters.kicking.approach_ball_standoff,
+        0.0,
+    )
+}
+
+pub(crate) fn walk_to_ball_target(
+    blackboard: &mut Blackboard,
+    target_in_field: Point2<Field>,
+    standoff: f32,
+    ball_lateral_offset: f32,
+) -> Status {
     if let (Some(ball), Some(ground_to_field)) = (
         &blackboard.last_ball,
         &blackboard.world_state.robot.ground_to_field,
     ) {
         let field_to_ground = ground_to_field.inverse();
         let ball_in_ground = field_to_ground * ball.position;
-        let goal_position = field_to_ground * point!(blackboard.field_dimensions.length / 2.0, 0.0);
+        let goal_position = field_to_ground * target_in_field;
         let orientation = Orientation2::from_vector(goal_position - ball_in_ground);
         let walk_and_stand = blackboard.parameters.walking.walk_and_stand;
         let kicking_speed = blackboard.parameters.walking.speed.kicking;
 
-        let target_position = ball_in_ground
-            - (goal_position - ball_in_ground).normalize()
-                * blackboard.parameters.kicking.approach_ball_standoff;
+        let forward = (goal_position - ball_in_ground).normalize();
+        let left = linear_algebra::vector![-forward.y(), forward.x()];
+        let target_position = ball_in_ground - forward * standoff - left * ball_lateral_offset;
         walk_to(
             blackboard,
             Pose2::from_parts(target_position, orientation),

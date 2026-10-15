@@ -183,6 +183,7 @@ fn create_behavior_blackboard(parameters: BehaviorParameters) -> BehaviorBlackbo
         last_close_enough_to_kick: false,
         kick_target: None,
         last_kick_target: None,
+        kickoff: Default::default(),
         last_motion_command: MotionCommand::default(),
         last_motion_switch_time: ros_z::time::Time::zero(),
         last_motion_type: None,
@@ -306,6 +307,146 @@ mod tests {
             last_seen: ros_z::time::Time::zero(),
         });
         blackboard
+    }
+
+    #[test]
+    fn kickoff_only_arms_for_our_ordinary_restart_and_resets_after_playing() {
+        use behavior_node::kickoff::{KickoffState, update_kickoff};
+        use hsl_network_messages::{GamePhase, SubState};
+        use linear_algebra::point;
+        use types::{
+            filtered_game_controller_state::FilteredGameControllerState,
+            primary_state::PrimaryState,
+        };
+        for (team, sub_state, game_phase, should_arm) in [
+            (Team::Hulks, None, GamePhase::Normal, true),
+            (Team::Opponent, None, GamePhase::Normal, false),
+            (
+                Team::Hulks,
+                Some(SubState::GoalKick),
+                GamePhase::Normal,
+                false,
+            ),
+            (
+                Team::Hulks,
+                None,
+                GamePhase::PenaltyShootout {
+                    kicking_team: Team::Hulks,
+                },
+                false,
+            ),
+        ] {
+            let mut blackboard = kick_blackboard(point![0.0, 0.0]);
+            blackboard.kickoff = KickoffState::Done;
+            blackboard.world_state.robot.primary_state = PrimaryState::Set;
+            blackboard.world_state.filtered_game_controller_state =
+                Some(FilteredGameControllerState {
+                    kicking_team: Some(team),
+                    sub_state,
+                    game_phase,
+                    ..Default::default()
+                });
+            update_kickoff(&mut blackboard);
+            assert_eq!(
+                matches!(blackboard.kickoff, KickoffState::Armed),
+                should_arm
+            );
+            blackboard.world_state.robot.primary_state = PrimaryState::Ready;
+            update_kickoff(&mut blackboard);
+            assert!(matches!(blackboard.kickoff, KickoffState::Idle));
+        }
+    }
+
+    #[test]
+    fn kickoff_survives_gc_flag_clear_and_walks_before_strong_follow_up() {
+        use behavior_node::kickoff::KickoffState;
+        use linear_algebra::{Isometry2, point};
+        use ros_z::time::Time;
+        use types::{
+            fall_detection::{FallDetection, Posture},
+            filtered_game_controller_state::FilteredGameControllerState,
+            filtered_game_state::FilteredGameState,
+            primary_state::PrimaryState,
+            world_state::{BallState, RobotState},
+        };
+
+        let mut parameters = default_behavior_parameters().unwrap();
+        parameters.control.is_simple = true;
+        let mut behavior = SimulatorRobotBehavior::new(parameters.clone());
+        let mut tick = |seconds: u64, state, ball, pose: Isometry2<Ground, Field>| {
+            let now = Time::zero() + Duration::from_secs(seconds);
+            let game_state = if state == PrimaryState::Set {
+                FilteredGameState::Set
+            } else {
+                // The real GC may already clear kick_off before the first playing tick.
+                FilteredGameState::Playing {
+                    ball_is_free: true,
+                    kick_off: false,
+                }
+            };
+            behavior
+                .tick_behavior_tree(SimulatorBehaviorTickInput {
+                    world_state: WorldState {
+                        now,
+                        robot: RobotState {
+                            primary_state: state,
+                            ground_to_field: Some(pose),
+                            player_number: PlayerNumber::Three,
+                        },
+                        ball: Some(BallState {
+                            ball_in_field: ball,
+                            ball_in_ground: pose.inverse() * ball,
+                            ..Default::default()
+                        }),
+                        filtered_game_controller_state: Some(FilteredGameControllerState {
+                            game_state,
+                            kicking_team: Some(Team::Hulks),
+                            ..Default::default()
+                        }),
+                        fall_detection: Some(FallDetection {
+                            time: now,
+                            valid_until: now + Duration::from_secs(1),
+                            posture: Posture::Upright,
+                        }),
+                        ..Default::default()
+                    },
+                    visual_kick_ball_position: None,
+                    field_dimensions: FieldDimensions::SPL_2025,
+                    parameters: parameters.clone(),
+                })
+                .unwrap()
+                .motion_command
+        };
+        let diagonal_pose = Isometry2::from_parts(
+            linear_algebra::vector![-0.35, -0.35],
+            std::f32::consts::FRAC_PI_4,
+        );
+        assert!(matches!(
+            tick(0, PrimaryState::Set, point![0.0, 0.0], diagonal_pose),
+            MotionCommand::Stand { .. }
+        ));
+        assert!(
+            matches!(tick(1, PrimaryState::Playing, point![0.0, 0.0], diagonal_pose), MotionCommand::Kick { soft: true, target_speed, kick_direction, .. } if target_speed == 0.1 && kick_direction.angle().abs() < 1e-5)
+        );
+        assert!(
+            matches!(tick(2, PrimaryState::Playing, point![0.25, 0.25], diagonal_pose), MotionCommand::Kick { soft: true, target_speed, .. } if target_speed == 0.1)
+        );
+        assert!(matches!(
+            tick(3, PrimaryState::Playing, point![0.3, 0.3], diagonal_pose),
+            MotionCommand::Walk { .. }
+        ));
+        let shot_pose = Isometry2::from_parts(linear_algebra::vector![-0.5535, 0.2808], -0.0713);
+        assert!(matches!(
+            tick(4, PrimaryState::Playing, point![0.3, 0.3], shot_pose),
+            MotionCommand::Stand { .. }
+        ));
+        assert!(
+            matches!(tick(5, PrimaryState::Playing, point![0.3, 0.3], shot_pose), MotionCommand::Kick { soft: false, target_speed, .. } if target_speed == 3.4)
+        );
+        tick(6, PrimaryState::Playing, point![1.0, 0.3], shot_pose);
+        tick(7, PrimaryState::Playing, point![1.3, 0.3], shot_pose);
+        drop(tick);
+        assert!(matches!(behavior.blackboard.kickoff, KickoffState::Done));
     }
 
     #[test]

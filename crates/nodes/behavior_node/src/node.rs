@@ -75,6 +75,8 @@ pub struct Blackboard {
     /// Target selected for this tick, used to choose kick strength.
     pub kick_target: Option<Point2<Ground>>,
     pub last_kick_target: Option<Point2<Field>>,
+    #[serde(default)]
+    pub kickoff: crate::kickoff::KickoffState,
     pub last_motion_command: MotionCommand,
     pub last_motion_switch_time: Time,
     pub last_motion_type: Option<MotionType>,
@@ -371,6 +373,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         last_close_enough_to_kick: false,
         kick_target: None,
         last_kick_target: None,
+        kickoff: Default::default(),
         last_motion_command: MotionCommand::default(),
         last_motion_switch_time: Time::zero(),
         last_motion_type: None,

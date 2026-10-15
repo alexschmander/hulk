@@ -15,6 +15,7 @@ use crate::{
     goalkeeper::goalkeeper_subtree,
     head::{look_around, look_at_ball_subtree, look_straight_ahead, search_for_lost_ball_subtree},
     kick::{intercept, kick, kick_subtree, set_kick_target_beyond_ball, use_kick},
+    kickoff::{kickoff, update_kickoff},
     negation,
     node::Blackboard,
     penalty_shootout::{is_penalty_shootout, penalty_shootout_subtree},
@@ -31,6 +32,10 @@ use crate::{
 };
 
 pub fn create_tree() -> Node<Blackboard> {
+    sequence!(action!(update_kickoff), subtree!(main_subtree))
+}
+
+fn main_subtree() -> Node<Blackboard> {
     selection!(
         sequence!(
             condition!(is_primary_state, PrimaryState::Damping),
@@ -151,6 +156,7 @@ pub(crate) fn striker_subtree() -> Node<Blackboard> {
         subtree!(look_at_ball_subtree),
         selection!(
             sequence!(condition!(is_in_sub_state), subtree!(sub_state_subtree),),
+            action!(kickoff),
             sequence!(
                 negation!(condition!(is_close_to_ball)),
                 subtree!(walk_to_ball_subtree)

@@ -4,6 +4,7 @@ pub mod conditions;
 pub mod goalkeeper;
 pub mod head;
 pub mod kick;
+pub mod kickoff;
 pub mod motion_assembler;
 pub mod node;
 pub mod penalty_shootout;
