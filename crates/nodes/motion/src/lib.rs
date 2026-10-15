@@ -45,6 +45,7 @@ use types::{
 use crate::walking::{WalkingParameters, step_from_walk_command};
 
 mod kick;
+pub mod trace;
 pub mod walking;
 
 const ROBOT_COMMAND_TOPIC: &str = "commands/robot_command";
@@ -127,6 +128,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await
         .wrap_err("failed to build robot_command publisher")?;
+    let kick_input_tracer = trace::KickInputTracer::new(&node).await?;
 
     let inference_qos = QosProfile {
         reliability: QosReliability::BestEffort,
@@ -269,6 +271,13 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
                 UpperBodyJoints::default()
             });
 
+        if do_inference && let MotionPlan::Kick { command, .. } = &motion_plan {
+            kick_input_tracer.record(trace::KickInput {
+                command_time,
+                prepared_at: now,
+                command: *command,
+            });
+        }
         let mut robot_command = motion_state
             .infer(
                 motion_plan,

@@ -5,6 +5,8 @@ use crate::{Competition, Configuration, RefereeMode};
 use ros_z::{parameter::RemoteParameterClient, prelude::*};
 use types::motion_command::{HeadMotion, MotionCommand};
 
+#[path = "motion_trials/ball_age.rs"]
+mod ball_age;
 #[path = "motion_trials/contacts.rs"]
 mod contacts;
 #[path = "motion_trials/coordinates.rs"]
@@ -136,6 +138,11 @@ fn motion_policy_trial() {
             },
         ))
         .unwrap();
+    let ball_age_audit =
+        (std::env::var("MOTION_TRIAL_BALL_AGE_AUDIT").as_deref() == Ok("1")).then(|| {
+            assert!(autonomous, "ball-age audit requires autonomous behavior");
+            ball_age::Audit::new(&runtime, &io)
+        });
     let mut kickoff_trial = is_kickoff.then(|| kickoff::Trial::new(&runtime, &io));
     let traces = runtime
         .block_on(
@@ -518,9 +525,17 @@ fn motion_policy_trial() {
         .filter(|command| matches!(***command, MotionCommand::Kick { .. }))
         .count();
     let records = traces.get_interval(started, io.now());
+    if let Some(audit) = &ball_age_audit {
+        audit.finish(
+            &records,
+            started,
+            io.now(),
+            started + Duration::from_secs_f64(first_contact.unwrap_or(duration)),
+        );
+    }
     let mut input_times = Vec::new();
     let mut sensor_ages = Vec::new();
-    let mut command_ages = Vec::new();
+    let mut latest_command_ages = Vec::new();
     let mut request_times = std::collections::HashMap::new();
     let mut service_delays = Vec::new();
     let mut target_speed_features = Vec::new();
@@ -579,7 +594,10 @@ fn motion_policy_trial() {
                 if let Some((stamp, _)) = commands.get_nearest_with_stamp(*inference_time)
                     && stamp <= *inference_time
                 {
-                    command_ages.push(inference_time.duration_since(stamp).as_secs_f64() * 1000.0);
+                    // This command may have arrived after motion selected its input.
+                    // The ball-age audit joins the causally selected command instead.
+                    latest_command_ages
+                        .push(inference_time.duration_since(stamp).as_secs_f64() * 1000.0);
                 }
             }
             _ => {}
@@ -610,7 +628,7 @@ fn motion_policy_trial() {
         "first_contact_seconds":first_contact,"maximum_ball_speed":maximum_speed,"distance":distance,"lift":maximum_height,"final_position":final_position,
         "final_velocity":final_velocity,"final_ball_speed":final_velocity[0].hypot(final_velocity[1]),"duration_seconds":io.now().duration_since(started).as_secs_f64(),"maximum_command_position_error":maximum_position_error,
         "command_position_error":stats(position_errors),"direction_error_degrees":direction_error,"contact_direction_degrees":contact_direction,"contact_position":contact_position,
-        "policy_interval_ms":stats(intervals),"sensor_age_ms":stats(sensor_ages),"command_age_ms":stats(command_ages),"service_delay_ms":stats(service_delays),"request_samples":request_samples,
+        "policy_interval_ms":stats(intervals),"sensor_age_ms":stats(sensor_ages),"latest_command_at_input_age_ms":stats(latest_command_ages),"service_delay_ms":stats(service_delays),"request_samples":request_samples,
         "robot_position":robot_pose.translation.to_array(),"coordinate_errors":coordinate_errors,"cruise_velocity":cruise_velocity,"minimum_robot_height":minimum_robot_height,"kick_commands":kick_commands,"status":io.status()})
     );
     if let Some(trial) = kickoff_trial {

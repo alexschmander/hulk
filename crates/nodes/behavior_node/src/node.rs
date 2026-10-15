@@ -15,7 +15,7 @@ use kinematics::joints::head::HeadJoints;
 use linear_algebra::{Isometry2, Point2, Pose2, Vector2};
 use ros_z::{
     prelude::*,
-    qos::{QosDurability, QosHistory},
+    qos::{QosDurability, QosHistory, QosReliability},
     time::Time,
 };
 use serde::{Deserialize, Serialize};
@@ -235,6 +235,14 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let own_kick_ball_cache = node
         .subscriber::<Option<BallPosition<Ground>>>("ball_filter/ball_position")
         .cache(1)
+        .build()
+        .await?;
+    let kick_input_trace_pub = node
+        .publisher::<crate::kick::InputTrace>(crate::kick::INPUT_TRACE_TOPIC)
+        .qos(QosProfile {
+            reliability: QosReliability::BestEffort,
+            ..Default::default()
+        })
         .build()
         .await?;
     let visual_kick_ball_position_cache = node
@@ -500,12 +508,14 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             primary_state,
         };
 
+        let mut tracking_cache_stamp = None;
         let tracked_kick_ball =
             own_kick_ball_cache
                 .get_latest_with_stamp()
                 .and_then(|(time, ball)| {
                     let ball = (*ball)?;
                     let transform = to_current(time)?;
+                    tracking_cache_stamp = Some(time);
                     Some(BallPosition {
                         position: transform
                             * (ball.position
@@ -645,5 +655,30 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         motion_command_pub
             .publish_with_source_time(&motion_command, now)
             .await?;
+        if matches!(motion_command, MotionCommand::Kick { .. })
+            && !blackboard.is_injected_motion_command
+            && let Err(error) = kick_input_trace_pub
+                // Best effort: diagnostics cannot block the next behavior tick.
+                .publish_if_subscribed(|| async {
+                    crate::kick::InputTrace {
+                        frame_time: now,
+                        observation_time: blackboard
+                            .visual_kick_ball_position
+                            .map(|ball| ball.last_seen)
+                            .or_else(|| {
+                                blackboard
+                                    .world_state
+                                    .ball
+                                    .map(|ball| Time::from_wallclock(ball.last_seen_ball))
+                            }),
+                        visual: blackboard.visual_kick_ball_position.is_some(),
+                        tracking_cache_stamp,
+                        tracking_observation_time: tracked_kick_ball.map(|ball| ball.last_seen),
+                    }
+                })
+                .await
+        {
+            tracing::warn!(%error, "kick input trace publication failed");
+        }
     }
 }

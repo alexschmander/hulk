@@ -16,6 +16,19 @@ pub enum KickStrength {
     Strong,
 }
 
+pub const INPUT_TRACE_TOPIC: &str = "behavior/kick_input_trace";
+
+/// Original measurement time, separate from the projected command frame.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, ros_z::Message)]
+pub struct InputTrace {
+    pub frame_time: ros_z::time::Time,
+    pub observation_time: Option<ros_z::time::Time>,
+    pub visual: bool,
+    /// Source state time with a logical clock; transport time with a wall clock.
+    pub tracking_cache_stamp: Option<ros_z::time::Time>,
+    pub tracking_observation_time: Option<ros_z::time::Time>,
+}
+
 fn configure_strength(
     motion: &mut BodyMotion,
     parameters: &KickingParameters,
