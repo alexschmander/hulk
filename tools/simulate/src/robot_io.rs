@@ -75,7 +75,11 @@ impl Observation {
 
 impl RobotBinding {
     pub fn ground_to_world(&self, data: &Data) -> nalgebra::Isometry3<f32> {
-        let [left, right] = self.feet.map(|id| data.xpos()[id]);
+        use kinematics::robot_dimensions::RobotDimensions;
+        let left = body_pose(data, self.feet[0])
+            * nalgebra::Point3::from(RobotDimensions::LEFT_FOOT_TO_LEFT_SOLE.inner);
+        let right = body_pose(data, self.feet[1])
+            * nalgebra::Point3::from(RobotDimensions::RIGHT_FOOT_TO_RIGHT_SOLE.inner);
         ground_pose(body_pose(data, self.trunk), left, right)
     }
 
@@ -248,8 +252,7 @@ impl RobotBinding {
         };
         let robot_to_world = body_pose(data, self.trunk);
         let head_to_world = body_pose(data, self.head);
-        let [left, right] = self.feet.map(|id| data.xpos()[id]);
-        let ground_to_world = ground_pose(robot_to_world, left, right);
+        let ground_to_world = self.ground_to_world(data);
         let ground_to_robot = Isometry3::wrap(robot_to_world.inverse() * ground_to_world);
         // MuJoCo camera: right, up, backwards. Projection camera: right, down, forwards.
         let camera_to_world = nalgebra::Isometry3::from_parts(
@@ -360,17 +363,13 @@ fn body_pose(data: &Data, id: usize) -> nalgebra::Isometry3<f32> {
 
 fn ground_pose(
     robot_to_world: nalgebra::Isometry3<f32>,
-    left: [f64; 3],
-    right: [f64; 3],
+    left: nalgebra::Point3<f32>,
+    right: nalgebra::Point3<f32>,
 ) -> nalgebra::Isometry3<f32> {
-    // Ground is robot-relative, centred between the feet on the field plane, with robot yaw.
+    // Ground shares the policy's sole midpoint and robot yaw, projected onto the field.
     let yaw = robot_to_world.rotation.euler_angles().2;
     nalgebra::Isometry3::from_parts(
-        Translation3::new(
-            ((left[0] + right[0]) * 0.5) as f32,
-            ((left[1] + right[1]) * 0.5) as f32,
-            0.0,
-        ),
+        Translation3::new((left.x + right.x) * 0.5, (left.y + right.y) * 0.5, 0.0),
         UnitQuaternion::from_euler_angles(0.0, 0.0, yaw),
     )
 }
@@ -450,6 +449,29 @@ pub(crate) mod tests {
         assert_eq!(data.ctrl()[actuator], 6.0);
         binding.apply(&mut data, None);
         assert_eq!(data.ctrl()[actuator], 0.0);
+    }
+
+    #[test]
+    fn ground_reference_matches_the_policy_sole_origin_with_tilted_feet() {
+        let mut data = model();
+        let binding = RobotBinding::new(&data, "").unwrap();
+        binding.reset_joints(&mut data);
+        // Tilt the ankles so the sole offset has a horizontal component.
+        // A foot-body origin must not stand in for the sole origin.
+        for index in [14, 20] {
+            data.qpos_mut()[binding.joints[index].0] = 0.3;
+        }
+        data.forward();
+        let sample = binding.observe(&data);
+        let sole_centres = binding
+            .feet
+            .map(|id| body_pose(&data, id) * nalgebra::point![0.0, 0.0, -0.038]);
+        let expected = (sole_centres[0].coords + sole_centres[1].coords) * 0.5;
+        let actual = sample.ground_to_world.translation.vector;
+        assert!(
+            (actual.xy() - expected.xy()).norm() < 1e-6,
+            "policy origin must be the physical sole midpoint: actual {actual:?}, expected {expected:?}"
+        );
     }
 
     #[test]
@@ -567,7 +589,11 @@ pub(crate) mod tests {
             Translation3::new(4.0, 3.0, 0.7),
             UnitQuaternion::from_euler_angles(0.2, -0.1, 1.0),
         );
-        let ground = ground_pose(robot, [4.1, 3.2, 0.04], [3.9, 2.8, 0.02]);
+        let ground = ground_pose(
+            robot,
+            nalgebra::point![4.1, 3.2, 0.04],
+            nalgebra::point![3.9, 2.8, 0.02],
+        );
         assert_eq!(ground.translation.vector, nalgebra::vector![4.0, 3.0, 0.0]);
         assert!((ground.rotation.euler_angles().2 - 1.0).abs() < 1e-6);
         let transformed_robot = ground.inverse() * robot;
