@@ -490,7 +490,9 @@ impl PhysicsWorker {
                             && (world.mode == SimulationMode::Running
                                 || !initialized.load(Ordering::Acquire))
                         {
-                            let time = io.now() + period;
+                            // Match start_team: publish at the current clock before
+                            // advancing it, so inference never receives future data.
+                            let time = io.now();
                             if world.mode == SimulationMode::Running {
                                 controller.apply(robot, world.data_mut(), &io.actuator_control());
                                 world.data_mut().step();
@@ -603,6 +605,10 @@ pub fn reset(world: &mut World) {
             .expect("reset controlled robot");
     }
 }
+
+#[cfg(test)]
+#[path = "motion_trials.rs"]
+mod motion_trials;
 
 #[cfg(test)]
 #[path = "profile_tests.rs"]

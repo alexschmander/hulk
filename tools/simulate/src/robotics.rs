@@ -557,7 +557,7 @@ impl RobotStack {
     }
 
     #[cfg(test)]
-    pub(crate) fn node(&self) -> &Node {
+    pub(crate) fn node(&self) -> &Arc<Node> {
         &self._node
     }
 

@@ -359,6 +359,59 @@ for profile in motion_behavior filtering body_state_odometry localization; do
 done
 ```
 
+## Motion policy trials
+
+The ignored `motion_policy_trial` test runs a single robot through the production
+motion stack and reports MuJoCo ball contacts, peak speed, travel from first
+contact, lift, direction error and inference timing as a `MOTION_TRIAL` JSON line.
+It fails on missed contact, a weak shot, a fallen robot or an emergency stop.
+Run one trial at a time. Load the motion assets and make the MuJoCo and ONNX
+Runtime shared libraries available first. On Linux, preloading the same ONNX
+Runtime library avoids shutdown ordering problems in native test executables.
+
+```sh
+LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=normal MOTION_TRIAL_SPEED=3.4 \
+  cargo test -p simulate motion_policy_trial -- --ignored --nocapture
+
+LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=behavior \
+  MOTION_TRIAL_PROFILE=filtering MOTION_TRIAL_STRENGTH=medium \
+  MOTION_TRIAL_SPEED=1.0 MOTION_TRIAL_VX=-0.5 \
+  cargo test -p simulate motion_policy_trial -- --ignored --nocapture
+
+LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=behavior \
+  MOTION_TRIAL_PROFILE=filtering MOTION_TRIAL_STRENGTH=medium \
+  MOTION_TRIAL_SPEED=1.0 MOTION_TRIAL_X=0.6 MOTION_TRIAL_Y=-0.5 MOTION_TRIAL_VY=0.8 \
+  cargo test -p simulate motion_policy_trial -- --ignored --nocapture
+```
+
+Direct trials inject current ball coordinates and a fixed field direction every
+20 ms. `normal` uses the normal policy with both flags false, `soft` selects the
+soft policy, `strong` sets the network's strong flag, `quick` sets its quick flag
+and `shot` sets both flags. These names describe injected policy inputs;
+behavior's Strong profile uses `normal` at 3.4 m/s by default.
+`behavior` releases injection and lets the chosen profile observe and approach
+the ball. `walk` injects velocity and reports measured cruise velocity over the
+second half of the trial.
+
+`MOTION_TRIAL_X/Y` set initial ball position, default `[0.8, 0.08]` m.
+`MOTION_TRIAL_VX/VY` set ball velocity, or walking velocity for `walk`.
+`MOTION_TRIAL_SPEED` defaults to 3.4 m/s and `MOTION_TRIAL_DURATION` to six seconds.
+Trials switch to Stand one second after first contact; override that
+interval with `MOTION_TRIAL_FOLLOWTHROUGH`. Travel measures displacement during
+the trial, not distance to rest. Use ten seconds for short touches. For stopping
+distance, set `MOTION_TRIAL_DURATION=20` and check `final_ball_speed`; the output
+also records the actual `duration_seconds`. The six-second 3.52 m/s shot still
+had 0.42 m/s of ball speed at the end. A twenty-second repeat reached 7.43 m
+and ended at 0.003 m/s.
+
+`MOTION_TRIAL_BALL_MASS` overrides mass in kg. The simulator default is 0.370 kg;
+repeat boundary cases at 0.350 and 0.390 kg. `MOTION_TRIAL_POLICY` accepts a JSON
+overlay for `motion_inference`, such as `'{"kick":{"target_speed_scale":0.01}}'`
+for the extra-scaling experiment. Overrides use temporary parameter layers.
+The selected commands and tensor feature 56 are included in the result.
+The [kick documentation](../../docs/robotics/motion/kicking.md) records policy
+contracts, calibrated strengths and remaining distance/lift limitations.
+
 ## Robot logs and recordings
 
 Every simulator robot records automatically, including robots added during a match.
