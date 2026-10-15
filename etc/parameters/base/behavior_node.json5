@@ -65,7 +65,7 @@
   kicking: {
     soft: false,
     quick: false,
-    target_speed: 1.0, // Desired outgoing ball speed in m/s.
+    target_speed: 0.3, // Soft-policy pass request, calibrated with contact extension.
     soft_target_speed: 0.1,
     strong_target_speed: 3.4,
     strong_uses_maximum_flag: false,

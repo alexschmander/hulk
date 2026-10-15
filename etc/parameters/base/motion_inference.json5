@@ -30,6 +30,12 @@
     ball_position_scale: 0.1,
     ball_velocity_scale: 0.1,
     target_speed_scale: 0.1, // Training observation scale; callers supply m/s.
+    contact: {
+      forward_offset: 0.12,
+      soft_forward_offset: 0.12,
+      soft_speed_range: [0.1, 0.3],
+      incoming_speed_limit: 0.05,
+    },
     shift_direction_degrees: [80.0, 100.0],
     shift_foot_distance: [0.16, 0.22],
     shift_ball_distance: [0.06, 0.15],

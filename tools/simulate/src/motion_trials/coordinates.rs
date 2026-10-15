@@ -28,9 +28,16 @@ pub(super) struct Audit {
     tensor_velocity_errors: Vec<f64>,
     tensor_aim_errors: Vec<f64>,
     worst_aim: Option<serde_json::Value>,
+    contact: motion_inference::config::ContactParameters,
 }
 
 impl Audit {
+    pub fn new(contact: motion_inference::config::ContactParameters) -> Self {
+        Self {
+            contact,
+            ..Self::default()
+        }
+    }
     pub fn capture(&mut self, data: &Data, prefix: &str, ball_prefix: &str, time: Time) {
         // Deliberately independent of RobotBinding::ground_to_world. The model's
         // training origin is halfway between sole points, with trunk yaw.
@@ -72,6 +79,7 @@ impl Audit {
             Event::Input {
                 inference_time,
                 values,
+                policy,
                 ..
             } if *inference_time >= start && *inference_time < end && values.len() == 59 => {
                 let Some(request) = self.requests.get(&record.request_id) else {
@@ -115,8 +123,22 @@ impl Audit {
                     );
                 }
                 self.aim_errors.push(aim_error);
+                let extension = if *policy == motion_inference::config::Policy::SoftKick {
+                    let [minimum, maximum] = self.contact.soft_speed_range;
+                    self.contact.soft_forward_offset
+                        * ((request.target_speed - minimum) / (maximum - minimum)).clamp(0.0, 1.0)
+                } else {
+                    self.contact.forward_offset
+                } as f64;
+                let direction = request.direction.angle() as f64;
+                let incoming = -(direction.cos() * requested_velocity.x
+                    + direction.sin() * requested_velocity.y);
+                let extension = extension
+                    * (1.0 - incoming / self.contact.incoming_speed_limit as f64).clamp(0.0, 1.0);
+                let calibrated =
+                    position + nalgebra::vector![direction.cos(), direction.sin()] * extension;
                 self.tensor_position_errors.push(
-                    (nalgebra::vector![values[6] as f64, values[7] as f64] * 10.0 - position)
+                    (nalgebra::vector![values[6] as f64, values[7] as f64] * 10.0 - calibrated)
                         .norm(),
                 );
                 self.tensor_velocity_errors.push(
@@ -146,6 +168,7 @@ impl Audit {
         }
         let result = serde_json::json!({
             "warmup_seconds":0.25,
+            "contact_calibration":self.contact,
             "request_position_m":stats(&mut self.position_errors),
             "request_velocity_m_s":stats(&mut self.velocity_errors),
             "request_aim_degrees":stats(&mut self.aim_errors),
@@ -176,7 +199,7 @@ impl Audit {
         );
         assert!(
             p95("tensor_position_m") < if filtering { 0.19 } else { 0.07 },
-            "policy ball position mismatch, including the configured foot shift: {result}"
+            "policy ball position mismatch after contact calibration, including the configured foot shift: {result}"
         );
         assert!(
             p95("tensor_velocity_m_s") < if filtering { 0.30 } else { 0.03 },

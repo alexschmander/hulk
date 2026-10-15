@@ -313,8 +313,17 @@ fn motion_policy_trial() {
     let mut cruise_start = None;
     let mut minimum_robot_height = f32::INFINITY;
     let mut maximum_position_error = 0.0f32;
-    let mut coordinate_audit = (std::env::var("MOTION_TRIAL_AUDIT").as_deref() == Ok("1"))
-        .then(coordinates::Audit::default);
+    let mut coordinate_audit =
+        (std::env::var("MOTION_TRIAL_AUDIT").as_deref() == Ok("1")).then(|| {
+            let client =
+                RemoteParameterClient::new(io.node().clone(), "/motion_trial/motion_inference")
+                    .unwrap();
+            let snapshot = runtime.block_on(client.get_snapshot()).unwrap();
+            assert!(snapshot.success, "{}", snapshot.message);
+            let parameters: motion_inference::config::Parameters =
+                serde_json::from_str(&snapshot.value_json).unwrap();
+            coordinates::Audit::new(parameters.kick.contact)
+        });
     assert!(
         coordinate_audit.is_none() || scenario == "behavior",
         "coordinate audit requires autonomous behavior"

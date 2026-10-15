@@ -114,10 +114,33 @@ pub struct KickParameters {
     pub ball_position_scale: f32,
     pub ball_velocity_scale: f32,
     pub target_speed_scale: f32,
+    #[serde(default)]
+    pub contact: ContactParameters,
     pub shift_direction_degrees: [f32; 2],
     pub shift_foot_distance: [f32; 2],
     pub shift_ball_distance: [f32; 2],
     pub shift_distance: f32,
+}
+
+/// Move the learned strike beyond the physical ball without changing its estimate.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ros_z::Message)]
+#[serde(deny_unknown_fields)]
+pub struct ContactParameters {
+    pub forward_offset: f32,
+    pub soft_forward_offset: f32,
+    pub soft_speed_range: [f32; 2],
+    pub incoming_speed_limit: f32,
+}
+
+impl Default for ContactParameters {
+    fn default() -> Self {
+        Self {
+            forward_offset: 0.0,
+            soft_forward_offset: 0.0,
+            soft_speed_range: [0.1, 0.3],
+            incoming_speed_limit: 0.2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ros_z::Message)]
@@ -175,6 +198,24 @@ impl Parameters {
         );
         let locomotion = &self.locomotion;
         let kick = &self.kick;
+        ensure!(
+            kick.contact.soft_speed_range[0] >= 0.0,
+            "soft contact speeds must be nonnegative"
+        );
+        ensure!(
+            kick.contact.incoming_speed_limit.is_finite()
+                && kick.contact.incoming_speed_limit > 0.0,
+            "kick contact incoming speed limit must be finite and positive"
+        );
+        ensure!(
+            [
+                kick.contact.forward_offset,
+                kick.contact.soft_forward_offset
+            ]
+            .into_iter()
+            .all(|offset| offset.is_finite() && (0.0..=0.15).contains(&offset)),
+            "kick contact offsets must be in [0, 0.15] metres"
+        );
         let get_up = &self.get_up;
         ensure!(
             get_up.progress_rate.is_finite() && get_up.progress_rate > 0.0,
@@ -252,6 +293,10 @@ impl Parameters {
             );
         }
         for (name, [minimum, maximum]) in [
+            (
+                "kick.contact.soft_speed_range",
+                kick.contact.soft_speed_range,
+            ),
             ("kick.shift_direction_degrees", kick.shift_direction_degrees),
             ("kick.shift_foot_distance", kick.shift_foot_distance),
             ("kick.shift_ball_distance", kick.shift_ball_distance),

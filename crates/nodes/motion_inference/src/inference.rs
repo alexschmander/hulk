@@ -309,7 +309,7 @@ impl Execution {
         match &mut self.state {
             State::Locomotion(state) => match request {
                 InferenceCommand::Kick(KickCommand { soft, request }) => {
-                    let ball_positions = state.record_kick_sample(sensor, request, joints);
+                    let ball_positions = state.record_kick_sample(sensor, request, joints, soft);
                     kick::Observation::new(
                         state,
                         sensor,

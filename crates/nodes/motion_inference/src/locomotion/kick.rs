@@ -128,6 +128,7 @@ pub(super) fn shifted_ball(
     sensor: &SensorFrame,
     kick: KickRequest,
     parameters: &KickParameters,
+    soft: bool,
 ) -> Point2<Ground> {
     let direction = kick.direction.angle();
     let to_kick_direction = UnitComplex::new(-direction);
@@ -164,6 +165,24 @@ pub(super) fn shifted_ball(
         * (ramp(ball.y - left.y, minimum, maximum)
             - (1.0 - ramp(ball.y - right.y, -maximum, -minimum)));
     ball.y += angle_weight * foot_weight * shift;
+    // A learned strike can brake before reaching the physical ball. Extending
+    // its target along the requested shot gives it room to follow through.
+    // The minimum-speed soft touch retains its original short stroke.
+    let extension = if soft {
+        parameters.contact.soft_forward_offset
+            * ramp(
+                kick.target_speed,
+                parameters.contact.soft_speed_range[0],
+                parameters.contact.soft_speed_range[1],
+            )
+    } else {
+        parameters.contact.forward_offset
+    };
+    // An incoming ball already closes the gap. Extending that strike makes the
+    // policy wait too long and can turn a clean interception into a glancing hit.
+    let incoming_speed = -(to_kick_direction * kick.ball_velocity.inner).x;
+    ball.x +=
+        extension * (1.0 - ramp(incoming_speed, 0.0, parameters.contact.incoming_speed_limit));
     Point2::wrap(
         (UnitComplex::new(direction) * ball)
             .cap_magnitude(parameters.ball_position_limit)
@@ -175,6 +194,80 @@ pub(super) fn shifted_ball(
 mod tests {
     use super::*;
     use crate::config::Parameters;
+
+    #[test]
+    fn contact_extension_rotates_with_aim_and_preserves_position_history() {
+        let mut parameters: Parameters = serde_json::from_value(
+            json5::from_str::<serde_json::Value>(include_str!(
+                "../../../../../etc/parameters/base/motion_inference.json5"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        parameters.kick.shift_distance = 0.0;
+        parameters.kick.contact.forward_offset = 0.12;
+        parameters.kick.contact.soft_forward_offset = 0.12;
+        parameters.kick.contact.soft_speed_range = [0.1, 0.3];
+        let position = Policy::Walk.offset(&parameters);
+        let sensor = SensorFrame {
+            timestamp: ros_z::time::Time::zero(),
+            position,
+            velocity: Joints::fill(0.0),
+            orientation: nalgebra::Quaternion::identity(),
+            gyro: Vector3::zeros(),
+            last_commanded_position: position,
+        };
+        let joints = JointLimits {
+            position: Joints::fill([-3.0, 3.0]),
+            maximum_torque: Joints::fill(50.0),
+        };
+        let parameters = std::sync::Arc::new(parameters);
+        for angle in [0.0, PI / 4.0, -PI / 2.0] {
+            for (soft, speed, offset) in [
+                (false, 3.4, 0.12),
+                (true, 0.1, 0.0),
+                (true, 0.2, 0.06),
+                (true, 0.3, 0.12),
+            ] {
+                let mut state = Locomotion::new(&sensor, parameters.clone(), &joints);
+                let mut request = KickRequest {
+                    ball_position: linear_algebra::point![0.4, 0.05],
+                    ball_velocity: linear_algebra::vector![0.2, 0.0],
+                    direction: Orientation2::new(angle),
+                    target_speed: speed,
+                    strong: false,
+                    quick: false,
+                };
+                let expected = request.ball_position
+                    + linear_algebra::vector![angle.cos() * offset, angle.sin() * offset];
+                let (current, previous) = state.record_kick_sample(&sensor, request, &joints, soft);
+                assert!((current - expected).norm() < 1e-6);
+                assert_eq!(previous, current);
+                request.ball_position += linear_algebra::vector![0.01, 0.0];
+                let positions = state.record_kick_sample(&sensor, request, &joints, soft);
+                assert!((positions.1 - expected).norm() < 1e-6);
+                let observation = Observation::new(
+                    &state,
+                    &sensor,
+                    &sensor.velocity,
+                    false,
+                    request,
+                    soft,
+                    positions,
+                    &joints,
+                );
+                assert_eq!(observation.ball_velocity, request.ball_velocity);
+                assert_eq!(observation.direction, request.direction);
+                request.ball_velocity = linear_algebra::vector![-angle.cos(), -angle.sin()] * 0.3;
+                assert!(
+                    (shifted_ball(&sensor, request, &parameters.kick, soft)
+                        - request.ball_position)
+                        .norm()
+                        < 1e-6
+                );
+            }
+        }
+    }
 
     #[test]
     fn foot_shift_uses_the_sole_midpoint_instead_of_the_torso_origin() {
@@ -202,14 +295,14 @@ mod tests {
             strong: false,
             quick: false,
         };
-        let centered = shifted_ball(&sensor, request, &parameters.kick);
+        let centered = shifted_ball(&sensor, request, &parameters.kick, false);
         // Move both soles sideways relative to the torso while preserving
         // their orientation and separation in the Ground frame.
         sensor.position.left_leg.hip_roll = 0.25;
         sensor.position.right_leg.hip_roll = 0.25;
         sensor.position.left_leg.ankle_down = -0.25;
         sensor.position.right_leg.ankle_down = -0.25;
-        let translated = shifted_ball(&sensor, request, &parameters.kick);
+        let translated = shifted_ball(&sensor, request, &parameters.kick, false);
         assert!(
             (centered - translated).norm() < 1e-5,
             "moving the sole midpoint relative to the torso changed the foot bias: {centered:?} vs {translated:?}"

@@ -117,9 +117,10 @@ impl Locomotion {
         sensor: &SensorFrame,
         request: KickRequest,
         joints: &JointLimits,
+        soft: bool,
     ) -> (Point2<Ground>, Point2<Ground>) {
         self.record_history(sensor, joints);
-        let ball = kick::shifted_ball(sensor, request, &self.parameters.kick);
+        let ball = kick::shifted_ball(sensor, request, &self.parameters.kick, soft);
         let previous = self
             .previous_ball
             .filter(|previous| (ball - *previous).norm() <= self.parameters.kick.ball_jump_distance)
