@@ -31,7 +31,7 @@ fn configure_strength(
     else {
         return Status::Failure;
     };
-    *soft = strength == KickStrength::Soft;
+    *soft = strength != KickStrength::Strong;
     *strong = strength == KickStrength::Strong && parameters.strong_uses_maximum_flag;
     *quick = parameters.quick && !*soft;
     *target_speed = match strength {
@@ -358,7 +358,7 @@ mod tests {
         ));
         configure_strength(&mut motion, &parameters, KickStrength::Medium);
         assert!(
-            matches!(motion, BodyMotion::Kick {soft: false, strong: false, target_speed, ..} if target_speed == 1.0)
+            matches!(motion, BodyMotion::Kick {soft: true, strong: false, quick: false, target_speed, ..} if target_speed == 1.0)
         );
     }
 }

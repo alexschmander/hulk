@@ -470,7 +470,7 @@ impl Default for WalkSpeedParameters {
 pub struct KickingParameters {
     pub soft: bool,
     pub quick: bool,
-    /// Desired outgoing ball speed in m/s.
+    /// Desired outgoing ball speed for medium passes with the soft policy, in m/s.
     pub target_speed: f32,
     /// Outgoing speed for short touches with the soft policy, in m/s.
     #[serde(default = "default_soft_target_speed")]

@@ -332,6 +332,7 @@ mod tests {
             assert_eq!(status, Status::Success);
             let Some(BodyMotion::Kick {
                 strong,
+                soft,
                 target_speed,
                 kick_direction,
                 ..
@@ -339,8 +340,9 @@ mod tests {
             else {
                 panic!("expected kick command")
             };
-            assert_eq!(strong, expected_strong);
-            assert_eq!(target_speed, 1.2);
+            assert!(!strong);
+            assert_eq!(soft, !expected_strong);
+            assert_eq!(target_speed, if expected_strong { 3.4 } else { 1.2 });
             assert_eq!(blackboard.kick_target, Some(point![target_x, 0.0]));
             assert_eq!(kick_direction.angle(), 0.0);
 
@@ -389,6 +391,11 @@ mod tests {
         use types::world_state::BallState;
 
         let mut blackboard = kick_blackboard(point![0.5, 1.0]);
+        blackboard
+            .visual_kick_ball_position
+            .as_mut()
+            .unwrap()
+            .velocity = vector![0.0, -1.0];
         blackboard.world_state.ball = Some(BallState {
             ball_in_ground_velocity: vector![0.0, -1.0],
             ..Default::default()
@@ -426,6 +433,7 @@ mod tests {
             velocity: vector![0.0, 0.0],
             age: ros_z::time::Time::zero(),
             field_side: Side::Left,
+            source: types::world_state::BallSource::Own,
         });
         blackboard
             .parameters
