@@ -467,6 +467,43 @@ exact truth at scene-frame timestamps, roughly every 33 ms; asynchronous consume
 still need to compensate for elapsed time and rotation. A successful coordinate
 audit establishes input-frame consistency, not kick range or outgoing aim quality.
 
+`MOTION_TRIAL_BALL_AGE_AUDIT=1` traces original observation age through autonomous
+`behavior` or `kickoff`. It joins `behavior/kick_input_trace` to the exact
+command selected in `motion/kick_input_trace`, then matches that compensated
+payload to the service request and policy input. The motion trace uses a bounded
+nonblocking queue; behavior publishes its small trace after publishing the
+production command. Both diagnostic topics use best-effort transport. The audit
+rejects more than 5% unmatched inputs and requires
+at least ten matched inputs before first contact. It requires the simulator's
+logical clock, where the command cache is indexed by source time.
+
+Its `MOTION_BALL_AGE` JSON line reports original observation age, age at behavior,
+selected-command age, service timing, perception-stage delivery ages, and
+tracked state versus latest observation age. `statistics` includes only inputs
+before first contact; `all_observation_age_ms` also includes follow-through.
+Original observation age uses producer timestamps. Stage delivery ages use
+observer receipt times and can include observer scheduling within the 2 ms
+simulation clock grid. A zero duration is below that resolution.
+`MOTION_TRIAL_BALL_AGE_OUTPUT` saves each joined sample;
+`MOTION_TRIAL_MAX_BALL_AGE_MS` asserts the pre-contact p95 age.
+
+```sh
+LD_PRELOAD="$ORT_DYLIB_PATH" MOTION_TRIAL=behavior MOTION_TRIAL_SPEED=0.3 \
+  MOTION_TRIAL_PROFILE=filtering MOTION_TRIAL_DURATION=3 \
+  MOTION_TRIAL_BALL_AGE_AUDIT=1 MOTION_TRIAL_MAX_BALL_AGE_MS=85 \
+  MOTION_TRIAL_BALL_AGE_OUTPUT=/tmp/ball-age.json \
+  cargo test -p simulate motion_policy_trial -- --ignored --nocapture
+```
+
+Repeat with `motion_behavior` for the truth path, or add `MOTION_TRIAL_VX=0.6`
+and `MOTION_TRIAL_DURATION=8` for a filtered rolling-away ball. The measured
+pre-contact p95 ages were 54 ms, 80 ms and 80 ms respectively. A 25 ms threshold
+fails even in the truth profile. All inputs matched in these runs.
+The ordinary trial's `latest_command_at_input_age_ms`, formerly `command_age_ms`,
+only describes the latest cached command at inference time. That command may
+have arrived after motion selected its input, so it cannot establish causal
+command age. Sensor and service ages also exclude original ball observation age.
+
 `MOTION_TRIAL_CONTACT_AUDIT=1` records contacts at every physics step, normally
 2 ms. Its `MOTION_CONTACTS` record identifies foot and other body contacts, and
 tracks the actual material point on the contacting foot throughout the swing.

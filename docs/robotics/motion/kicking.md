@@ -73,6 +73,73 @@ settings while a transition is blocked.
 reads `behavior_node.stand_up.fast` (default `false`) on entry and retains that
 choice until a different command is produced.
 
+## Ball observation age
+
+The command timestamp describes the frame to which behavior has projected the
+ball. It does not describe when the camera observed it. Trace the original
+`BallPosition.last_seen` through the exact behavior command selected by motion,
+its compensated service request and the inference `Input` event to measure that
+age. The simulator's optional ball-age audit performs this join.
+
+Autonomous Medium trials with a 370 g ball measured the following ages before
+first contact. Stationary trials ran for three seconds; the rolling-away trial
+ran for eight seconds with initial velocity `[0.6, 0]` m/s. Every kick input
+matched its selected command and original observation, and every selected
+position was visual.
+
+| Profile and situation | Pre-contact inputs | Median observation age | p95 | Maximum |
+| --- | --- | --- | --- | --- |
+| Motion & behavior, stationary | 81 | 40 ms | 54 ms | 56 ms |
+| Filtering, stationary | 81 | 64 ms | 80 ms | 82 ms |
+| Filtering, rolling away | 61 | 64 ms | 80 ms | 82 ms |
+
+The Filtering path takes 26 to 28 ms from the image timestamp to receipt of the
+visual position. Detection delivery takes about 2 ms in this synthetic path;
+the detection-to-percept stage adds 24 to 26 ms. Although the selected position
+is a raw percept, `ball_filter` publishes that percept **after** its `FutureMap`
+input buffer, whose detection safety lag is 25 ms. It therefore retains this
+delay even when behavior only borrows the filter's velocity.
+
+Scene observations arrive roughly every 34 ms on the simulator's 2 ms physics
+grid. Behavior samples them every 20 ms. In these trials the 20 ms behavior and
+policy ticks align so that motion selects the preceding behavior command,
+adding another 20 ms at every input. Motion preparation to service request and
+request to policy input each measure 0 ms on that grid. This means less than
+one clock step, not zero execution time. The tracked state at policy input is
+48 ms old at the median, while its latest supporting observation is about 64 ms
+old. A predicted state's timestamp and its observation timestamp measure
+different things.
+
+The earlier trial field `command_age_ms` looked up the latest command at
+inference time, including commands arriving after motion had already selected
+its input. It reported 0 to 2 ms and did not measure causal command age or ball
+observation age. It is now named `latest_command_at_input_age_ms`; use the
+ball-age audit's `behavior_to_motion_ms` for the selected command.
+
+Behavior projects position from the original observation to its current frame;
+motion projects again to its preparation time. In the rolling-away trial the
+independent coordinate audit measured about 1.9 mm p95 and 2.2 mm maximum position
+error at the inference request. The deliberate strike extension is separate
+from this comparison. Prediction works well for that smooth trajectory but
+cannot incorporate a sudden change until the next observation arrives.
+
+These measurements use the simulator's logical clock, synthetic detections and
+ordinary autonomous behavior, not recorded robot camera or detector timings.
+Hardware preserves image time through the detection payload, percept and
+`last_seen`, so those timestamps can measure camera-to-policy age. However,
+the default `ros_z::Cache` indexes by transport timestamp in wall-clock mode
+and by source timestamp in logical mode. A hardware `get_latest_with_stamp()`
+therefore does not establish the age of a filtered state, and can hide the
+fusion delay from its compensation. Hardware tracing must preserve source
+timestamps explicitly rather than treating these simulator results as robot
+latency measurements.
+
+The first delay reductions to investigate are publishing visual percepts before
+the fusion buffer and ordering behavior before the policy's command selection.
+Neither scheduling nor estimation changes are included in this diagnostic.
+See [the simulator audit instructions](../../../tools/simulate/README.md#motion-policy-trials)
+for reproduction and age thresholds.
+
 ## Behavior selection parameters
 
 These parameters belong to `behavior_node.kicking`. All distances are in metres.
