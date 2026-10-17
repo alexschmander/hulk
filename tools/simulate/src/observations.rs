@@ -210,15 +210,15 @@ pub(crate) fn detect_scene(
     }
     for position in robots {
         let foot = Point3::from(*position);
-        let center = foot + nalgebra::vector![0.0, 0.0, 0.45];
-        if !visible(center, 0.25) {
-            continue;
-        }
         let Some((bottom, depth)) = project(foot) else {
             continue;
         };
         let top = world_to_camera * (foot + nalgebra::vector![0.0, 0.0, 0.95]);
         if top.z <= 0.01 {
+            continue;
+        }
+        let center = foot + nalgebra::vector![0.0, 0.0, 0.45];
+        if !visible(center, 0.25) {
             continue;
         }
         let top = sample
@@ -473,6 +473,33 @@ impl CameraInputs {
 mod tests {
     use super::*;
     use crate::robot_io::{RobotBinding, tests::model};
+
+    #[test]
+    fn robot_detections_keep_visible_boxes_and_reject_off_camera_targets() {
+        let mut data = model();
+        let sample = RobotBinding::new(&data, "").unwrap().observe(&data);
+        let visible = sample.camera_to_world * nalgebra::point![0.0, 0.0, 2.0];
+        let behind = sample.camera_to_world * nalgebra::point![0.0, 0.0, -2.0];
+        let outside = sample.camera_to_world * nalgebra::point![20.0, 0.0, 2.0];
+        let robots = [visible, behind, outside].map(|p| p.coords.into());
+        let detections = detect_scene(
+            &mut data,
+            &sample,
+            &[],
+            &FieldDimensions::SPL_2025,
+            &robots,
+            crate::scene::goal::GOAL_HEIGHT as f32,
+        );
+        let robots: Vec<_> = detections
+            .iter()
+            .filter(|o| o.label == Label::Robot)
+            .collect();
+        assert_eq!(robots.len(), 1);
+        let area = robots[0].bounding_box.area;
+        assert!(((area.min.x() + area.max.x()) / 2.0 - 320.0).abs() < 0.001);
+        assert!((area.max.y() - 272.0).abs() < 0.001);
+        assert!(area.min.y() < area.max.y());
+    }
 
     #[test]
     fn camera_info_and_ball_detection_use_the_physical_optical_frame() {

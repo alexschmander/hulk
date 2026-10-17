@@ -34,6 +34,7 @@ mod enabled {
         referee: simulate::RefereeMode,
         competition: simulate::Competition,
         ball: simulate::BallSize,
+        mcap_enabled: bool,
     }
     impl Default for Settings {
         fn default() -> Self {
@@ -49,6 +50,7 @@ mod enabled {
                 referee: simulate::RefereeMode::default(),
                 competition: simulate::Competition::default(),
                 ball: simulate::BallSize::default(),
+                mcap_enabled: true,
             }
         }
     }
@@ -373,6 +375,13 @@ mod enabled {
                 self.ball_ui(ui);
                 ui.add_space(10.0);
                 widgets::profile_picker(ui, &mut self.settings.profile);
+                ui.add_space(10.0);
+                ui.checkbox(&mut self.settings.mcap_enabled, "Record MCAP")
+                    .on_hover_text(
+                        "Record topics for replay for every robot on both teams, including robots added later.\n\
+                         Disable for faster simulation. Robot logs remain available.\n\
+                         Applies when starting the simulator; stop and restart to change it.",
+                    );
                 ui.add_space(6.0);
                 egui::CollapsingHeader::new("Parameter and model paths")
                     .id_salt("simulator_paths")
@@ -493,6 +502,7 @@ mod enabled {
                 profile: self.settings.profile,
                 referee: self.settings.referee,
                 competition: self.settings.competition,
+                mcap_enabled: Some(self.settings.mcap_enabled),
             };
             let runtime = context.backend.runtime_handle().clone();
             let (sender, receiver) = mpsc::channel();
@@ -530,6 +540,7 @@ mod enabled {
             assert_eq!(legacy.profile, Profile::MotionBehavior);
             assert_eq!(legacy.ball, simulate::BallSize::Location);
             assert_eq!(legacy.competition, simulate::Competition::Middle);
+            assert!(legacy.mcap_enabled);
             for bits in 0..8 {
                 let profile = Profile::from_estimators(simulate::Estimators {
                     filtering: bits & 1 != 0,
@@ -540,6 +551,7 @@ mod enabled {
                     profile,
                     competition: simulate::Competition::MiddleFoundation,
                     ball: simulate::BallSize::Size4,
+                    mcap_enabled: bits & 1 != 0,
                     ..Settings::default()
                 };
                 let saved: Settings =
@@ -547,6 +559,7 @@ mod enabled {
                 assert_eq!(saved.profile, profile);
                 assert_eq!(saved.competition, simulate::Competition::MiddleFoundation);
                 assert_eq!(saved.ball, simulate::BallSize::Size4);
+                assert_eq!(saved.mcap_enabled, bits & 1 != 0);
             }
         }
     }

@@ -58,6 +58,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
                 opponent_count: 0,
                 field_configuration: None,
                 profile,
+                mcap_enabled: None,
             },
         ))
         .unwrap();

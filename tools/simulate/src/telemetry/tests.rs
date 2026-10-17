@@ -14,6 +14,81 @@ struct LateRecordingSample {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabling_mcap_keeps_logs_without_subscribing_or_creating_recordings() {
+    use tracing::instrument::WithSubscriber;
+
+    let directory = tempfile::tempdir().unwrap();
+    let overrides = directory.path().join("overrides");
+    std::fs::create_dir(&overrides).unwrap();
+    std::fs::write(
+        overrides.join("simulator_recording.json5"),
+        "{mcap_enabled: false}",
+    )
+    .unwrap();
+    let path = directory.path().join("robot");
+    let clock = Clock::logical(Time::from_nanos(1_000_000_000));
+    let startup = Startup::new(path.clone(), clock.clone()).unwrap();
+    let dispatch =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(startup.capture.clone()));
+    async {
+        let layers = vec![
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("parameters"),
+            overrides,
+        ];
+        let context = Arc::new(
+            ContextBuilder::default()
+                .with_namespace("/recording_disabled/1")
+                .with_clock(clock)
+                .with_parameter_layers(layers.clone())
+                .disable_multicast_scouting()
+                .with_connect_endpoints(std::iter::empty::<&str>())
+                .with_listen_endpoints(std::iter::empty::<&str>())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let telemetry = Telemetry::start(startup, &context, "/recording_disabled/1", &layers)
+            .await
+            .unwrap();
+        assert!(!telemetry.mcap_enabled());
+        let node = context.create_node("test").build().await.unwrap();
+        let publisher = node
+            .publisher::<u64>("ground_truth/unobserved")
+            .build()
+            .await
+            .unwrap();
+        assert!(!publisher.has_subscribers());
+        publisher.publish(&42).await.unwrap();
+        tracing::info!("Robot logs remain available without MCAP");
+        assert!(telemetry.status().is_none());
+        assert!(
+            telemetry
+                .recording_checkpoint()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("disabled")
+        );
+        assert!(telemetry.finish().await.is_none());
+        context.shutdown().unwrap();
+    }
+    .with_subscriber(dispatch)
+    .await;
+    assert!(
+        std::fs::read_to_string(path.join("logs.jsonl"))
+            .unwrap()
+            .contains("Robot logs remain available without MCAP")
+    );
+    assert!(!path.join("recording.mcap").exists());
+    assert!(!path.join("recording-segments.json").exists());
+    let finished: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path.join("finished.json")).unwrap()).unwrap();
+    assert_eq!(finished["mcap_enabled"], false);
+    assert_eq!(finished["dropped_samples"], 0);
+    assert!(finished["error"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and_pause() {
     // Install the log bridge as Twix does. A local dispatcher still owns each robot's records.
     let _ = tracing_subscriber::fmt()
@@ -295,7 +370,7 @@ async fn checkpoint_is_readable_while_recording_continues_and_replay_spans_segme
         .unwrap();
     publisher.publish(&1).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let checkpoint = telemetry.recording.checkpoint().await.unwrap();
+    let checkpoint = telemetry.recording_checkpoint().await.unwrap();
     assert_eq!(checkpoint.simulation_time, 1_000_000_000);
     assert!(!checkpoint.finalized);
     assert_eq!(checkpoint.dropped_samples, 0);
@@ -304,7 +379,7 @@ async fn checkpoint_is_readable_while_recording_continues_and_replay_spans_segme
     clock.advance(Duration::from_secs(1)).unwrap();
     publisher.publish(&2).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let second = telemetry.recording.checkpoint().await.unwrap();
+    let second = telemetry.recording_checkpoint().await.unwrap();
     assert!(second.ingestion_sequence > checkpoint.ingestion_sequence);
     assert_eq!(
         std::fs::read(directory.path().join(&checkpoint.files[0])).unwrap(),
