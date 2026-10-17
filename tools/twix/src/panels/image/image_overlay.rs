@@ -19,8 +19,7 @@ use crate::{
 use twix_visualization::twix_painter::TwixPainter;
 
 use super::overlays::{
-    HorizonOverlay,
-    ObjectDetectionOverlay, PoseDetectionOverlay, ProjectedFieldLinesOverlay,
+    HorizonOverlay, ObjectDetectionOverlay, PoseDetectionOverlay, ProjectedFieldLinesOverlay,
 };
 
 const OVERLAY_HISTORY_CAPACITY: usize = 4096;
