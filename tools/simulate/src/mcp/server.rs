@@ -156,18 +156,13 @@ impl Operation {
         Ok(())
     }
 }
-pub(super) struct FrozenQuery {
-    pub created: Instant,
-    pub arguments: Value,
-    pub rows: Vec<Value>,
-    pub metadata: Value,
-    pub collection: String,
-}
 pub(super) struct State {
     pub sessions: AsyncMutex<HashMap<String, Arc<Worker>>>,
     pub targets: AsyncMutex<HashMap<String, Arc<rosz::Target>>>,
     pub observations: AsyncMutex<HashMap<String, rosz::Observation>>,
-    pub queries: Mutex<HashMap<String, FrozenQuery>>,
+    pub queries: Mutex<super::queries::QueryStore>,
+    pub export: AsyncMutex<()>,
+    parameter_history: Mutex<std::collections::VecDeque<Value>>,
     pub operations: Mutex<HashMap<String, Operation>>,
     requests: AsyncMutex<HashMap<String, (Value, Value)>>,
     start: AsyncMutex<()>,
@@ -215,17 +210,23 @@ impl ServerHandler for Server {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ReadResourceResponse, rmcp::ErrorData> {
+        let (base, query) = request
+            .uri
+            .split_once('?')
+            .map_or((request.uri.as_str(), None), |(base, query)| {
+                (base, Some(query))
+            });
         let path = self
             .0
             .artifact_index
             .lock()
             .unwrap()
-            .get(&request.uri)
+            .get(base)
             .cloned()
             .ok_or_else(|| rmcp::ErrorData::invalid_params("Unknown artifact", None))?;
-        let bytes = tokio::fs::read(&path)
+        let bytes = read_artifact(&path, query)
             .await
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("{e:#}"), None))?;
         use base64::Engine;
         Ok(
             ReadResourceResult::new(vec![ResourceContents::BlobResourceContents {
@@ -287,6 +288,8 @@ pub(super) async fn run() -> Result<()> {
         targets: Default::default(),
         observations: Default::default(),
         queries: Default::default(),
+        export: Default::default(),
+        parameter_history: Default::default(),
         operations: Default::default(),
         requests: Default::default(),
         start: Default::default(),
@@ -342,6 +345,13 @@ impl State {
     async fn begin(self: &Arc<Self>, tool: &str, args: Value) -> Result<Value> {
         match tool {
             "server_info" => return Ok(self.info()),
+            "query_release" => {
+                return Ok(self
+                    .queries
+                    .lock()
+                    .unwrap()
+                    .release(string(&args, "query_id")?));
+            }
             "operation_status" => {
                 let op = self
                     .operations
@@ -387,7 +397,10 @@ impl State {
             | "rosz_unobserve"
             | "rosz_parameter_read"
             | "logs_read" => return rosz::read_tool(self, tool, &args).await,
-            "rosz_read" if !args["allow_recording_fallback"].as_bool().unwrap_or(false) => {
+            "rosz_read"
+                if args["cursor"].is_string()
+                    || !args["allow_recording_fallback"].as_bool().unwrap_or(false) =>
+            {
                 return rosz::read(self, &args).await;
             }
             _ => {}
@@ -420,7 +433,7 @@ impl State {
                     });
                     value["effect"] = json!(if matches!(
                         tool.as_str(),
-                        "rosz_wait" | "rosz_read" | "view_render" | "video_capture"
+                        "rosz_wait" | "rosz_read" | "rosz_export" | "view_render" | "video_capture"
                     ) {
                         "none"
                     } else {
@@ -438,6 +451,7 @@ impl State {
                         tool.as_str(),
                         "rosz_wait"
                             | "rosz_read"
+                            | "rosz_export"
                             | "view_render"
                             | "video_capture"
                             | "simulator_start"
@@ -703,6 +717,7 @@ impl State {
                 operation.stage("checkpointing");
                 rosz::read_cancellable(self, &args, Some(operation.cancel.clone())).await
             }
+            "rosz_export" => super::export::execute(self, &args, operation).await,
             "rosz_parameter_write" | "rosz_publish" | "rosz_call" => {
                 rosz::write_tool(self, tool, &args, operation).await
             }
@@ -724,7 +739,31 @@ impl State {
         value
     }
     fn info(&self) -> Value {
-        json!({"contract_version":"draft-1","capabilities":["owned_headless_sessions","rosz_graph","rosz_state","rosz_parameters","rosz_publish","rosz_services","retained_history","active_recording_fallback","scene_render","plots","video","logs"],"limits":{"active_sessions":1,"observations":128,"observation_bytes":268435456,"read_samples":10000,"read_bytes":1048576,"operations":2048,"request_ids":100000},"configuration_schema":self.configuration_schema(),"simulator_input_schemas":{"input":schema(&self.contract,&self.contract["$defs"]["simulator_input_input"]["properties"]["input"]),"controller":{"encoding":"serde-json","example":types::controller_input::ControllerInput::default(),"canonical_schema":<types::controller_input::ControllerInput as ros_z::Message>::schema()},"referee":crate::autoref::command_schemas()},"rendering":{"backend":"MuJoCo EGL","on_demand":true,"camera_images":"Only available when a robot publishes an actual image"},"prerequisites":["MuJoCo 3.9 shared library","ONNX Runtime and motion models","EGL for scene rendering"]})
+        json!({"contract_version":"draft-1","capabilities":["owned_headless_sessions","rosz_graph","rosz_state","rosz_parameters","rosz_publish","rosz_services","retained_history","active_recording_fallback","history_export","query_release","diagnostic_presets","verification_summaries","scene_render","plots","video","logs"],"limits":{"active_sessions":1,"observations":128,"observation_bytes":268435456,"read_samples":10000,"read_bytes":1048576,"operations":2048,"request_ids":100000,"concurrent_exports":1,"export_snapshot_bytes":268435456,"default_export_bytes":1073741824,"max_export_bytes":17179869184u64,"resource_bytes":8388608,"resource_chunk_bytes":1048576},"query_budget":self.queries.lock().unwrap().usage(),"configuration_schema":self.configuration_schema(),"simulator_input_schemas":{"input":schema(&self.contract,&self.contract["$defs"]["simulator_input_input"]["properties"]["input"]),"controller":{"encoding":"serde-json","example":types::controller_input::ControllerInput::default(),"canonical_schema":<types::controller_input::ControllerInput as ros_z::Message>::schema()},"referee":crate::autoref::command_schemas()},"rendering":{"backend":"MuJoCo EGL","on_demand":true,"camera_images":"Only available when a robot publishes an actual image"},"prerequisites":["MuJoCo 3.9 shared library","ONNX Runtime and motion models","EGL for scene rendering"]})
+    }
+    pub fn remember_parameters(
+        &self,
+        target: &rosz::Target,
+        node: &Value,
+        revision: &Value,
+        kind: &str,
+    ) {
+        let mut history = self.parameter_history.lock().unwrap();
+        history.push_back(json!({"target_id":target.id,"node":node,"revision":revision,
+            "observed_simulation_ns":target.worker.time().to_string(),"observed_wall_ns":wall().to_string(),"kind":kind}));
+        while history.len() > 1024 {
+            history.pop_front();
+        }
+    }
+    pub fn parameter_revisions(&self, target: &str) -> Value {
+        json!(
+            self.parameter_history
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p["target_id"] == target)
+                .collect::<Vec<_>>()
+        )
     }
     pub fn artifact(&self, path: &Path, description: &str) -> Result<Value> {
         let uri = format!("simulator-artifact://{}", id());
@@ -733,7 +772,7 @@ impl State {
             .unwrap()
             .insert(uri.clone(), path.to_owned());
         Ok(
-            json!({"uri":uri,"mime_type":mime(path),"byte_length":std::fs::metadata(path)?.len(),"description":description}),
+            json!({"uri":uri,"mime_type":mime(path),"byte_length":std::fs::metadata(path)?.len(),"description":description,"local_path":path,"read_uri_template":format!("{uri}?offset={{offset}}&length={{length}}")}),
         )
     }
 }
@@ -749,6 +788,86 @@ pub(super) fn mime(path: &Path) -> &'static str {
         Some("gif") => "image/gif",
         Some("svg") => "image/svg+xml",
         Some("json") => "application/json",
+        Some("jsonl") => "application/x-ndjson",
+        Some("csv") => "text/csv",
         _ => "application/octet-stream",
+    }
+}
+
+async fn read_artifact(path: &Path, query: Option<&str>) -> Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path).await?;
+    let size = file.metadata().await?.len();
+    let (offset, length) = if let Some(query) = query {
+        let mut offset = None;
+        let mut length = None;
+        for pair in query.split('&') {
+            let (key, value) = pair
+                .split_once('=')
+                .ok_or_else(|| eyre!("Expected offset and length"))?;
+            match key {
+                "offset" => {
+                    ensure!(offset.is_none(), "Repeated offset");
+                    offset = Some(value.parse::<u64>()?);
+                }
+                "length" => {
+                    ensure!(length.is_none(), "Repeated length");
+                    length = Some(value.parse::<u64>()?);
+                }
+                _ => bail!("Unknown artifact range parameter"),
+            }
+        }
+        let offset = offset.ok_or_else(|| eyre!("Missing offset"))?;
+        let length = length.ok_or_else(|| eyre!("Missing length"))?;
+        ensure!(
+            (1..=1048576).contains(&length),
+            "Artifact chunks must be between 1 byte and 1 MiB"
+        );
+        ensure!(offset <= size, "Artifact offset exceeds file size");
+        (offset, length.min(size - offset))
+    } else {
+        ensure!(
+            size <= 8 * 1024 * 1024,
+            "Artifact exceeds 8 MiB; read local_path or request URI?offset=0&length=1048576 chunks"
+        );
+        (0, size)
+    };
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    let mut bytes = vec![0; length as usize];
+    file.read_exact(&mut bytes).await?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+    #[tokio::test]
+    async fn artifact_ranges_are_bounded_and_reassemble() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"abcdefgh").unwrap();
+        assert_eq!(
+            read_artifact(file.path(), Some("offset=2&length=3"))
+                .await
+                .unwrap(),
+            b"cde"
+        );
+        assert_eq!(
+            read_artifact(file.path(), Some("offset=6&length=100"))
+                .await
+                .unwrap(),
+            b"gh"
+        );
+        assert!(
+            read_artifact(file.path(), Some("offset=9&length=1"))
+                .await
+                .is_err()
+        );
+        assert!(
+            read_artifact(file.path(), Some("offset=0&length=1048577"))
+                .await
+                .is_err()
+        );
+        file.as_file().set_len(9 * 1024 * 1024).unwrap();
+        assert!(read_artifact(file.path(), None).await.is_err());
     }
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:hulks:simulator-mcp:draft-1",
   "title": "Simulator MCP draft tool contract",
-  "description": "Design artifact for application-level tool arguments and result payloads, not an MCP wire protocol implementation. x-tools identifies schemas to register after resolving local references. Defaults are proposed; runtime validation handles discovered ROS-Z schemas and cross-field constraints described in the design.",
+  "description": "Application-level tool arguments and result payloads. x-tools identifies schemas to register after resolving local references. Runtime validation also checks discovered ROS-Z schemas and cross-field constraints described in the design.",
   "oneOf": [
     {
       "type": "object",
@@ -355,6 +355,38 @@
         "arguments"
       ],
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "query_release"
+        },
+        "arguments": {
+          "$ref": "#/$defs/query_release_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_export"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_export_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
     }
   ],
   "$defs": {
@@ -553,6 +585,14 @@
         },
         "description": {
           "type": "string"
+        },
+        "local_path": {
+          "type": "string",
+          "description": "Absolute path on the local MCP server host."
+        },
+        "read_uri_template": {
+          "type": "string",
+          "description": "Read this resource URI with a byte offset and a length of at most 1048576. Concatenate decoded bytes before parsing UTF-8."
         }
       },
       "required": [
@@ -859,6 +899,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "recording_status": {
+          "type": "string",
+          "enum": [
+            "topic_never_recorded",
+            "no_samples_in_range",
+            "recorded"
+          ]
         }
       },
       "required": [
@@ -915,6 +963,12 @@
         },
         "checkpoint": {
           "$ref": "#/$defs/Checkpoint"
+        },
+        "verification": {
+          "$ref": "#/$defs/Verification"
+        },
+        "archive_scan": {
+          "$ref": "#/$defs/ArchiveScan"
         }
       },
       "required": [
@@ -1238,6 +1292,9 @@
               "items": {
                 "type": "string"
               }
+            },
+            "query_budget": {
+              "$ref": "#/$defs/QueryBudget"
             }
           },
           "required": [
@@ -1247,7 +1304,8 @@
             "configuration_schema",
             "simulator_input_schemas",
             "rendering",
-            "prerequisites"
+            "prerequisites",
+            "query_budget"
           ],
           "additionalProperties": false
         },
@@ -1906,6 +1964,9 @@
             },
             "observed_at_wall_ns": {
               "$ref": "#/$defs/Nanoseconds"
+            },
+            "query_id": {
+              "$ref": "#/$defs/Id"
             }
           },
           "required": [
@@ -1913,7 +1974,8 @@
             "nodes",
             "endpoints",
             "next_cursor",
-            "observed_at_wall_ns"
+            "observed_at_wall_ns",
+            "query_id"
           ],
           "additionalProperties": false
         },
@@ -2032,14 +2094,32 @@
         },
         "retention": {
           "$ref": "#/$defs/Retention"
+        },
+        "preset": {
+          "type": "string",
+          "enum": [
+            "motion_inference"
+          ],
+          "description": "Arms trace, status and timing subscriptions. Keep the observation until diagnostics are no longer needed."
         }
       },
       "required": [
         "target_id",
-        "request_id",
-        "sources"
+        "request_id"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "sources"
+          ]
+        },
+        {
+          "required": [
+            "preset"
+          ]
+        }
+      ]
     },
     "rosz_observe_output": {
       "oneOf": [
@@ -2064,6 +2144,20 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/Coverage"
+              }
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Source"
+              },
+              "minItems": 1,
+              "maxItems": 32
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
               }
             }
           },
@@ -2762,12 +2856,16 @@
                 "partial",
                 "unavailable"
               ]
+            },
+            "query_id": {
+              "$ref": "#/$defs/Id"
             }
           },
           "required": [
             "entries",
             "next_cursor",
-            "coverage_status"
+            "coverage_status",
+            "query_id"
           ],
           "additionalProperties": false
         },
@@ -3261,6 +3359,476 @@
         "recorders"
       ],
       "additionalProperties": false
+    },
+    "QueryBudget": {
+      "type": "object",
+      "properties": {
+        "active_queries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "snapshot_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_queries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_snapshot_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_pages": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retry_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_retry_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "active_queries",
+        "snapshot_bytes",
+        "max_queries",
+        "max_snapshot_bytes",
+        "completed_pages",
+        "retry_bytes",
+        "max_retry_bytes",
+        "ttl_seconds"
+      ],
+      "additionalProperties": false
+    },
+    "query_release_input": {
+      "type": "object",
+      "properties": {
+        "query_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "query_id",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "query_release_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "query_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "released": {
+              "type": "boolean"
+            },
+            "freed_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "query_budget": {
+              "$ref": "#/$defs/QueryBudget"
+            }
+          },
+          "required": [
+            "query_id",
+            "released",
+            "freed_bytes",
+            "query_budget"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "Verification": {
+      "type": "object",
+      "properties": {
+        "sequence_scope": {
+          "type": "string"
+        },
+        "tracking_complete": {
+          "type": "boolean"
+        },
+        "publishers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "topic": {
+                "type": "string"
+              },
+              "publisher_id": {
+                "type": "string"
+              },
+              "selected_rows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "duplicate_rows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "first_sequence": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/Nanoseconds"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_sequence": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/Nanoseconds"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "missing_between_selected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "gap_intervals": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "topic",
+              "publisher_id",
+              "selected_rows",
+              "duplicate_rows",
+              "first_sequence",
+              "last_sequence",
+              "missing_between_selected",
+              "gap_intervals"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "schemas": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "topic": {
+                "type": "string"
+              },
+              "schema_hashes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "multiple_schemas": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "topic",
+              "schema_hashes",
+              "multiple_schemas"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "recorders": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "simulation_receipt_until_ns": {
+                "$ref": "#/$defs/Nanoseconds"
+              },
+              "wall_receipt_until_ns": {
+                "$ref": "#/$defs/Nanoseconds"
+              },
+              "ingestion_sequence": {
+                "type": "string",
+                "pattern": "^[0-9]+$"
+              },
+              "known_dropped_samples": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tail_status": {
+                "type": "string",
+                "enum": [
+                  "complete_to_barrier",
+                  "partial",
+                  "failed"
+                ]
+              }
+            },
+            "required": [
+              "target_id",
+              "simulation_receipt_until_ns",
+              "wall_receipt_until_ns",
+              "ingestion_sequence",
+              "known_dropped_samples",
+              "tail_status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "parameter_revisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "node": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "observed_simulation_ns": {
+                "$ref": "#/$defs/Nanoseconds"
+              },
+              "observed_wall_ns": {
+                "$ref": "#/$defs/Nanoseconds"
+              },
+              "kind": {
+                "enum": [
+                  "read",
+                  "write"
+                ]
+              }
+            },
+            "required": [
+              "target_id",
+              "node",
+              "revision",
+              "observed_simulation_ns",
+              "observed_wall_ns",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "parameter_revision_scope": {
+          "type": "string"
+        },
+        "completeness": {
+          "const": "unknown"
+        }
+      },
+      "required": [
+        "sequence_scope",
+        "tracking_complete",
+        "publishers",
+        "schemas",
+        "recorders",
+        "parameter_revisions",
+        "parameter_revision_scope",
+        "completeness"
+      ],
+      "additionalProperties": false,
+      "description": "Evidence for selected rows. Interior sequence gaps and MCP-observed parameter revisions do not prove complete delivery or a full parameter change history."
+    },
+    "ArchiveScan": {
+      "type": "object",
+      "properties": {
+        "segments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "segments_read": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunks_read": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "linear_segments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "topic": {
+                "type": "string"
+              },
+              "recorded_samples": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "status": {
+                "enum": [
+                  "topic_never_recorded",
+                  "no_samples_in_range",
+                  "recorded"
+                ]
+              }
+            },
+            "required": [
+              "topic",
+              "recorded_samples",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "segments",
+        "segments_read",
+        "chunks",
+        "chunks_read",
+        "linear_segments",
+        "sources"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_export_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "data_source": {
+          "type": "string",
+          "enum": [
+            "observations",
+            "recording"
+          ],
+          "default": "observations"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "jsonl",
+            "csv"
+          ],
+          "default": "jsonl"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 17179869184,
+          "default": 1073741824
+        }
+      },
+      "required": [
+        "target_id",
+        "request_id",
+        "sources",
+        "range"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_export_output": {
+      "$ref": "#/$defs/simulator_start_output"
+    },
+    "rosz_export_completion": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "metadata_artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data_source": {
+          "enum": [
+            "observations",
+            "recording"
+          ]
+        },
+        "verification": {
+          "$ref": "#/$defs/Verification"
+        },
+        "archive_scan": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArchiveScan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoint": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Checkpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "artifact",
+        "metadata_artifact",
+        "sample_count",
+        "data_source",
+        "verification",
+        "archive_scan",
+        "checkpoint",
+        "warnings"
+      ],
+      "additionalProperties": false
     }
   },
   "x-tools": [
@@ -3515,6 +4083,29 @@
       },
       "output_schema": {
         "$ref": "#/$defs/operation_cancel_output"
+      }
+    },
+    {
+      "name": "query_release",
+      "description": "Release an unfinished query snapshot or its last-page retry response. Releasing an absent query succeeds with zero freed bytes.",
+      "input_schema": {
+        "$ref": "#/$defs/query_release_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/query_release_output"
+      }
+    },
+    {
+      "name": "rosz_export",
+      "description": "Stream a historical interval to JSONL or CSV plus verification metadata. Select retained observations by default, or explicitly select an immutable recording checkpoint. Does not allocate pagination snapshots. Rows preserve collector order rather than global time order.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_export_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_export_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/rosz_export_completion"
       }
     }
   ]
