@@ -287,6 +287,12 @@ impl App for TwixApp {
                         log::error!("failed to set namespace: {error:#}");
                         self.namespace_editor = self.backend.namespace();
                     }
+                    #[cfg(feature = "simulator")]
+                    if let Some(name) = simulate::robot_id(&self.backend.namespace())
+                        .and_then(|id| self.layout.simulator_robot_name(id))
+                    {
+                        ui.weak(name);
+                    }
                 });
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

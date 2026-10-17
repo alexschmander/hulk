@@ -91,6 +91,7 @@ struct Handler {
 
 pub(crate) struct Engine {
     pub core: GameController,
+    pub opponent: crate::Opponent,
     pub enabled: bool,
     pub events: VecDeque<Event>,
     pub returns: BTreeMap<(u8, u8), Duration>,
@@ -111,7 +112,11 @@ pub(crate) struct Engine {
     whistles: VecDeque<f64>,
 }
 impl Engine {
-    pub fn new(competition: Competition, field: FieldConfiguration) -> color_eyre::Result<Self> {
+    pub fn new(
+        competition: Competition,
+        field: FieldConfiguration,
+        opponent: crate::Opponent,
+    ) -> color_eyre::Result<Self> {
         let params = Params {
             competition: serde_yaml::from_str(competition.yaml())?,
             game: GameParams {
@@ -127,6 +132,7 @@ impl Engine {
         let journal = Journal::default();
         Ok(Self {
             core: GameController::new(params, Box::new(journal.clone())),
+            opponent,
             referee: Autoreferee::new(Self::config(&field)),
             stuck: super::stuck::Stuck::default(),
             field,
@@ -244,7 +250,7 @@ impl Engine {
                 time,
                 origin,
                 true,
-                calls::describe(&action, self.core.get_game(false)),
+                calls::describe(&action, self.core.get_game(false), &self.opponent),
             );
         }
     }
@@ -268,7 +274,7 @@ impl Engine {
     pub fn call(&mut self, call: Call) -> Result<(), String> {
         self.collect_events(Origin::Automatic);
         if !self.allowed(call) {
-            let reason = call.refusal(self.core.get_game(false));
+            let reason = call.refusal(self.core.get_game(false), &self.opponent);
             self.log(
                 self.core.get_time(),
                 Origin::Operator,

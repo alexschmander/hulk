@@ -9,7 +9,6 @@ mod tests;
 pub(crate) mod transport;
 
 use crate::{RobotId, TeamId};
-pub(crate) use calls::{name, short};
 pub(crate) use desk::team_color;
 pub(crate) use engine::{Ball, Engine, Robot, Snapshot};
 use game_controller_core::types::Side;
@@ -128,6 +127,7 @@ impl AutoRef {
         let engine = Arc::new(Mutex::new(Engine::new(
             configuration.competition,
             configuration.field_configuration.as_ref().unwrap().clone(),
+            configuration.opponent.clone(),
         )?));
         let transport = transport::Transport::new(engine.clone()).await?;
         Ok(Self {

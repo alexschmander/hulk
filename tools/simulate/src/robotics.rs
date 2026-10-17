@@ -30,6 +30,26 @@ pub enum Opponent {
         source: PathBuf,
     },
 }
+impl Opponent {
+    pub fn team_name(&self, team: crate::TeamId) -> &'static str {
+        match team {
+            crate::TeamId::Hulks => "HULKs",
+            crate::TeamId::Opponents => match self {
+                Self::Hulks => "Opponents",
+                #[cfg(all(feature = "bhuman", unix))]
+                Self::BHuman { .. } => "B-Human",
+            },
+        }
+    }
+
+    pub(crate) fn player_tag(&self, id: crate::RobotId) -> String {
+        format!("{:.1}{}", self.team_name(id.team), id.number)
+    }
+
+    pub fn player_name(&self, id: crate::RobotId) -> String {
+        format!("{} {}", self.team_name(id.team), id.number)
+    }
+}
 #[cfg(test)]
 use types::time_wrapper::TimeWrapper;
 

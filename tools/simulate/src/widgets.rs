@@ -388,6 +388,7 @@ pub fn field_preview(
     field: &FieldConfiguration,
     robots: u8,
     opponents: u8,
+    opponent: &crate::Opponent,
     max_height: f32,
 ) -> Response {
     let dimensions = &field.dimensions;
@@ -533,9 +534,10 @@ pub fn field_preview(
             WidgetType::Other,
             true,
             format!(
-                "{} × {} m field with {robots} HULKs and {opponents} opponents",
+                "{} × {} m field with {robots} HULKs and {opponents} {}",
                 meters(dimensions.length),
-                meters(dimensions.width)
+                meters(dimensions.width),
+                opponent.team_name(crate::TeamId::Opponents)
             ),
         )
     });

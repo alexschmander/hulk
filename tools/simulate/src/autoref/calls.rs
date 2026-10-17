@@ -112,7 +112,7 @@ impl Call {
     }
 
     /// Why the core refuses this call in the current state, phrased for the operator.
-    pub fn refusal(self, game: &Game) -> String {
+    pub fn refusal(self, game: &Game, opponent: &crate::Opponent) -> String {
         let playing = "Only while the ball is in play";
         match self {
             Self::StopPlay => "Play is already stopped".into(),
@@ -130,12 +130,12 @@ impl Call {
                 if game.state != State::Playing {
                     playing.into()
                 } else {
-                    format!("{} already has this restart", name(team))
+                    format!("{} already has this restart", opponent.team_name(team))
                 }
             }
             Self::Timeout(team) => {
                 if game.teams[side(team)].timeout_budget == 0 {
-                    format!("{} has no timeout left", name(team))
+                    format!("{} has no timeout left", opponent.team_name(team))
                 } else {
                     "Only while the ball is out of play".into()
                 }
@@ -143,9 +143,13 @@ impl Call {
             Self::Penalize(id, call) => {
                 let penalty = player_penalty(game, id);
                 if matches!(penalty, Penalty::SentOff | Penalty::Substitute) {
-                    format!("{} is {}", short(id), penalty_label(penalty).to_lowercase())
+                    format!(
+                        "{} is {}",
+                        opponent.player_tag(id),
+                        penalty_label(penalty).to_lowercase()
+                    )
                 } else if penalty != Penalty::NoPenalty {
-                    format!("{} is already penalized", short(id))
+                    format!("{} is already penalized", opponent.player_tag(id))
                 } else {
                     match call {
                         PenaltyCall::MotionInSet => "Only in Set".into(),
@@ -158,7 +162,7 @@ impl Call {
                     }
                 }
             }
-            Self::Release(id) => format!("{} is not serving a penalty", short(id)),
+            Self::Release(id) => format!("{} is not serving a penalty", opponent.player_tag(id)),
         }
     }
 
@@ -184,14 +188,15 @@ impl Call {
     }
 
     /// What the call does, for tooltips.
-    pub fn hint(self, game: &Game) -> String {
+    pub fn hint(self, game: &Game, opponent: &crate::Opponent) -> String {
         match self {
             Self::StopPlay => "Halt the match; robots must stand still".into(),
             Self::ResumePlay => "Let the stopped match continue".into(),
             Self::Kickoff => format!(
                 "Robots walk to their kickoff positions; {} kicks off",
-                game.kicking_side
-                    .map_or("nobody".into(), |side| name(team(side)).to_owned())
+                game.kicking_side.map_or("nobody".into(), |side| opponent
+                    .team_name(team(side))
+                    .to_owned())
             ),
             Self::Set => "End Ready early; the ball is placed for the restart".into(),
             Self::Whistle => "Start play with a whistle every robot hears".into(),
@@ -201,44 +206,47 @@ impl Call {
             Self::SecondHalf => "Skip the rest of halftime; teams change ends".into(),
             Self::RefereeTimeout => "Interrupt the match; the clock stops".into(),
             Self::AddMinute => "Add a minute to the match clock".into(),
-            Self::Goal(team) => format!("Award a goal to {}", name(team)),
+            Self::Goal(team) => format!("Award a goal to {}", opponent.team_name(team)),
             Self::Restart(team, set_play) => {
                 format!(
                     "Award a {} to {}",
                     set_play_label(set_play).to_lowercase(),
-                    name(team)
+                    opponent.team_name(team)
                 )
             }
             Self::Timeout(team) => format!(
                 "{} takes a timeout; {} left",
-                name(team),
+                opponent.team_name(team),
                 game.teams[side(team)].timeout_budget
             ),
             Self::Penalize(id, call) => format!(
                 "Penalize {} for {}",
-                short(id),
+                opponent.player_tag(id),
                 call_label(call).to_lowercase()
             ),
-            Self::Release(id) => format!("Let {} return now; it walks back itself", short(id)),
+            Self::Release(id) => format!(
+                "Let {} return now; it walks back itself",
+                opponent.player_tag(id)
+            ),
         }
     }
 }
 
 /// Describes an applied or refused core action in the referee log.
-pub(crate) fn describe(action: &VAction, game: &Game) -> String {
+pub(crate) fn describe(action: &VAction, game: &Game, opponent: &crate::Opponent) -> String {
     let robot = |side: Side, player: PlayerNumber| {
-        short(RobotId {
+        opponent.player_tag(RobotId {
             team: team(side),
             number: u8::from(player),
         })
     };
     match action {
-        VAction::Goal(goal) => format!("Goal for {}", name(team(goal.side))),
+        VAction::Goal(goal) => format!("Goal for {}", opponent.team_name(team(goal.side))),
         VAction::StartSetPlay(start) => match start.side {
             Some(side) => format!(
                 "{} for {}",
                 set_play_label(start.set_play),
-                name(team(side))
+                opponent.team_name(team(side))
             ),
             None => format!("Neutral {}", set_play_label(start.set_play).to_lowercase()),
         },
@@ -255,7 +263,7 @@ pub(crate) fn describe(action: &VAction, game: &Game) -> String {
         VAction::FinishHalf(_) => "Half finished".into(),
         VAction::SwitchHalf(_) => "Second half".into(),
         VAction::Timeout(timeout) => match timeout.side {
-            Some(side) => format!("Timeout for {}", name(team(side))),
+            Some(side) => format!("Timeout for {}", opponent.team_name(team(side))),
             None => "Referee timeout".into(),
         },
         VAction::AddAdditionalTime(_) => "A minute added".into(),
@@ -278,25 +286,6 @@ pub(crate) fn describe(action: &VAction, game: &Game) -> String {
 
 pub(crate) fn player_penalty(game: &Game, id: RobotId) -> Penalty {
     game.teams[side(id.team)][PlayerNumber::new(id.number)].penalty
-}
-
-/// The scene badge, H1–H5 or O1–O5.
-pub(crate) fn short(id: RobotId) -> String {
-    format!(
-        "{}{}",
-        match id.team {
-            TeamId::Hulks => "H",
-            TeamId::Opponents => "O",
-        },
-        id.number
-    )
-}
-
-pub(crate) fn name(team: TeamId) -> &'static str {
-    match team {
-        TeamId::Hulks => "HULKs",
-        TeamId::Opponents => "Opponents",
-    }
 }
 
 pub(crate) fn set_play_label(set_play: SetPlay) -> &'static str {

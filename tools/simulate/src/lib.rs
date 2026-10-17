@@ -222,6 +222,15 @@ impl Simulator {
         self.selection.take()
     }
 
+    /// Friendly identity for a player present in the running simulator.
+    pub fn robot_name(&self, id: RobotId) -> Option<String> {
+        self.widget
+            .bevy_app
+            .world()
+            .resource::<team::Team>()
+            .robot_name(id)
+    }
+
     /// Controls for Twix's panel header: the match, the whole simulation, then the selected
     /// player. Returns whether Stop simulator was pressed.
     pub fn header(&mut self, ui: &mut Ui) -> bool {
@@ -278,7 +287,11 @@ impl Simulator {
             if let Some((_, Some(error))) = member.io.recording_status() {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
-                    format!("{}: {error}", team::robot_namespace(member.id)),
+                    format!(
+                        "{} ({}): {error}",
+                        team.configuration().opponent.player_name(member.id),
+                        team::robot_namespace(member.id)
+                    ),
                 );
             }
         }
@@ -386,7 +399,10 @@ impl Simulator {
                         if ui
                             .add_enabled(
                                 count < 5,
-                                egui::Button::new(format!("{} ({count}/5)", side.name())),
+                                egui::Button::new(format!(
+                                    "{} ({count}/5)",
+                                    team.configuration().opponent.team_name(side)
+                                )),
                             )
                             .clicked()
                         {
@@ -446,9 +462,10 @@ impl Simulator {
             .expect("team always has a selected player");
         let exists = Some(selected.id) == self.selected;
         let referee = world.resource::<team::Team>().referee().is_some();
+        let opponent = &world.resource::<team::Team>().configuration().opponent;
         let name = self
             .selected
-            .map_or_else(|| "No robot".into(), autoref::short);
+            .map_or_else(|| "No robot".into(), |id| opponent.player_tag(id));
         ui.weak("Player");
         if exists {
             ui.label(
@@ -456,12 +473,16 @@ impl Simulator {
                     .strong()
                     .color(autoref::team_color(ui.visuals(), selected.id.team)),
             )
-            .on_hover_text(robot_namespace(selected.id));
+            .on_hover_text(format!(
+                "{} ({})",
+                opponent.player_name(selected.id),
+                robot_namespace(selected.id)
+            ));
         } else {
             ui.label(RichText::new(name).weak()).on_hover_text(format!(
                 "No robot runs as {}. Add robot starts the next free player.",
                 self.selected
-                    .map_or_else(|| "this player".into(), robot_namespace)
+                    .map_or_else(|| "this player".into(), |id| opponent.player_name(id))
             ));
         }
         let led = exists.then(|| selected.io.led_color()).flatten();
