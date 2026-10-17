@@ -19,6 +19,17 @@ use types::{
 use crate::{
     observations::Frame, parameters::SimulatorParameters, profiles::Profile, robot_io::Observation,
 };
+
+#[derive(Clone, Debug, Default)]
+pub enum Opponent {
+    #[default]
+    Hulks,
+    #[cfg(all(feature = "bhuman", unix))]
+    BHuman {
+        executable: PathBuf,
+        source: PathBuf,
+    },
+}
 #[cfg(test)]
 use types::time_wrapper::TimeWrapper;
 
@@ -33,6 +44,7 @@ pub struct Configuration {
     pub location: Option<String>,
     pub robot_count: u8,
     pub opponent_count: u8,
+    pub opponent: Opponent,
     pub field_configuration: Option<crate::FieldConfiguration>,
     pub profile: Profile,
     /// Overrides the recording parameter for this session; None uses the parameter layers.
@@ -97,6 +109,8 @@ impl Robotics {
 }
 
 pub struct RobotStack {
+    #[cfg(all(feature = "bhuman", unix))]
+    bhuman: Option<crate::bhuman::SimulatorRobot>,
     owned_runtime: Option<Arc<crate::telemetry::RobotRuntime>>,
     lease: Option<Arc<crate::Lease>>,
     telemetry: Option<crate::telemetry::Telemetry>,
@@ -272,6 +286,37 @@ impl RobotStack {
         let default_away = settings
             .as_ref()
             .is_some_and(|settings| settings.default_away);
+        #[cfg(all(feature = "bhuman", unix))]
+        let bhuman = if default_away
+            && let Opponent::BHuman { executable, source } = &configuration.opponent
+        {
+            let settings = settings
+                .as_ref()
+                .ok_or_else(|| color_eyre::eyre::eyre!("B-Human requires a team session"))?;
+            Some(
+                crate::bhuman::SimulatorRobot::start(
+                    crate::bhuman::Configuration {
+                        executable: executable.clone(),
+                        source: source.clone(),
+                        player: settings.player as u8 + 1,
+                        team: 5,
+                        cognition: true,
+                        active: true,
+                        field: configuration.field_configuration.clone(),
+                        timeout: std::time::Duration::from_secs(30),
+                    },
+                    settings.ports,
+                    &node,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        #[cfg(all(feature = "bhuman", unix))]
+        let is_bhuman = bhuman.is_some();
+        #[cfg(not(all(feature = "bhuman", unix)))]
+        let is_bhuman = false;
         let parameters = node.bind_parameter_as::<SimulatorParameters>("simulator")?;
         parameters.add_validation_hook(SimulatorParameters::validate)?;
         if let Some(field) = &configuration.field_configuration {
@@ -359,80 +404,94 @@ impl RobotStack {
             .build()
             .await?;
         let mut tasks = JoinSet::new();
-        let (commands, sdk_task) = crate::simulated_sdk::start(&runtime, &context).await?;
-        // Abort the receiver if startup fails or the panel is closed.
-        let sdk_task = tokio_util::task::AbortOnDropHandle::new(sdk_task);
-        tasks.spawn(async move {
-            (
-                "booster_sdk",
-                async {
-                    sdk_task.await?;
-                    Ok(())
-                }
-                .await,
-            )
-        });
-        for spec in configuration.profile.nodes() {
-            let future = (spec.run)(context.clone());
+        let commands = if is_bhuman {
+            watch::channel(crate::simulated_sdk::Control::default()).1
+        } else {
+            let (commands, sdk_task) = crate::simulated_sdk::start(&runtime, &context).await?;
+            // Abort the receiver if startup fails or the panel is closed.
+            let sdk_task = tokio_util::task::AbortOnDropHandle::new(sdk_task);
             tasks.spawn(async move {
-                let result = future.await;
-                if let Err(error) = &result {
-                    tracing::error!(node = spec.name, error = %error, "Robot node failed");
+                (
+                    "booster_sdk",
+                    async {
+                        sdk_task.await?;
+                        Ok(())
+                    }
+                    .await,
+                )
+            });
+            commands
+        };
+        let (whistle, pulse) = watch::channel(None);
+        let (frames, mut receiver) = watch::channel::<Option<Frame>>(None);
+        if !is_bhuman {
+            for spec in configuration.profile.nodes() {
+                let future = (spec.run)(context.clone());
+                tasks.spawn(async move {
+                    let result = future.await;
+                    if let Err(error) = &result {
+                        tracing::error!(node = spec.name, error = %error, "Robot node failed");
+                    }
+                    (spec.name, result)
+                });
+            }
+            let whistle_context = context.clone();
+            tasks.spawn(async move {
+                (
+                    "simulator_whistle",
+                    crate::whistle::run(&whistle_context, pulse).await,
+                )
+            });
+            let game_cache = game.clone();
+            tasks.spawn(async move {
+                let result = async {
+                    let mut camera_inputs = camera_inputs;
+                    loop {
+                        receiver.changed().await?;
+                        let frame = receiver.borrow_and_update().clone();
+                        let Some(frame) = frame else {
+                            continue;
+                        };
+                        let side = game_cache
+                            .get_latest()
+                            .map(|game| game.global_field_side)
+                            .unwrap_or(if default_away {
+                                types::field_dimensions::GlobalFieldSide::Away
+                            } else {
+                                types::field_dimensions::GlobalFieldSide::Home
+                            });
+                        behavior
+                            .publish(
+                                frame.sample.ground_to_world,
+                                frame
+                                    .balls
+                                    .first()
+                                    .map(|ball| (ball.position, ball.velocity)),
+                                &frame.field,
+                                side,
+                                &frame.robots,
+                                frame.time,
+                            )
+                            .await?;
+                        camera_inputs.publish(&frame).await?;
+                    }
                 }
-                (spec.name, result)
+                .await;
+                ("simulator_observations", result)
             });
         }
-        let (whistle, pulse) = watch::channel(None);
-        let whistle_context = context.clone();
-        tasks.spawn(async move {
-            (
-                "simulator_whistle",
-                crate::whistle::run(&whistle_context, pulse).await,
-            )
-        });
-        let (frames, mut receiver) = watch::channel::<Option<Frame>>(None);
-        let game_cache = game.clone();
-        tasks.spawn(async move {
-            let result = async {
-                let mut camera_inputs = camera_inputs;
-                loop {
-                    receiver.changed().await?;
-                    let frame = receiver.borrow_and_update().clone();
-                    let Some(frame) = frame else {
-                        continue;
-                    };
-                    let side = game_cache
-                        .get_latest()
-                        .map(|game| game.global_field_side)
-                        .unwrap_or(if default_away {
-                            types::field_dimensions::GlobalFieldSide::Away
-                        } else {
-                            types::field_dimensions::GlobalFieldSide::Home
-                        });
-                    behavior
-                        .publish(
-                            frame.sample.ground_to_world,
-                            frame
-                                .balls
-                                .first()
-                                .map(|ball| (ball.position, ball.velocity)),
-                            &frame.field,
-                            side,
-                            &frame.robots,
-                            frame.time,
-                        )
-                        .await?;
-                    camera_inputs.publish(&frame).await?;
-                }
-            }
-            .await;
-            ("simulator_observations", result)
-        });
-        let field_dimensions =
-            tokio::time::timeout(std::time::Duration::from_secs(3), initial_field.recv()).await??;
+        let field_dimensions = if is_bhuman {
+            configuration
+                .field_configuration
+                .as_ref()
+                .ok_or_else(|| color_eyre::eyre::eyre!("Missing B-Human field configuration"))?
+                .dimensions
+        } else {
+            tokio::time::timeout(std::time::Duration::from_secs(3), initial_field.recv()).await??
+        };
         crate::parameters::validate_field_dimensions(&field_dimensions)
             .map_err(|error| color_eyre::eyre::eyre!(error))?;
-        if settings.is_some() {
+        if settings.is_some() && !is_bhuman {
             let expected = serde_json::to_value(field_dimensions)?;
             tasks.spawn(async move {
                 let result: Result<()> = async {
@@ -446,6 +505,8 @@ impl RobotStack {
             });
         }
         Ok(Self {
+            #[cfg(all(feature = "bhuman", unix))]
+            bhuman,
             owned_runtime: None,
             lease: settings
                 .as_ref()
@@ -528,6 +589,10 @@ impl RobotStack {
     }
 
     pub fn poll(&self) -> Option<String> {
+        #[cfg(all(feature = "bhuman", unix))]
+        if let Some(native) = &self.bhuman {
+            return native.poll();
+        }
         let mut tasks = self.tasks.lock().unwrap();
         let mut failure = self.failure.lock().unwrap();
         if failure.is_some() {
@@ -545,6 +610,10 @@ impl RobotStack {
     }
 
     pub fn status(&self) -> String {
+        #[cfg(all(feature = "bhuman", unix))]
+        if let Some(native) = &self.bhuman {
+            return native.status();
+        }
         if let Some(failure) = &*self.failure.lock().unwrap() {
             return failure.clone();
         }
@@ -574,6 +643,10 @@ impl RobotStack {
     }
 
     pub fn actuator_control(&self) -> crate::simulated_sdk::Control {
+        #[cfg(all(feature = "bhuman", unix))]
+        if let Some(native) = &self.bhuman {
+            return native.control();
+        }
         self.actuator_control_ref().clone()
     }
 
@@ -643,6 +716,10 @@ impl RobotStack {
     }
 
     pub fn jersey_color(&self, player: u8) -> Option<hsl_network_messages::TeamColor> {
+        #[cfg(all(feature = "bhuman", unix))]
+        if let Some(native) = &self.bhuman {
+            return native.jersey_color(player);
+        }
         let state = self.game_state.get_latest()?;
         let team = &state.as_ref().as_ref()?.hulks_team;
         Some(
@@ -658,10 +735,18 @@ impl RobotStack {
     }
 
     pub fn led_color(&self) -> Option<booster::LedColor> {
+        #[cfg(all(feature = "bhuman", unix))]
+        if let Some(native) = &self.bhuman {
+            return native.control().led;
+        }
         self.commands.borrow().led
     }
 
     pub fn away(&self) -> bool {
+        #[cfg(all(feature = "bhuman", unix))]
+        if let Some(native) = &self.bhuman {
+            return native.away();
+        }
         self.game.get_latest().map_or(self.default_away, |game| {
             game.global_field_side == types::field_dimensions::GlobalFieldSide::Away
         })
@@ -675,6 +760,10 @@ impl RobotStack {
     }
 
     pub fn button_event(&self, button: i32, event: booster::ButtonEventType) -> Result<()> {
+        #[cfg(all(feature = "bhuman", unix))]
+        if let Some(native) = &self.bhuman {
+            return native.button(button, event);
+        }
         self.runtime.block_on(crate::buttons::publish(
             self.context.session(),
             button,
@@ -702,11 +791,19 @@ impl RobotStack {
     }
 
     pub fn whistle(&self) {
+        #[cfg(all(feature = "bhuman", unix))]
+        if let Some(native) = &self.bhuman {
+            native.whistle();
+            return;
+        }
         self.whistle
             .send_replace(Some(self.now() + crate::whistle::PULSE_DURATION));
     }
 
     pub fn ready(&self) -> bool {
+        if self.is_bhuman() {
+            return true;
+        }
         self.readiness.ready(self.now())
     }
 
@@ -723,6 +820,22 @@ impl RobotStack {
 
     pub fn needs_detections(&self) -> bool {
         self.profile.filtering() || self.profile.localization() || self.detection_demand.active()
+    }
+
+    pub fn is_bhuman(&self) -> bool {
+        #[cfg(all(feature = "bhuman", unix))]
+        {
+            self.bhuman.is_some()
+        }
+        #[cfg(not(all(feature = "bhuman", unix)))]
+        {
+            false
+        }
+    }
+
+    #[cfg(all(feature = "bhuman", unix))]
+    pub(crate) fn bhuman(&self) -> Option<&crate::bhuman::SimulatorRobot> {
+        self.bhuman.as_ref()
     }
 
     pub fn publish_frame(&self, frame: Frame) {

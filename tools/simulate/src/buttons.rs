@@ -22,11 +22,11 @@ const HOLD: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct BodyButtons {
-    held: Option<(i32, Instant, bool)>,
+    held: Option<(i32, Instant, ros_z::time::Time, bool)>,
 }
 impl BodyButtons {
     pub fn cancel(&mut self, io: &Robotics) -> Result<()> {
-        if let Some((button, _, long)) = self.held.take() {
+        if let Some((button, _, _, long)) = self.held.take() {
             if long {
                 io.button_event(button, ButtonEventType::LongPressEnd)?;
             }
@@ -51,6 +51,19 @@ impl BodyButtons {
                 "Hold 1 second and release to enter Playing from Initial",
             ),
         ] {
+            let help = if io.is_bhuman() {
+                match button {
+                    0 => "Tap to enter native Unstiff/Damping",
+                    1 => {
+                        "Hold for over 2 simulated seconds to activate; press while active for Prepare"
+                    }
+                    _ => {
+                        "Tap for native manual game-state control; hold over 2 simulated seconds to leave Prepare"
+                    }
+                }
+            } else {
+                help
+            };
             let response = ui
                 .add(egui::Button::new(label).min_size(egui::vec2(36.0, 0.0)))
                 .on_hover_text(help);
@@ -58,22 +71,32 @@ impl BodyButtons {
             if self.held.is_none() {
                 if response.is_pointer_button_down_on() {
                     io.button_event(button, ButtonEventType::PressDown)?;
-                    self.held = Some((button, Instant::now(), false));
+                    self.held = Some((button, Instant::now(), io.now(), false));
                 } else if response.clicked() {
                     press(io, button, false)?;
                 }
             }
         }
         ui.spacing_mut().item_spacing.x = ui.style().spacing.item_spacing.x;
-        if let Some((button, started, long)) = &mut self.held {
-            if !*long && started.elapsed() >= HOLD {
+        if let Some((button, started, logical, long)) = &mut self.held {
+            let elapsed = if io.is_bhuman() {
+                io.now().duration_since(*logical)
+            } else {
+                started.elapsed()
+            };
+            let hold = if io.is_bhuman() {
+                Duration::from_millis(2050)
+            } else {
+                HOLD
+            };
+            if !*long && elapsed >= hold {
                 io.button_event(*button, ButtonEventType::LongPressStart)?;
                 io.button_event(*button, ButtonEventType::LongPressHold)?;
                 *long = true;
             }
             // Fills while the press counts toward the long-press threshold.
             let rect = rects[*button as usize].shrink2(egui::vec2(3.0, 2.0));
-            let progress = (started.elapsed().as_secs_f32() / HOLD.as_secs_f32()).min(1.0);
+            let progress = (elapsed.as_secs_f32() / hold.as_secs_f32()).min(1.0);
             let bar = egui::Rect::from_min_max(
                 egui::pos2(rect.left(), rect.bottom() - 2.0),
                 egui::pos2(rect.left() + rect.width() * progress, rect.bottom()),

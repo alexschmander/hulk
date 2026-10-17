@@ -11,6 +11,7 @@ use crate::robot_io::RobotBinding;
 pub struct Control {
     pub mode: RobotMode,
     pub command: Option<LowCommand>,
+    pub torque_limits: Option<[f32; 22]>,
     generation: u64,
     command_sequence: u64,
     /// None means no active LED override; firmware-owned colors are not simulated.
@@ -22,6 +23,7 @@ impl Default for Control {
         Self {
             mode: RobotMode::Damping,
             command: None,
+            torque_limits: None,
             generation: 0,
             command_sequence: 0,
             led: None,
@@ -44,6 +46,15 @@ impl Control {
             })
     }
 
+    #[cfg(all(feature = "bhuman", unix))]
+    pub(crate) fn native(command: LowCommand, torque_limits: [f32; 22]) -> Self {
+        Self {
+            mode: RobotMode::Custom,
+            command: Some(command),
+            torque_limits: Some(torque_limits),
+            ..Default::default()
+        }
+    }
     fn change_mode(&mut self, mode: RobotMode) {
         if self.mode != mode {
             self.mode = mode;
@@ -262,7 +273,11 @@ impl Controller {
             }
             RobotMode::Custom if control.command.is_some() => {
                 self.prepare = None;
-                robot.apply(data, control.command.as_ref());
+                robot.apply_with_limits(
+                    data,
+                    control.command.as_ref(),
+                    control.torque_limits.as_ref(),
+                );
             }
             _ => {
                 self.prepare = None;

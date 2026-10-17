@@ -146,6 +146,7 @@ impl Session {
             location: Some(location.into()),
             robot_count: configuration["robot_count"].as_u64().unwrap_or(1) as u8,
             opponent_count: configuration["opponent_count"].as_u64().unwrap_or(0) as u8,
+            opponent: crate::Opponent::Hulks,
             field_configuration: Some(field),
             profile,
             mcap_enabled: None,

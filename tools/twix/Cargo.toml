@@ -51,6 +51,7 @@ zenoh = { workspace = true }
 
 [features]
 simulator = ["dep:simulate", "dep:tikv-jemallocator"]
+bhuman = ["simulator", "simulate/bhuman"]
 
 [build-dependencies]
 pkg-config = "0.3"

@@ -1,0 +1,63 @@
+namespace hulk.bhuman;
+
+enum Motion : byte { Stand, Walk, Prepare, Damping }
+enum LedState : byte { Off, On, Blinking, FastBlinking, Half, HalfBlinking, HalfFastBlinking }
+
+struct Vector3 { x:float; y:float; z:float; }
+struct JointSample { position:float; velocity:float; torque:float; }
+struct JointCommand {
+  position:float;
+  velocity:float;
+  torque:float;
+  kp:float;
+  kd:float;
+  torque_limit:float;
+}
+
+struct Pose2 { x:float; y:float; yaw:float; }
+struct Buttons { f1:bool; stand:bool; walk:bool; }
+struct Leds { red:LedState; green:LedState; blue:LedState; }
+table Player { number:ubyte; teammate:bool; upright:bool = true; pose:Pose2; }
+table Ball { position:Vector3; velocity:Vector3; }
+table World { pose:Pose2; ball:Ball; players:[Player]; }
+table Packet { bytes:[ubyte] (required); }
+table Whistle { time_ns:ulong; confidence:float = 2; channels:ubyte = 2; }
+table Initialize { player:ubyte = 1; team:ubyte = 5; cognition:bool; active:bool = true; config_directory:string; }
+table Ready { revision:string (required); joints:[string] (required); }
+table Step {
+  time_ns:ulong;
+  joints:[JointSample] (required);
+  angle:Vector3;
+  gyro:Vector3;
+  acceleration:Vector3;
+  motion:Motion;
+  velocity:Vector3;
+  world:World;
+  buttons:Buttons;
+  whistle:Whistle;
+  game_controller:Packet;
+  team_messages:[Packet];
+}
+table Commands {
+  joints:[JointCommand] (required);
+  phase:string (required);
+  motion:string (required);
+  game_state:string (required);
+  player_state:string (required);
+  leds:Leds;
+  team_messages:[Packet];
+  teammates:ubyte;
+  cognition_time_ns:ulong;
+}
+table Stop {}
+table Stopped {}
+table Error { message:string (required); }
+union Payload { Initialize, Ready, Step, Commands, Stop, Stopped, Error }
+table Envelope {
+  version:uint = 1;
+  epoch:ulong;
+  sequence:ulong;
+  payload:Payload;
+}
+root_type Envelope;
+file_identifier "HBH1";

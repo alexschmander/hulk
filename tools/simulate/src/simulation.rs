@@ -395,6 +395,8 @@ impl PhysicsWorker {
             let mut samples = Vec::new();
             let mut observations = Vec::new();
             let mut robot_positions = Vec::new();
+            #[cfg(all(feature = "bhuman", unix))]
+            let mut native_epochs = std::collections::BTreeMap::new();
             while !stopped.load(Ordering::Acquire) {
                 let started = Instant::now();
                 if let Some(error) = team.poll_controller() {
@@ -468,6 +470,106 @@ impl PhysicsWorker {
                     }
                     let ready = states.len() == members.len();
                     initialized.store(ready, Ordering::Release);
+                    #[cfg(all(feature = "bhuman", unix))]
+                    if running && ready {
+                        let mut native_frames = Vec::new();
+                        let balls = crate::observations::balls(&world);
+                        let observations: Vec<_> = members
+                            .iter()
+                            .filter_map(|member| {
+                                let state = states.get(&member.id)?;
+                                Some((member, state.binding.observe(world.data())))
+                            })
+                            .collect();
+                        let pose = |observation: &crate::robot_io::Observation| {
+                            let transform = observation.ground_to_world;
+                            [
+                                transform.translation.x,
+                                transform.translation.y,
+                                transform.rotation.euler_angles().2,
+                            ]
+                        };
+                        for (member, observation) in &observations {
+                            if member.io.is_bhuman() {
+                                let epoch = world.object_epoch(member.entity.unwrap());
+                                let truth = crate::bhuman::World {
+                                    pose: pose(observation),
+                                    ball: balls.first().map(|ball| crate::bhuman::Ball {
+                                        position: ball.position.map(|value| value as f32),
+                                        velocity: ball.velocity.map(|value| value as f32),
+                                    }),
+                                    players: observations
+                                        .iter()
+                                        .filter(|(other, _)| other.id != member.id)
+                                        .map(|(other, observation)| crate::bhuman::Player {
+                                            number: other.id.number,
+                                            teammate: other.id.team == member.id.team,
+                                            upright: observation.robot_to_world.translation.z > 0.4
+                                                && observation
+                                                    .robot_to_world
+                                                    .rotation
+                                                    .to_rotation_matrix()[(2, 2)]
+                                                    > 0.5,
+                                            pose: pose(observation),
+                                        })
+                                        .collect(),
+                                };
+                                native_frames.push((member, observation.clone(), truth, epoch));
+                            }
+                        }
+                        if !native_frames.is_empty() {
+                            let frame_generation = world.generation;
+                            if (period.as_secs_f64() - 0.002).abs() >= 1e-12 {
+                                return Err("B-Human requires a 2 ms physics step".into());
+                            }
+                            drop(world);
+                            let mut outgoing = Vec::new();
+                            for (member, observation, truth, epoch) in &native_frames {
+                                let native = member.io.bhuman().unwrap();
+                                if native_epochs
+                                    .insert(member.id, *epoch)
+                                    .is_some_and(|old| old != *epoch)
+                                {
+                                    native.reset().map_err(|error| {
+                                        format!("Player {} reset: {error:#}", member.id)
+                                    })?;
+                                }
+                                let packets =
+                                    native.step(observation, truth.clone()).map_err(|error| {
+                                        format!("Player {} B-Human: {error:#}", member.id)
+                                    })?;
+                                outgoing.push((member.id, packets));
+                            }
+                            // Deliver only after all robots have consumed this frame. Robot
+                            // iteration order cannot make a packet arrive one frame earlier.
+                            for (sender, packets) in outgoing {
+                                for member in &members {
+                                    if member.id.team == sender.team
+                                        && member.id != sender
+                                        && let Some(native) = member.io.bhuman()
+                                    {
+                                        native
+                                            .enqueue_team(&packets)
+                                            .map_err(|error| error.to_string())?;
+                                    }
+                                }
+                            }
+                            world = physics.lock();
+                            if world.generation != frame_generation {
+                                drop(world);
+                                for (member, _, _, _) in native_frames {
+                                    member
+                                        .io
+                                        .bhuman()
+                                        .unwrap()
+                                        .reset()
+                                        .map_err(|error| error.to_string())?;
+                                }
+                                generation = None;
+                                continue;
+                            }
+                        }
+                    }
                     if running || !ready || rebuilt {
                         let time = team.now();
                         if running {
@@ -484,6 +586,11 @@ impl PhysicsWorker {
                                 }
                                 for member in &members {
                                     if let Some(state) = states.get_mut(&member.id) {
+                                        #[cfg(all(feature = "bhuman", unix))]
+                                        if let Some(native) = member.io.bhuman() {
+                                            state.controller.apply(&state.binding, data, &native.control());
+                                            continue;
+                                        }
                                         // Every active-motion tick consumes a new motor packet.
                                         // This backpressure keeps policy/servo delay bounded as
                                         // physics throughput increases.
@@ -543,7 +650,7 @@ impl PhysicsWorker {
                         let make_sample =
                             |(index, observation): (usize, crate::robot_io::Observation)| {
                                 let member = &members[index];
-                                let frame = if frame_due {
+                                let frame = if frame_due && !member.io.is_bhuman() {
                                     let others = robot_positions
                                         .iter()
                                         .filter(|(id, _)| *id != member.id)

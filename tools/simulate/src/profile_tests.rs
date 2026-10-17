@@ -56,6 +56,7 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
                 location: None,
                 robot_count: 1,
                 opponent_count: 0,
+                opponent: crate::Opponent::Hulks,
                 field_configuration: None,
                 profile,
                 mcap_enabled: None,
