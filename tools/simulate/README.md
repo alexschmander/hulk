@@ -298,7 +298,8 @@ Its copied competition YAML files retain the upstream MIT license in `src/autore
 The message crate's build requires libclang, as does the upstream build.
 
 The core owns match state, clocks, scores, penalty durations, delayed Playing packets, halftime and message accounting.
-The upstream autoreferee owns boundary, restart, touch, positioning, motion and stuck-ball judgments.
+The upstream autoreferee owns boundary, restart, touch, positioning and motion judgments.
+The simulator handles local/global stuck timing using the same upstream distances and durations, with a separate local timer for each player.
 The simulator converts MuJoCo poses and contacts into its world observations, including field-coordinate and line-width conventions, and executes its ball placements, player placements and whistles.
 The simulator retains physical handling delays, halftime sideline placement, operator controls and transport.
 Rule context is the [HSL 2026 rules v1.1.1](https://github.com/RoboCup-HumanoidSoccerLeague/HSL-Rules/releases/tag/rules-2026-v1.1.1).
@@ -316,6 +317,9 @@ Contacts identify the last touching team; when no contact is known, the upstream
 Ordinary free kicks stop play, place the ball and resume without a kickoff whistle.
 Restart history preserves indirect-goal and second-touch restrictions after the core announces Ball Free.
 Local and global stuck situations, kickoff positioning, excess goal-area defenders, leaving the carpet and motion in Set or Stop have automatic checks.
+Local game stuck requires a player to stay within 0.5 m of the ball, measured from the player's footprint edge, for ten seconds while the ball stays within 0.1 m of its reference position.
+Approaching time outside that area does not count. Leaving it, moving the ball, or issuing a local-stuck penalty clears the corresponding timing; a newly approaching player never inherits the stationary ball's age.
+Stopped play and paused simulation do not advance these timers. Global game stuck retains the upstream thirty-second timeout when no active player is within 1 m of the ball.
 The upstream checks use robot poses with a 20 cm footprint radius and their own settling and contact debounce intervals.
 Distinct retouches count after the upstream debounce interval; continuous contact does not count as repeated kicks.
 At the end of a half, the referee waits for the ball to rest for one second, with a maximum delay of ten seconds.
