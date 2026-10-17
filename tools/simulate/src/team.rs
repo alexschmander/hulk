@@ -687,7 +687,11 @@ mod runtime_tests {
                 .map(|n| n.parse().unwrap())
                 .unwrap_or(2),
             profile,
+            mcap_enabled: std::env::var("SIMULATOR_TEST_MCAP_ENABLED")
+                .ok()
+                .map(|enabled| enabled.parse::<bool>().unwrap()),
         };
+        let mcap_enabled = configuration.mcap_enabled;
         let team = runtime
             .block_on(Team::new(runtime.handle().clone(), configuration))
             .unwrap();
@@ -781,6 +785,15 @@ mod runtime_tests {
             );
         }
         let members = team.members();
+        let recording_directories: Vec<_> = members
+            .iter()
+            .map(|member| {
+                if let Some(enabled) = mcap_enabled {
+                    assert_eq!(member.io.mcap_enabled(), enabled, "{}", member.id);
+                }
+                member.io.recording_status().unwrap().0.to_owned()
+            })
+            .collect();
         let ids = runtime.block_on(async {
             let mut ids = Vec::new();
             for member in &members {
@@ -937,6 +950,22 @@ mod runtime_tests {
         drop(app);
         let errors = crate::finish_recordings();
         assert!(errors.is_empty(), "{errors:?}");
+        for directory in recording_directories {
+            assert!(
+                std::fs::metadata(directory.join("logs.jsonl"))
+                    .unwrap()
+                    .len()
+                    > 0
+            );
+            if let Some(enabled) = mcap_enabled {
+                assert_eq!(directory.join("recording.mcap").exists(), enabled);
+                let finished: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(directory.join("finished.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(finished["mcap_enabled"], enabled);
+            }
+        }
         router.shutdown().unwrap();
         std::net::UdpSocket::bind("0.0.0.0:3838").unwrap();
     }

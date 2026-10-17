@@ -246,8 +246,16 @@ impl Simulator {
                     if let Some(member) = team.selected()
                         && let Some((directory, _)) = member.io.recording_status()
                     {
-                        ui.weak("REC").on_hover_text(format!(
-                            "All robots are recording.\nSelected robot: {}",
+                        let (label, description) = if member.io.mcap_enabled() {
+                            ("REC", "MCAP recording enabled.")
+                        } else {
+                            (
+                                "LOGS",
+                                "MCAP recording disabled; robot logs remain enabled.",
+                            )
+                        };
+                        ui.weak(label).on_hover_text(format!(
+                            "{description}\nSelected robot: {}",
                             directory.display()
                         ));
                     }

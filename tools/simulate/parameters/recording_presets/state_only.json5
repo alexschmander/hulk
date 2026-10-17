@@ -1,0 +1,15 @@
+{
+  // Opt-in overlay for simulator_recording.json5. Full recording remains the default.
+  topics: [
+    "logs",
+    "primary_state",
+    "behavior/**",
+    "motion_inference/status",
+    "motion_inference/timing",
+    "diagnostics/**",
+    "localization/estimate",
+    "ball_filter/ball_position",
+    "visual_kick/ball_position",
+    "obstacles",
+  ],
+}
