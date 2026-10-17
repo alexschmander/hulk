@@ -17,11 +17,24 @@ pub enum RetentionPolicy {
     TimeWindow(RetentionWindow),
 }
 
-/// Source-time retention window configuration.
+/// Clock used for retained history indexing and eviction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum RetentionClock {
+    #[default]
+    Source,
+    Receipt,
+    WallReceipt,
+}
+
+/// Time window configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RetentionWindow {
     #[serde(deserialize_with = "deserialize_nonzero_duration")]
     duration: Duration,
+    #[serde(default)]
+    clock: RetentionClock,
+    #[serde(default)]
+    max_bytes: Option<NonZeroUsize>,
     max_samples: Option<NonZeroUsize>,
 }
 
@@ -38,6 +51,13 @@ fn deserialize_nonzero_duration<'de, D: serde::Deserializer<'de>>(
 }
 
 impl RetentionWindow {
+    pub fn clock(self) -> RetentionClock {
+        self.clock
+    }
+    pub fn max_bytes(self) -> Option<NonZeroUsize> {
+        self.max_bytes
+    }
+
     /// Source-time duration retained from the newest sample.
     pub fn duration(self) -> Duration {
         self.duration
@@ -50,6 +70,21 @@ impl RetentionWindow {
 }
 
 impl RetentionPolicy {
+    /// Select the clock used for history queries and retention.
+    pub fn with_clock(mut self, clock: RetentionClock) -> Self {
+        if let Self::TimeWindow(window) = &mut self {
+            window.clock = clock;
+        }
+        self
+    }
+    /// Bound retained payload bytes as well as sample count and duration.
+    pub fn with_max_bytes(mut self, bytes: NonZeroUsize) -> Self {
+        if let Self::TimeWindow(window) = &mut self {
+            window.max_bytes = Some(bytes);
+        }
+        self
+    }
+
     /// Retain samples whose effective time is inside `duration` from the newest sample.
     /// Query backends anchor the window to the selected cursor instead.
     ///
@@ -84,6 +119,8 @@ impl RetentionPolicy {
         }
 
         Ok(Self::TimeWindow(RetentionWindow {
+            clock: RetentionClock::Source,
+            max_bytes: None,
             duration,
             max_samples,
         }))

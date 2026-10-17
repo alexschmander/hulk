@@ -75,6 +75,7 @@ pub mod schema;
 pub mod schema_query;
 pub mod schema_service;
 pub mod serialization;
+pub mod service;
 pub mod value;
 
 #[cfg(test)]

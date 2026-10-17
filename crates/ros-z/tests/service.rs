@@ -765,3 +765,68 @@ async fn async_call_with_timeout_reports_timeout_without_reply() {
 
     assert_service_timeout(&error, "/async_early_completion");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dynamic_client_discovers_and_calls_typed_service() {
+    use ros_z::dynamic::{
+        DynamicJsonRenderPolicy, dynamic_payload_to_json, json::dynamic_payload_from_json,
+    };
+    let context = ContextBuilder::default()
+        .disable_multicast_scouting()
+        .with_connect_endpoints(std::iter::empty::<&str>())
+        .with_listen_endpoints(["tcp/127.0.0.1:0"])
+        .build()
+        .await
+        .unwrap();
+    let node = context
+        .create_node("dynamic_service_test")
+        .build()
+        .await
+        .unwrap();
+    let mut server = node
+        .service_server::<AddTwoInts>("sum")
+        .build()
+        .await
+        .unwrap();
+    let schema = node
+        .discover_service_schema("sum", Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(schema.type_info, AddTwoInts::service_type_info());
+    let client = node.dynamic_service_client("sum", schema).await.unwrap();
+    let reply = tokio::task::spawn_blocking(move || {
+        let request = server.take_request().unwrap();
+        let sum = request.message().a + request.message().b;
+        request.reply(&AddTwoIntsResponse { sum }).unwrap();
+        server
+    });
+    let request = dynamic_payload_from_json(
+        client.schema.request.clone(),
+        &json!({"a":"9007199254740993","b":"1"}),
+    )
+    .unwrap();
+    let result = client.call(&request, Duration::from_secs(2)).await.unwrap();
+    assert_eq!(
+        dynamic_payload_to_json(
+            &result,
+            DynamicJsonRenderPolicy {
+                wide_integers_as_strings: true,
+                ..Default::default()
+            }
+        ),
+        json!({"sum":"9007199254740994"})
+    );
+    let server = reply.await.unwrap();
+    let duplicate = node
+        .service_server::<AddTwoInts>("sum")
+        .build()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(
+        node.discover_service_schema("sum", Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    drop((duplicate, server));
+}

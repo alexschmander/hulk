@@ -258,3 +258,76 @@ async fn log_dispatch_follows_each_robots_nested_and_blocking_tasks() {
         assert!(records.iter().all(|record| record.simulation_time == 123));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_is_readable_while_recording_continues_and_replay_spans_segments() {
+    use ros_z::message::WireDecoder;
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Clock::logical(Time::from_nanos(1_000_000_000));
+    let context = Arc::new(
+        ContextBuilder::default()
+            .with_namespace("/checkpoint/1")
+            .with_parameter_layers(vec![
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("parameters"),
+            ])
+            .with_clock(clock.clone())
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(["tcp/127.0.0.1:0"])
+            .build()
+            .await
+            .unwrap(),
+    );
+    let node = Arc::new(context.create_node("test").build().await.unwrap());
+    let layers = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("parameters")];
+    let telemetry = Telemetry::start(
+        Startup::new(directory.path().to_owned(), clock.clone()).unwrap(),
+        &context,
+        "/checkpoint/1",
+        &layers,
+    )
+    .await
+    .unwrap();
+    let publisher = node
+        .publisher::<u64>("checkpoint_value")
+        .build()
+        .await
+        .unwrap();
+    publisher.publish(&1).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let checkpoint = telemetry.recording.checkpoint().await.unwrap();
+    assert_eq!(checkpoint.simulation_time, 1_000_000_000);
+    assert!(!checkpoint.finalized);
+    assert_eq!(checkpoint.dropped_samples, 0);
+    let first = std::fs::read(directory.path().join(&checkpoint.files[0])).unwrap();
+    assert!(mcap::Summary::read(&first).unwrap().is_some());
+    clock.advance(Duration::from_secs(1)).unwrap();
+    publisher.publish(&2).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let second = telemetry.recording.checkpoint().await.unwrap();
+    assert!(second.ingestion_sequence > checkpoint.ingestion_sequence);
+    assert_eq!(
+        std::fs::read(directory.path().join(&checkpoint.files[0])).unwrap(),
+        first
+    );
+    assert!(telemetry.finish().await.is_none());
+    let mut replay = replay_recording::Recording::open(directory.path(), "/replay").unwrap();
+    let topic = replay
+        .channels
+        .iter()
+        .find(|(_, c)| c.topic == "/replay/checkpoint_value")
+        .unwrap()
+        .0
+        .to_owned();
+    for (time, expected) in [(1_000_000_000, 1u64), (2_000_000_000, 2)] {
+        let snapshot = replay.snapshot(time).unwrap();
+        let sample = snapshot
+            .iter()
+            .find(|m| m.header.channel_id == topic)
+            .unwrap();
+        assert_eq!(
+            ros_z::message::SerdeCdrCodec::<u64>::deserialize(&sample.data.to_bytes()).unwrap(),
+            expected
+        );
+    }
+}

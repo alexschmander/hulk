@@ -460,6 +460,40 @@ impl RobotStack {
         })
     }
 
+    pub(crate) async fn recording_checkpoint(&self) -> Result<serde_json::Value> {
+        let telemetry = self
+            .telemetry
+            .as_ref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("Recording unavailable"))?;
+        let checkpoint = telemetry.recording.checkpoint().await?;
+        Ok(serde_json::to_value(checkpoint)?)
+    }
+
+    pub(crate) async fn controller_input(
+        &self,
+        value: types::controller_input::ControllerInput,
+        duration: std::time::Duration,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let publisher = self
+            ._node
+            .publisher::<types::controller_input::ControllerInput>("inputs/controller_input")
+            .build()
+            .await?;
+        let deadline = tokio::time::Instant::now() + duration;
+        loop {
+            publisher.publish(&value).await?;
+            if tokio::time::Instant::now() >= deadline || cancel.is_cancelled() {
+                break;
+            }
+            tokio::select! {_ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}, _ = cancel.cancelled() => {}}
+        }
+        publisher
+            .publish(&types::controller_input::ControllerInput::default())
+            .await?;
+        Ok(())
+    }
+
     pub fn recording_status(&self) -> Option<(&std::path::Path, Option<String>)> {
         self.telemetry
             .as_ref()

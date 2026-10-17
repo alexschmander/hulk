@@ -1,6 +1,6 @@
 //! Simulator-owned diagnostics. No robotics node needs to know about capture or recording.
 mod logs;
-mod recording;
+pub(crate) mod recording;
 
 use color_eyre::{Result, eyre::ensure};
 use ros_z::{prelude::*, time::Clock};
@@ -91,7 +91,7 @@ impl Startup {
 pub struct Telemetry {
     capture: logs::Capture,
     logs: logs::Logs,
-    recording: recording::Recording,
+    pub(crate) recording: recording::Recording,
     pub health: Health,
     pub directory: PathBuf,
 }

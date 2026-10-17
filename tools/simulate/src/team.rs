@@ -29,6 +29,7 @@ struct Inner {
     runtime: Handle,
     configuration: Configuration,
     clock: Clock,
+    clock_sink: Mutex<Option<Arc<dyn Fn(i64) + Send + Sync>>>,
     recording_directory: std::path::PathBuf,
     referee: Option<crate::autoref::AutoRef>,
     network: tokio::sync::Mutex<Network>,
@@ -53,6 +54,15 @@ impl Team {
         configuration: Configuration,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
         lease: Option<crate::Lease>,
+    ) -> Result<Self> {
+        Self::new_with_controller(runtime, configuration, cancelled, lease, true).await
+    }
+    pub(crate) async fn new_with_controller(
+        runtime: Handle,
+        configuration: Configuration,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        lease: Option<crate::Lease>,
+        physical_controller: bool,
     ) -> Result<Self> {
         ensure!(
             (1..=5).contains(&configuration.robot_count),
@@ -86,6 +96,7 @@ impl Team {
             _lease: lease.map(Arc::new),
             runtime,
             clock,
+            clock_sink: Mutex::new(None),
             recording_directory,
             network: tokio::sync::Mutex::new(network),
             referee,
@@ -111,9 +122,11 @@ impl Team {
                 member.pose = on_field_side(member.pose, true);
             }
         }
-        let members = team.members();
-        let controller = crate::controller::Controller::new(&configuration, members).await?;
-        *team.0.controller.lock().unwrap() = Some(controller);
+        if physical_controller {
+            let controller =
+                crate::controller::Controller::new(&configuration, team.members()).await?;
+            *team.0.controller.lock().unwrap() = Some(controller);
+        }
         Ok(team)
     }
     pub fn referee(&self) -> Option<&crate::autoref::AutoRef> {
@@ -135,7 +148,14 @@ impl Team {
     }
     pub fn advance(&self, period: std::time::Duration) -> Result<()> {
         self.0.clock.advance(period)?;
+        if let Some(sink) = self.0.clock_sink.lock().unwrap().as_ref() {
+            sink(self.now().as_nanos());
+        }
         Ok(())
+    }
+    pub(crate) fn set_clock_sink(&self, sink: Arc<dyn Fn(i64) + Send + Sync>) {
+        sink(self.now().as_nanos());
+        *self.0.clock_sink.lock().unwrap() = Some(sink);
     }
     pub fn cancel(&self) {
         self.0

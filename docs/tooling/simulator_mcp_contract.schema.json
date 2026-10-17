@@ -1,0 +1,3521 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hulks:simulator-mcp:draft-1",
+  "title": "Simulator MCP draft tool contract",
+  "description": "Design artifact for application-level tool arguments and result payloads, not an MCP wire protocol implementation. x-tools identifies schemas to register after resolving local references. Defaults are proposed; runtime validation handles discovered ROS-Z schemas and cross-field constraints described in the design.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "server_info"
+        },
+        "arguments": {
+          "$ref": "#/$defs/server_info_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "simulator_start"
+        },
+        "arguments": {
+          "$ref": "#/$defs/simulator_start_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "simulator_status"
+        },
+        "arguments": {
+          "$ref": "#/$defs/simulator_status_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "simulator_control"
+        },
+        "arguments": {
+          "$ref": "#/$defs/simulator_control_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "scene_read"
+        },
+        "arguments": {
+          "$ref": "#/$defs/scene_read_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "scene_edit"
+        },
+        "arguments": {
+          "$ref": "#/$defs/scene_edit_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "simulator_input"
+        },
+        "arguments": {
+          "$ref": "#/$defs/simulator_input_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_graph"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_graph_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_schema"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_schema_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_observe"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_observe_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_read"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_read_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_unobserve"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_unobserve_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_wait"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_wait_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_parameter_read"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_parameter_read_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_parameter_write"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_parameter_write_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_publish"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_publish_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "rosz_call"
+        },
+        "arguments": {
+          "$ref": "#/$defs/rosz_call_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "logs_read"
+        },
+        "arguments": {
+          "$ref": "#/$defs/logs_read_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "view_render"
+        },
+        "arguments": {
+          "$ref": "#/$defs/view_render_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "video_capture"
+        },
+        "arguments": {
+          "$ref": "#/$defs/video_capture_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "operation_status"
+        },
+        "arguments": {
+          "$ref": "#/$defs/operation_status_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "const": "operation_cancel"
+        },
+        "arguments": {
+          "$ref": "#/$defs/operation_cancel_input"
+        }
+      },
+      "required": [
+        "tool",
+        "arguments"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "Nanoseconds": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)$",
+      "description": "Decimal nanoseconds; simulation receipt time is elapsed from this session's clock origin. Wall time is Unix epoch time. Source time preserves the publisher's clock."
+    },
+    "DurationNanoseconds": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "WaitMilliseconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 30000,
+      "default": 0
+    },
+    "TypeInfo": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "schema_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "schema_hash"
+      ],
+      "additionalProperties": false
+    },
+    "Source": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "description": "Relative to target namespace, or an absolute topic inside the target's scope."
+        },
+        "path": {
+          "type": "string",
+          "default": "",
+          "description": "ROS-Z ValuePath; empty selects the entire payload."
+        },
+        "alias": {
+          "type": "string"
+        },
+        "schema_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic"
+      ],
+      "additionalProperties": false
+    },
+    "TimeRange": {
+      "type": "object",
+      "properties": {
+        "clock": {
+          "type": "string",
+          "enum": [
+            "source",
+            "simulation_receipt",
+            "wall_receipt"
+          ]
+        },
+        "start_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "end_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        }
+      },
+      "required": [
+        "clock",
+        "start_ns",
+        "end_ns"
+      ],
+      "additionalProperties": false
+    },
+    "Predicate": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "eq",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "exists",
+            "changed"
+          ]
+        },
+        "value": {},
+        "max_age_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "source",
+        "operator",
+        "target_id"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operator": {
+                "enum": [
+                  "eq",
+                  "ne",
+                  "lt",
+                  "le",
+                  "gt",
+                  "ge"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "value"
+            ]
+          }
+        }
+      ]
+    },
+    "StopWhen": {
+      "type": "object",
+      "properties": {
+        "match": {
+          "type": "string",
+          "enum": [
+            "any",
+            "all"
+          ]
+        },
+        "predicates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Predicate"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "match",
+        "predicates"
+      ],
+      "additionalProperties": false
+    },
+    "ErrorResult": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorInfo"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "Artifact": {
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri",
+        "mime_type",
+        "byte_length"
+      ],
+      "additionalProperties": false
+    },
+    "Target": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "transport_scope": {
+          "type": "string"
+        },
+        "live": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "robot",
+            "session"
+          ]
+        }
+      },
+      "required": [
+        "target_id",
+        "session_id",
+        "namespace",
+        "transport_scope",
+        "live",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "Operation": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "stage": {
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "effect": {
+          "type": "string",
+          "enum": [
+            "none",
+            "applied",
+            "partial",
+            "unknown"
+          ]
+        },
+        "result": {
+          "description": "On success, validates against the originating tool's x-tools completion_schema."
+        },
+        "error": {
+          "$ref": "#/$defs/ErrorInfo"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          }
+        }
+      },
+      "required": [
+        "operation_id",
+        "tool",
+        "state",
+        "effect"
+      ],
+      "additionalProperties": false
+    },
+    "WorldPose": {
+      "type": "object",
+      "properties": {
+        "frame": {
+          "const": "world"
+        },
+        "position_m": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "orientation_xyzw": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 4,
+          "maxItems": 4
+        }
+      },
+      "required": [
+        "frame",
+        "position_m",
+        "orientation_xyzw"
+      ],
+      "additionalProperties": false
+    },
+    "Receipt": {
+      "type": "object",
+      "properties": {
+        "collector": {
+          "type": "string",
+          "enum": [
+            "observation",
+            "recording"
+          ]
+        },
+        "simulation_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "wall_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        }
+      },
+      "required": [
+        "collector"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "simulation_ns"
+          ]
+        },
+        {
+          "required": [
+            "wall_ns"
+          ]
+        }
+      ]
+    },
+    "Sample": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "type_info": {
+          "$ref": "#/$defs/TypeInfo"
+        },
+        "publication_id": {
+          "type": "string"
+        },
+        "source_time_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "source_clock": {
+          "type": "string",
+          "enum": [
+            "simulation",
+            "wall",
+            "unknown"
+          ]
+        },
+        "receipts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Receipt"
+          }
+        },
+        "selected_time_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "value": {},
+        "value_status": {
+          "type": "string",
+          "enum": [
+            "present",
+            "absent_path",
+            "too_large"
+          ]
+        },
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "observation",
+              "recording"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "topic",
+        "path",
+        "type_info",
+        "publication_id",
+        "source_time_ns",
+        "source_clock",
+        "receipts",
+        "selected_time_ns",
+        "value_status",
+        "provenance"
+      ],
+      "additionalProperties": false
+    },
+    "Coverage": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "subscription_state": {
+          "type": "string",
+          "enum": [
+            "not_observed",
+            "connecting",
+            "active",
+            "closed",
+            "failed"
+          ]
+        },
+        "intervals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "range": {
+                "$ref": "#/$defs/TimeRange"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "retained",
+                  "evicted",
+                  "not_observed",
+                  "recorded",
+                  "not_recorded",
+                  "pending_checkpoint",
+                  "unknown"
+                ]
+              },
+              "known_dropped_samples": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "range",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "loss_status": {
+          "type": "string",
+          "enum": [
+            "none_detected",
+            "known_loss",
+            "unknown"
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "topic",
+        "path",
+        "subscription_state",
+        "intervals",
+        "loss_status"
+      ],
+      "additionalProperties": false
+    },
+    "ReadResult": {
+      "type": "object",
+      "properties": {
+        "query_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "samples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Sample"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Coverage"
+          }
+        },
+        "next_cursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/Checkpoint"
+        }
+      },
+      "required": [
+        "query_id",
+        "samples",
+        "coverage",
+        "next_cursor",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "SceneEntity": {
+      "type": "object",
+      "properties": {
+        "entity_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "robot",
+            "ball",
+            "static"
+          ]
+        },
+        "pose": {
+          "$ref": "#/$defs/WorldPose"
+        },
+        "linear_velocity_m_s": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "angular_velocity_rad_s": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "team": {
+          "type": "string",
+          "enum": [
+            "hulks",
+            "opponents"
+          ]
+        },
+        "player_number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        }
+      },
+      "required": [
+        "entity_id",
+        "kind",
+        "pose"
+      ],
+      "additionalProperties": false
+    },
+    "SceneResult": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scene_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "simulation_time_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SceneEntity"
+          }
+        }
+      },
+      "required": [
+        "session_id",
+        "scene_revision",
+        "simulation_time_ns",
+        "entities"
+      ],
+      "additionalProperties": false
+    },
+    "SimulatorConfiguration": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string"
+        },
+        "robot_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "default": 1
+        },
+        "opponent_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "default": 0
+        },
+        "profile": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "motion_behavior",
+                "filtering",
+                "body_state_odometry",
+                "localization"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "filtering": {
+                  "type": "boolean"
+                },
+                "body_state": {
+                  "type": "boolean"
+                },
+                "localization": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "filtering",
+                "body_state",
+                "localization"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "referee": {
+          "type": "string",
+          "enum": [
+            "automatic",
+            "external"
+          ]
+        },
+        "competition": {
+          "type": "string",
+          "description": "Value advertised by server_info; validated against chosen field and player counts.",
+          "enum": [
+            "small",
+            "middle",
+            "large",
+            "small_foundation",
+            "middle_foundation",
+            "large_foundation"
+          ]
+        },
+        "ball": {
+          "type": "string",
+          "description": "Value advertised by server_info.",
+          "enum": [
+            "location",
+            "mini",
+            "size3",
+            "size4",
+            "size5"
+          ]
+        },
+        "parameter_root": {
+          "type": "string"
+        },
+        "model_directory": {
+          "type": "string"
+        },
+        "rendering": {
+          "type": "string",
+          "enum": [
+            "on_demand",
+            "disabled"
+          ],
+          "default": "on_demand"
+        },
+        "recording_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "location",
+        "profile",
+        "referee"
+      ],
+      "additionalProperties": false
+    },
+    "SessionState": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "starting",
+            "paused",
+            "running",
+            "stopping",
+            "stopped",
+            "failed"
+          ]
+        },
+        "simulation_time_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "physics_step_ns": {
+          "$ref": "#/$defs/DurationNanoseconds"
+        },
+        "scene_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Target"
+          }
+        },
+        "configuration": {
+          "$ref": "#/$defs/SimulatorConfiguration"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rendering_available": {
+          "type": "boolean"
+        },
+        "recording_status": {
+          "type": "string",
+          "enum": [
+            "starting",
+            "recording",
+            "degraded",
+            "finalizing",
+            "finalized",
+            "failed"
+          ]
+        },
+        "active_operation_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        }
+      },
+      "required": [
+        "session_id",
+        "state",
+        "simulation_time_ns",
+        "physics_step_ns",
+        "scene_revision",
+        "targets",
+        "configuration",
+        "ready",
+        "diagnostics",
+        "rendering_available",
+        "recording_status",
+        "active_operation_ids"
+      ],
+      "additionalProperties": false
+    },
+    "server_info_input": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "server_info_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "contract_version": {
+              "type": "string"
+            },
+            "capabilities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "limits": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "configuration_schema": {
+              "type": "object"
+            },
+            "simulator_input_schemas": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "rendering": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "prerequisites": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "contract_version",
+            "capabilities",
+            "limits",
+            "configuration_schema",
+            "simulator_input_schemas",
+            "rendering",
+            "prerequisites"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "simulator_start_input": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "configuration": {
+          "$ref": "#/$defs/SimulatorConfiguration"
+        }
+      },
+      "required": [
+        "request_id",
+        "configuration"
+      ],
+      "additionalProperties": false
+    },
+    "simulator_start_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "simulator_start_completion": {
+      "$ref": "#/$defs/SessionState"
+    },
+    "simulator_status_input": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "additionalProperties": false
+    },
+    "simulator_status_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionState"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "simulator_control_input": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "command": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "pause"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "resume"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "set_speed"
+                },
+                "factor": {
+                  "type": "number",
+                  "enum": [
+                    0.25,
+                    0.5,
+                    1,
+                    2,
+                    4
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "factor"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "advance"
+                },
+                "duration_ns": {
+                  "$ref": "#/$defs/DurationNanoseconds"
+                },
+                "steps": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "stop_when": {
+                  "$ref": "#/$defs/StopWhen"
+                },
+                "wall_timeout_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 30000
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "required": [
+                    "duration_ns"
+                  ],
+                  "not": {
+                    "required": [
+                      "steps"
+                    ]
+                  }
+                },
+                {
+                  "required": [
+                    "steps"
+                  ],
+                  "not": {
+                    "required": [
+                      "duration_ns"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "stop"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "session_id",
+        "request_id",
+        "command"
+      ],
+      "additionalProperties": false
+    },
+    "simulator_control_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "simulator_control_completion": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionState"
+        },
+        "stop_reason": {
+          "type": "string",
+          "enum": [
+            "duration_reached",
+            "steps_reached",
+            "condition_met",
+            "requested",
+            "timeout",
+            "failure"
+          ]
+        },
+        "advanced_steps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "condition_sample": {
+          "$ref": "#/$defs/Sample"
+        }
+      },
+      "required": [
+        "session",
+        "stop_reason"
+      ],
+      "additionalProperties": false
+    },
+    "scene_read_input": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "additionalProperties": false
+    },
+    "scene_read_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SceneResult"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "scene_edit_input": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expected_scene_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edit": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "add_robot"
+                },
+                "team": {
+                  "type": "string",
+                  "enum": [
+                    "hulks",
+                    "opponents"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "team"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "add_ball"
+                },
+                "pose": {
+                  "$ref": "#/$defs/WorldPose"
+                },
+                "linear_velocity_m_s": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "minItems": 3,
+                  "maxItems": 3
+                }
+              },
+              "required": [
+                "kind",
+                "pose"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "move_object"
+                },
+                "entity_id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "pose": {
+                  "$ref": "#/$defs/WorldPose"
+                },
+                "clear_velocity": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "required": [
+                "kind",
+                "entity_id",
+                "pose"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "remove_ball"
+                },
+                "entity_id": {
+                  "$ref": "#/$defs/Id"
+                }
+              },
+              "required": [
+                "kind",
+                "entity_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "reset_robot_pose"
+                },
+                "target_id": {
+                  "$ref": "#/$defs/Id"
+                }
+              },
+              "required": [
+                "kind",
+                "target_id"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "session_id",
+        "request_id",
+        "expected_scene_revision",
+        "edit"
+      ],
+      "additionalProperties": false
+    },
+    "scene_edit_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "scene_edit_completion": {
+      "$ref": "#/$defs/SceneResult"
+    },
+    "simulator_input_input": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "input": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "body_button"
+                },
+                "target_id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "button": {
+                  "type": "string",
+                  "enum": [
+                    "f1",
+                    "stand",
+                    "walk"
+                  ]
+                },
+                "gesture": {
+                  "type": "string",
+                  "enum": [
+                    "tap",
+                    "hold"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "target_id",
+                "button",
+                "gesture"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "whistle"
+                },
+                "target_ids": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Id"
+                  },
+                  "maxItems": 10
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "referee"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "kind",
+                "name",
+                "arguments"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "controller"
+                },
+                "target_id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "value": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "wall_duration_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 30000
+                }
+              },
+              "required": [
+                "kind",
+                "target_id",
+                "value",
+                "wall_duration_ms"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "session_id",
+        "request_id",
+        "input"
+      ],
+      "additionalProperties": false
+    },
+    "simulator_input_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "simulator_input_completion": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "applied_at_simulation_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "accepted",
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "Endpoint": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "publisher",
+            "subscription",
+            "service",
+            "client"
+          ]
+        },
+        "type_info": {
+          "$ref": "#/$defs/TypeInfo"
+        },
+        "qos": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "name",
+        "node",
+        "namespace",
+        "kind",
+        "type_info"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_graph_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "nodes",
+            "topics",
+            "services",
+            "all"
+          ]
+        },
+        "name_prefix": {
+          "type": "string"
+        },
+        "cursor": {
+          "$ref": "#/$defs/Id"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        }
+      },
+      "required": [
+        "target_id"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_graph_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "namespace": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "namespace"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "endpoints": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Endpoint"
+              }
+            },
+            "next_cursor": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at_wall_ns": {
+              "$ref": "#/$defs/Nanoseconds"
+            }
+          },
+          "required": [
+            "revision",
+            "nodes",
+            "endpoints",
+            "next_cursor",
+            "observed_at_wall_ns"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_schema_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "topic",
+            "service",
+            "parameters"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "schema_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "kind",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_schema_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type_info": {
+              "$ref": "#/$defs/TypeInfo"
+            },
+            "value_schema": {
+              "type": "object"
+            },
+            "request_schema": {
+              "type": "object"
+            },
+            "response_schema": {
+              "type": "object"
+            },
+            "examples": {
+              "type": "array",
+              "items": {}
+            }
+          },
+          "required": [
+            "type_info"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "Retention": {
+      "type": "object",
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60000
+        },
+        "max_samples_per_topic": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 16384
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 67108864
+        },
+        "clock": {
+          "type": "string",
+          "enum": [
+            "simulation_receipt",
+            "wall_receipt",
+            "source"
+          ],
+          "default": "simulation_receipt"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "rosz_observe_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "retention": {
+          "$ref": "#/$defs/Retention"
+        }
+      },
+      "required": [
+        "target_id",
+        "request_id",
+        "sources"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_observe_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "observation_id": {
+              "$ref": "#/$defs/Id"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "connecting",
+                "ready",
+                "failed"
+              ]
+            },
+            "retention": {
+              "$ref": "#/$defs/Retention"
+            },
+            "coverage": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Coverage"
+              }
+            }
+          },
+          "required": [
+            "observation_id",
+            "state",
+            "retention",
+            "coverage"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_read_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "query": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "latest"
+                },
+                "wait_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 30000,
+                  "default": 1000
+                },
+                "max_age_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "history"
+                },
+                "range": {
+                  "$ref": "#/$defs/TimeRange"
+                }
+              },
+              "required": [
+                "kind",
+                "range"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "allow_recording_fallback": {
+          "type": "boolean",
+          "default": false
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "default": 1000
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576,
+          "default": 262144
+        },
+        "cursor": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "target_id",
+        "sources",
+        "query"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "query": {
+                "properties": {
+                  "kind": {
+                    "const": "latest"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "allow_recording_fallback": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "rosz_read_output": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ReadResult"
+            },
+            {
+              "$ref": "#/$defs/Operation"
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_read_completion": {
+      "$ref": "#/$defs/ReadResult"
+    },
+    "rosz_unobserve_input": {
+      "type": "object",
+      "properties": {
+        "observation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "observation_id",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_unobserve_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "released": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "released"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_wait_input": {
+      "type": "object",
+      "properties": {
+        "condition": {
+          "$ref": "#/$defs/StopWhen"
+        },
+        "wall_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "condition",
+        "wall_timeout_ms",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_wait_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_wait_completion": {
+      "type": "object",
+      "properties": {
+        "matched": {
+          "type": "boolean"
+        },
+        "samples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Sample"
+          }
+        },
+        "simulation_time_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        }
+      },
+      "required": [
+        "matched",
+        "samples"
+      ],
+      "additionalProperties": false
+    },
+    "ParameterSnapshot": {
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "values": {},
+        "effective_sources": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "schema_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "revision",
+        "layers",
+        "values"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_parameter_read_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "node": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "node"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_parameter_read_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ParameterSnapshot"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_parameter_write_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "node": {
+          "type": "string"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "action": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "set"
+                },
+                "writes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "value": {},
+                      "layer": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "value",
+                      "layer"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 1,
+                  "maxItems": 128
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "kind",
+                "writes",
+                "expected_revision"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "reset"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "layer": {
+                  "type": "string"
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "kind",
+                "path",
+                "layer",
+                "expected_revision"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "reload"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "target_id",
+        "node",
+        "request_id",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_parameter_write_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_parameter_write_completion": {
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "string"
+        },
+        "committed_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "changed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "node",
+        "committed_revision",
+        "changed_paths"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_publish_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "topic": {
+          "type": "string"
+        },
+        "schema_hash": {
+          "type": "string"
+        },
+        "payload": {},
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "delivery": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "once"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "repeat"
+                },
+                "rate_hz": {
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 1000
+                },
+                "wall_duration_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 30000
+                }
+              },
+              "required": [
+                "kind",
+                "rate_hz",
+                "wall_duration_ms"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "qos": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "target_id",
+        "topic",
+        "schema_hash",
+        "payload",
+        "request_id",
+        "delivery"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_publish_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_publish_completion": {
+      "type": "object",
+      "properties": {
+        "publisher_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "published_samples": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_source_time_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        }
+      },
+      "required": [
+        "publisher_id",
+        "published_samples"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_call_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "service": {
+          "type": "string"
+        },
+        "schema_hash": {
+          "type": "string"
+        },
+        "request": {},
+        "wall_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "target_id",
+        "service",
+        "schema_hash",
+        "request",
+        "wall_timeout_ms",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "rosz_call_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "rosz_call_completion": {
+      "type": "object",
+      "properties": {
+        "service": {
+          "type": "string"
+        },
+        "schema_hash": {
+          "type": "string"
+        },
+        "response": {}
+      },
+      "required": [
+        "service",
+        "schema_hash",
+        "response"
+      ],
+      "additionalProperties": false
+    },
+    "logs_read_input": {
+      "type": "object",
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "min_level": {
+          "type": "string",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "contains": {
+          "type": "string"
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "range": {
+          "$ref": "#/$defs/TimeRange"
+        },
+        "cursor": {
+          "$ref": "#/$defs/Id"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        }
+      },
+      "required": [
+        "target_id"
+      ],
+      "additionalProperties": false
+    },
+    "logs_read_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "level": {
+                    "type": "string",
+                    "enum": [
+                      "trace",
+                      "debug",
+                      "info",
+                      "warn",
+                      "error"
+                    ]
+                  },
+                  "target": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "fields": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "source_time_ns": {
+                    "$ref": "#/$defs/Nanoseconds"
+                  },
+                  "wall_time_ns": {
+                    "$ref": "#/$defs/Nanoseconds"
+                  },
+                  "simulation_time_ns": {
+                    "$ref": "#/$defs/Nanoseconds"
+                  }
+                },
+                "required": [
+                  "level",
+                  "target",
+                  "message",
+                  "fields"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "next_cursor": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "coverage_status": {
+              "type": "string",
+              "enum": [
+                "history_service",
+                "live_tail_only",
+                "partial",
+                "unavailable"
+              ]
+            }
+          },
+          "required": [
+            "entries",
+            "next_cursor",
+            "coverage_status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "Camera": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "preset"
+            },
+            "name": {
+              "type": "string",
+              "enum": [
+                "field",
+                "top"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "preset"
+            },
+            "name": {
+              "const": "follow_robot"
+            },
+            "target_id": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "target_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "world"
+            },
+            "position_m": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "look_at_m": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 3,
+              "maxItems": 3
+            }
+          },
+          "required": [
+            "kind",
+            "position_m",
+            "look_at_m"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ImageSize": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 1920,
+          "default": 1280
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 1080,
+          "default": 720
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "ViewResult": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "simulation_time_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "source_samples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Sample"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "query_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "artifact",
+        "snapshot_id",
+        "source_samples",
+        "warnings"
+      ],
+      "additionalProperties": false
+    },
+    "view_render_input": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "scene"
+                },
+                "session_id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "camera": {
+                  "$ref": "#/$defs/Camera"
+                }
+              },
+              "required": [
+                "kind",
+                "session_id",
+                "camera"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "plot"
+                },
+                "target_id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Source"
+                  },
+                  "minItems": 1,
+                  "maxItems": 16
+                },
+                "range": {
+                  "$ref": "#/$defs/TimeRange"
+                },
+                "allow_recording_fallback": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "required": [
+                "kind",
+                "target_id",
+                "sources",
+                "range"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "image"
+                },
+                "target_id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "source": {
+                  "$ref": "#/$defs/Source"
+                }
+              },
+              "required": [
+                "kind",
+                "target_id",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "map"
+                },
+                "target_id": {
+                  "$ref": "#/$defs/Id"
+                },
+                "layers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "truth_overlays": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "required": [
+                "kind",
+                "target_id",
+                "layers"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "size": {
+          "$ref": "#/$defs/ImageSize"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "view",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "view_render_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "view_render_completion": {
+      "$ref": "#/$defs/ViewResult"
+    },
+    "video_capture_input": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "camera": {
+          "$ref": "#/$defs/Camera"
+        },
+        "size": {
+          "$ref": "#/$defs/ImageSize"
+        },
+        "duration_ns": {
+          "$ref": "#/$defs/DurationNanoseconds"
+        },
+        "fps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "default": 15
+        },
+        "wall_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "session_id",
+        "camera",
+        "duration_ns",
+        "wall_timeout_ms",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "video_capture_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "video_capture_completion": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "frame_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_simulation_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "end_simulation_ns": {
+          "$ref": "#/$defs/Nanoseconds"
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "artifact",
+        "frame_count",
+        "start_simulation_ns",
+        "end_simulation_ns",
+        "partial",
+        "warnings"
+      ],
+      "additionalProperties": false
+    },
+    "operation_status_input": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "wait_ms": {
+          "$ref": "#/$defs/WaitMilliseconds"
+        }
+      },
+      "required": [
+        "operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "operation_status_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "operation_cancel_input": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "operation_id",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "operation_cancel_output": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Operation"
+        },
+        {
+          "$ref": "#/$defs/ErrorResult"
+        }
+      ]
+    },
+    "ErrorInfo": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "effect": {
+          "type": "string",
+          "enum": [
+            "none",
+            "applied",
+            "partial",
+            "unknown"
+          ]
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "effect"
+      ],
+      "additionalProperties": false
+    },
+    "Checkpoint": {
+      "type": "object",
+      "properties": {
+        "checkpoint_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "recorders": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "simulation_receipt_until_ns": {
+                "$ref": "#/$defs/Nanoseconds"
+              },
+              "wall_receipt_until_ns": {
+                "$ref": "#/$defs/Nanoseconds"
+              },
+              "ingestion_sequence": {
+                "type": "string",
+                "pattern": "^[0-9]+$"
+              },
+              "known_dropped_samples": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tail_status": {
+                "type": "string",
+                "enum": [
+                  "complete_to_barrier",
+                  "partial",
+                  "failed"
+                ]
+              }
+            },
+            "required": [
+              "target_id",
+              "simulation_receipt_until_ns",
+              "wall_receipt_until_ns",
+              "ingestion_sequence",
+              "known_dropped_samples",
+              "tail_status"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "checkpoint_id",
+        "recorders"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "x-tools": [
+    {
+      "name": "server_info",
+      "description": "Describe supported simulator configurations, input schemas, query budgets and rendering availability.",
+      "input_schema": {
+        "$ref": "#/$defs/server_info_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/server_info_output"
+      }
+    },
+    {
+      "name": "simulator_start",
+      "description": "Start one isolated headless simulator, initially paused.",
+      "input_schema": {
+        "$ref": "#/$defs/simulator_start_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/simulator_start_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/simulator_start_completion"
+      }
+    },
+    {
+      "name": "simulator_status",
+      "description": "Inspect session lifecycle, clocks, readiness and targets.",
+      "input_schema": {
+        "$ref": "#/$defs/simulator_status_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/simulator_status_output"
+      }
+    },
+    {
+      "name": "simulator_control",
+      "description": "Control physics execution. Advance starts and ends paused; stop finalizes recordings.",
+      "input_schema": {
+        "$ref": "#/$defs/simulator_control_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/simulator_control_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/simulator_control_completion"
+      }
+    },
+    {
+      "name": "scene_read",
+      "description": "Read an atomic physics snapshot with stable entity identities.",
+      "input_schema": {
+        "$ref": "#/$defs/scene_read_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/scene_read_output"
+      }
+    },
+    {
+      "name": "scene_edit",
+      "description": "Apply one scene edit while paused, guarded by scene revision.",
+      "input_schema": {
+        "$ref": "#/$defs/scene_edit_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/scene_edit_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/scene_edit_completion"
+      }
+    },
+    {
+      "name": "simulator_input",
+      "description": "Operate simulator inputs. Referee/controller arguments follow schemas advertised by server_info.",
+      "input_schema": {
+        "$ref": "#/$defs/simulator_input_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/simulator_input_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/simulator_input_completion"
+      }
+    },
+    {
+      "name": "rosz_graph",
+      "description": "Discover nodes and endpoints in a target's transport scope.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_graph_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_graph_output"
+      }
+    },
+    {
+      "name": "rosz_schema",
+      "description": "Get discovered types and canonical JSON schemas for topics, services or node parameters.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_schema_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_schema_output"
+      }
+    },
+    {
+      "name": "rosz_observe",
+      "description": "Create persistent observations for selected topics and fields.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_observe_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_observe_output"
+      }
+    },
+    {
+      "name": "rosz_read",
+      "description": "Read latest data or retained history. Historical reads can opt into recording fallback without an observation handle.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_read_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_read_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/rosz_read_completion"
+      }
+    },
+    {
+      "name": "rosz_unobserve",
+      "description": "Release an observation and its retained data when no other handle owns it.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_unobserve_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_unobserve_output"
+      }
+    },
+    {
+      "name": "rosz_wait",
+      "description": "Wait for a fresh observed condition without advancing simulation time.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_wait_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_wait_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/rosz_wait_completion"
+      }
+    },
+    {
+      "name": "rosz_parameter_read",
+      "description": "Read effective parameters and revision/layer metadata.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_parameter_read_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_parameter_read_output"
+      }
+    },
+    {
+      "name": "rosz_parameter_write",
+      "description": "Write parameters with node-side validation. A set batch is atomic within one node.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_parameter_write_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_parameter_write_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/rosz_parameter_write_completion"
+      }
+    },
+    {
+      "name": "rosz_publish",
+      "description": "Publish a schema-validated payload once or for a bounded interval.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_publish_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_publish_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/rosz_publish_completion"
+      }
+    },
+    {
+      "name": "rosz_call",
+      "description": "Call a discovered service with its request schema and an explicit wall timeout.",
+      "input_schema": {
+        "$ref": "#/$defs/rosz_call_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/rosz_call_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/rosz_call_completion"
+      }
+    },
+    {
+      "name": "logs_read",
+      "description": "Read filtered structured logs through the log history service and live topic.",
+      "input_schema": {
+        "$ref": "#/$defs/logs_read_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/logs_read_output"
+      }
+    },
+    {
+      "name": "view_render",
+      "description": "Render an on-demand scene, plot, map or published image with data provenance.",
+      "input_schema": {
+        "$ref": "#/$defs/view_render_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/view_render_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/view_render_completion"
+      }
+    },
+    {
+      "name": "video_capture",
+      "description": "Arm a bounded future scene capture. It does not advance simulation time.",
+      "input_schema": {
+        "$ref": "#/$defs/video_capture_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/video_capture_output"
+      },
+      "completion_schema": {
+        "$ref": "#/$defs/video_capture_completion"
+      }
+    },
+    {
+      "name": "operation_status",
+      "description": "Read an operation, optionally waiting for up to 30 wall-clock seconds.",
+      "input_schema": {
+        "$ref": "#/$defs/operation_status_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/operation_status_output"
+      }
+    },
+    {
+      "name": "operation_cancel",
+      "description": "Request cancellation and report the operation's current effect status.",
+      "input_schema": {
+        "$ref": "#/$defs/operation_cancel_input"
+      },
+      "output_schema": {
+        "$ref": "#/$defs/operation_cancel_output"
+      }
+    }
+  ]
+}

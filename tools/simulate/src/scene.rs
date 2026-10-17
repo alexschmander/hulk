@@ -36,3 +36,5 @@ impl Plugin for ObjectsPlugin {
             .add_systems(Update, object::cleanup_parts);
     }
 }
+
+pub(crate) mod markings;

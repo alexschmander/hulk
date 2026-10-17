@@ -202,7 +202,8 @@ impl DynamicValue {
     pub fn is_primitive(&self) -> bool {
         matches!(
             self,
-            DynamicValue::Bool(_)
+            DynamicValue::Unit
+                | DynamicValue::Bool(_)
                 | DynamicValue::Int8(_)
                 | DynamicValue::Int16(_)
                 | DynamicValue::Int32(_)

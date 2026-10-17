@@ -711,3 +711,6 @@ mod shortcut_tests {
         assert!(press(true, false));
     }
 }
+
+/// Agent-owned headless simulator and MCP stdio server.
+pub mod mcp;

@@ -32,6 +32,8 @@ fn dynamic_json_policy_can_preserve_cli_byte_and_float_shape() {
             DynamicValue::Float64(f64::INFINITY),
         ]),
         DynamicJsonRenderPolicy {
+            tag_optionals: false,
+            wide_integers_as_strings: false,
             bytes: ByteRenderPolicy::FullArray,
             non_finite_float: NonFiniteFloatRenderPolicy::Null,
         },
