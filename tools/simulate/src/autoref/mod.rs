@@ -9,7 +9,7 @@ mod tests;
 pub(crate) mod transport;
 
 use crate::{RobotId, TeamId};
-pub(crate) use calls::short;
+pub(crate) use calls::{name, short};
 pub(crate) use desk::team_color;
 pub(crate) use engine::{Ball, Engine, Robot, Snapshot};
 use game_controller_core::types::Side;
