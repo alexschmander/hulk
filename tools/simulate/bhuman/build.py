@@ -44,7 +44,8 @@ def main():
     parser.add_argument("--cache", type=Path, default=default)
     parser.add_argument("--print-cache", action="store_true", help="Print the resolved cache directory without building")
     parser.add_argument("--source", type=Path, help="Reuse an existing pinned release checkout")
-    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
+                        help="Number of parallel build jobs (default: %(default)s CPU threads)")
     parser.add_argument("--generate-rust", action="store_true", help="Regenerate the checked-in Rust protocol")
     args = parser.parse_args()
     if args.print_cache:
