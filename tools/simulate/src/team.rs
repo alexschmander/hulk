@@ -178,6 +178,14 @@ impl Team {
     pub fn members(&self) -> Vec<Member> {
         self.0.members.lock().unwrap().values().cloned().collect()
     }
+    pub fn robot_name(&self, id: RobotId) -> Option<String> {
+        self.0
+            .members
+            .lock()
+            .unwrap()
+            .contains_key(&id)
+            .then(|| self.configuration().opponent.player_name(id))
+    }
     pub fn selected(&self) -> Option<Member> {
         self.0
             .members

@@ -27,6 +27,8 @@ the worker incrementally.
 
 In the simulator setup, set the opponent count above zero and select
 **B-Human 2026**. The worker and source fields are filled from the launcher.
+The setup, goal labels, scoreboard, referee controls and active-player tags use
+B-Human's name, with B1–B5 for compact player badges.
 To reuse a separately built worker, set both `BHUMAN_WORKER` and `BHUMAN_SOURCE`
 before launching; this skips the native build.
 HULKs keep their selected estimator profile; B-Human uses perfect world models.

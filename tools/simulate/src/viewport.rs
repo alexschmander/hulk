@@ -420,7 +420,8 @@ impl Viewport {
     fn paint_scene(&mut self, ui: &Ui, rect: Rect, world: &mut World, selected: Option<RobotId>) {
         self.labels.clear();
         if let Some(view) = CameraView::new(world, rect) {
-            let team = world.resource::<crate::team::Team>();
+            let team = world.resource::<crate::team::Team>().clone();
+            let opponent = &team.configuration().opponent;
             let members = team.members();
             let hulks_away = team.away(TeamId::Hulks);
             let parameters = world.resource::<crate::parameters::CurrentSimulatorParameters>();
@@ -453,7 +454,7 @@ impl Viewport {
                         || crate::autoref::team_color(ui.visuals(), defending),
                         |member| crate::widgets::jersey_color(member, ui.visuals()),
                     );
-                let name = crate::autoref::name(defending);
+                let name = opponent.team_name(defending);
                 let font = egui::FontId::proportional(20.0);
                 let width = painter
                     .layout_no_wrap(name.to_owned(), font.clone(), Color32::WHITE)
@@ -507,7 +508,8 @@ impl Viewport {
                         ui.interact(visible, ui.id().with(member.id), egui::Sense::hover())
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .on_hover_text(format!(
-                                "Select {} in Twix",
+                                "Select {} in Twix ({})",
+                                opponent.player_name(member.id),
                                 crate::robot_namespace(member.id)
                             ));
                     }
@@ -521,7 +523,7 @@ impl Viewport {
                     painter.text(
                         position - egui::vec2(0.0, 2.0),
                         egui::Align2::CENTER_CENTER,
-                        crate::autoref::short(member.id),
+                        opponent.player_tag(member.id),
                         egui::FontId::proportional(20.0),
                         text,
                     );

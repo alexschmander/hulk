@@ -10,7 +10,7 @@ fn fixture() -> (Engine, Snapshot) {
         "hsl_small",
     )
     .unwrap();
-    let engine = Engine::new(Competition::Middle, field).unwrap();
+    let engine = Engine::new(Competition::Middle, field, crate::Opponent::Hulks).unwrap();
     let mut snapshot = Snapshot {
         ball: Some(Ball {
             entity: 1,
@@ -1141,7 +1141,7 @@ fn all_upstream_competition_presets_parse() {
                 "hsl_small",
             )
             .unwrap();
-            let mut e = Engine::new(preset, field).unwrap();
+            let mut e = Engine::new(preset, field, crate::Opponent::Hulks).unwrap();
             assert_eq!(e.core.params.competition.players_per_team, preset.players());
             step(&mut e, &s, 0.01);
             assert_eq!(e.core.get_game(false).state, State::Ready);

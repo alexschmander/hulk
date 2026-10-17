@@ -71,7 +71,7 @@ fn timer_running(timer: &Timer) -> bool {
 pub fn match_strip(ui: &mut Ui, engine: &mut Engine, desk: &mut bool, compact: bool) {
     let game = engine.core.get_game(false).clone();
     ui.horizontal_wrapped(|ui| {
-        score_bug(ui, &game);
+        score_bug(ui, &game, &engine.opponent);
         ui.add_space(6.0);
         let break_time = halftime(&game);
         ui.label(
@@ -106,7 +106,7 @@ pub fn match_strip(ui: &mut Ui, engine: &mut Engine, desk: &mut bool, compact: b
         });
         if !break_time {
             ui.add_space(6.0);
-            state_lamp(ui, &game);
+            state_lamp(ui, &game, &engine.opponent);
         }
         crate::widgets::trailing(ui, if compact { 120.0 } else { 330.0 }, |ui| {
             let toggle = ui
@@ -142,7 +142,7 @@ pub fn match_strip(ui: &mut Ui, engine: &mut Engine, desk: &mut bool, compact: b
 }
 
 /// Team names flank the score; their color rails are the jersey colors robots see.
-fn score_bug(ui: &mut Ui, game: &Game) {
+fn score_bug(ui: &mut Ui, game: &Game, opponent: &crate::Opponent) {
     let visuals = ui.visuals().clone();
     egui::Frame::new()
         .fill(visuals.extreme_bg_color)
@@ -163,7 +163,7 @@ fn score_bug(ui: &mut Ui, game: &Game) {
                 let name = |ui: &mut Ui, team: TeamId| {
                     let kicking = game.kicking_side == Some(side(team))
                         && game.phase != Phase::PenaltyShootout;
-                    let label = ui.label(RichText::new(calls::name(team)).strong());
+                    let label = ui.label(RichText::new(opponent.team_name(team)).strong());
                     if kicking {
                         let (rect, response) =
                             ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
@@ -195,8 +195,9 @@ fn score_bug(ui: &mut Ui, game: &Game) {
                 WidgetType::Label,
                 true,
                 format!(
-                    "HULKs {}, Opponents {}",
+                    "HULKs {}, {} {}",
                     game.teams[Side::Home].score,
+                    opponent.team_name(TeamId::Opponents),
                     game.teams[Side::Away].score
                 ),
             )
@@ -211,7 +212,7 @@ fn kicking_role(game: &Game) -> &'static str {
     }
 }
 
-fn state_lamp(ui: &mut Ui, game: &Game) {
+fn state_lamp(ui: &mut Ui, game: &Game, opponent: &crate::Opponent) {
     let color = state_color(ui.visuals(), game);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.5, color);
@@ -237,7 +238,7 @@ fn state_lamp(ui: &mut Ui, game: &Game) {
     if game.set_play != SetPlay::NoSetPlay {
         let restart = calls::set_play_label(game.set_play);
         ui.label(match game.kicking_side {
-            Some(side) => format!("{restart} for {}", calls::name(super::team(side))),
+            Some(side) => format!("{restart} for {}", opponent.team_name(super::team(side))),
             None => format!("Neutral {}", restart.to_lowercase()),
         });
     }
@@ -289,13 +290,13 @@ fn call_button(
         button = button.shortcut_text(RichText::new(shortcut).weak());
     }
     let hint = match shortcut {
-        Some(shortcut) => format!("{} ({shortcut})", call.hint(game)),
-        None => call.hint(game),
+        Some(shortcut) => format!("{} ({shortcut})", call.hint(game, &engine.opponent)),
+        None => call.hint(game, &engine.opponent),
     };
     let response = ui
         .add_enabled(allowed, button)
         .on_hover_text(hint)
-        .on_disabled_hover_text(call.refusal(game));
+        .on_disabled_hover_text(call.refusal(game, &engine.opponent));
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, allowed, &label));
     if response.clicked() {
         let _ = engine.call(call);
@@ -390,7 +391,11 @@ fn team_section(
     let inner = ui
         .horizontal(|ui| {
             ui.add_space(10.0);
-            ui.label(RichText::new(calls::name(team)).strong().color(color));
+            ui.label(
+                RichText::new(engine.opponent.team_name(team))
+                    .strong()
+                    .color(color),
+            );
             let game = engine.core.get_game(false);
             if game.kicking_side == Some(side(team)) && game.phase != Phase::PenaltyShootout {
                 ui.weak(kicking_role(game));
@@ -417,7 +422,7 @@ fn team_section(
     for id in players {
         let row = ui.horizontal(|ui| {
             ui.add_space(10.0);
-            if badge(ui, id, selected == Some(id)).clicked() {
+            if badge(ui, &engine.opponent, id, selected == Some(id)).clicked() {
                 *select = Some(id);
             }
             penalty_status(ui, engine.core.get_game(false), id);
@@ -450,12 +455,12 @@ fn award_menu(ui: &mut Ui, engine: &mut Engine, team: TeamId) {
     });
     response.response.on_hover_text(format!(
         "Award a restart or timeout to {}",
-        calls::name(team)
+        engine.opponent.team_name(team)
     ));
 }
 
 /// Robot badge as in the scene; clicking selects the robot in Twix.
-fn badge(ui: &mut Ui, id: RobotId, selected: bool) -> Response {
+fn badge(ui: &mut Ui, opponent: &crate::Opponent, id: RobotId, selected: bool) -> Response {
     let size = egui::vec2(30.0, 20.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let visuals = ui.visuals();
@@ -479,15 +484,20 @@ fn badge(ui: &mut Ui, id: RobotId, selected: bool) -> Response {
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        calls::short(id),
+        opponent.player_tag(id),
         egui::FontId::proportional(13.0),
         visuals.strong_text_color(),
     );
     let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("Select {} in Twix", crate::robot_namespace(id)));
-    response
-        .widget_info(|| WidgetInfo::selected(WidgetType::Button, true, selected, calls::short(id)));
+        .on_hover_text(format!(
+            "Select {} in Twix ({})",
+            opponent.player_name(id),
+            crate::robot_namespace(id)
+        ));
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::Button, true, selected, opponent.player_tag(id))
+    });
     response
 }
 
@@ -531,7 +541,9 @@ pub fn penalty_menu(ui: &mut Ui, engine: &mut Engine, id: RobotId, compact: bool
     );
     ui.add_enabled_ui(open, |ui| {
         ui.menu_button(text, |ui| {
-            ui.label(RichText::new(format!("Penalize {}", calls::short(id))).strong());
+            ui.label(
+                RichText::new(format!("Penalize {}", engine.opponent.player_tag(id))).strong(),
+            );
             for call in PENALTIES {
                 if call == PenaltyCall::Caution {
                     ui.separator();
@@ -542,8 +554,11 @@ pub fn penalty_menu(ui: &mut Ui, engine: &mut Engine, id: RobotId, compact: bool
             }
         })
         .response
-        .on_hover_text(format!("Penalize {}", calls::short(id)))
-        .on_disabled_hover_text(format!("{} cannot be penalized now", calls::short(id)));
+        .on_hover_text(format!("Penalize {}", engine.opponent.player_tag(id)))
+        .on_disabled_hover_text(format!(
+            "{} cannot be penalized now",
+            engine.opponent.player_tag(id)
+        ));
     });
 }
 

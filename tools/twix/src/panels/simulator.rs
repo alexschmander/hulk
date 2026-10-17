@@ -91,6 +91,10 @@ mod enabled {
                 simulator.select_robot(number);
             }
         }
+
+        pub fn robot_name(&self, id: simulate::RobotId) -> Option<String> {
+            self.simulator.as_ref()?.robot_name(id)
+        }
     }
     impl Panel for SimulatorPanel {
         const STORAGE_ID: &'static str = "motion_simulator";
@@ -345,7 +349,8 @@ mod enabled {
                     }
                 });
                 ui.add_space(10.0);
-                ui.label(RichText::new("Opponents · team 5").strong());
+                let opponent_name = self.opponent().team_name(simulate::TeamId::Opponents);
+                ui.label(RichText::new(format!("{opponent_name} · team 5")).strong());
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for count in 0..=5 {
@@ -493,6 +498,7 @@ mod enabled {
                         field,
                         self.settings.robot_count,
                         self.settings.opponent_count,
+                        &self.opponent(),
                         max_height,
                     );
                     ui.add_space(4.0);
