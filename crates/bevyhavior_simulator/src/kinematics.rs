@@ -1,19 +1,19 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
-use booster::walking::step_from_motion_command;
 use coordinate_systems::{Ground, World};
 use hsl_network_messages::{GameState, Team};
-use linear_algebra::{Isometry2, Orientation2, Point2, Vector2, vector};
+use linear_algebra::{Isometry2, Orientation2, Point2, Rotation2, Vector2, vector};
+use motion::walking::step_from_walk_command;
 use types::{
-    motion_command::{HeadMotion, KickPower, MotionCommand},
+    motion_command::{HeadMotion, MotionCommand},
     step::Step,
 };
 
 use crate::behavior_tree_simulator::{
-    SimulatedBall, SimulationConfig, SimulatorBall, SimulatorClock, SimulatorFallDownState,
-    SimulatorFieldDimensions, SimulatorGameState, SimulatorGroundToWorld, SimulatorHeadYaw,
-    SimulatorLastKickTime, SimulatorRobot, SimulatorRobotFrames, SimulatorRobotId,
+    SimulatedBall, SimulationConfig, SimulatorBall, SimulatorClock, SimulatorFieldDimensions,
+    SimulatorGameState, SimulatorGroundToWorld, SimulatorHeadYaw, SimulatorLastKickTime,
+    SimulatorPosture, SimulatorRobot, SimulatorRobotFrames, SimulatorRobotId,
     SimulatorRobotParameters,
 };
 
@@ -79,26 +79,34 @@ pub fn move_robots(
         &SimulatorRobotParameters,
         &mut SimulatorGroundToWorld,
         &mut SimulatorHeadYaw,
-        &mut SimulatorFallDownState,
+        &mut SimulatorPosture,
         &mut SimulatorLastKickTime,
     )>,
 ) {
-    for (
-        robot,
-        parameters,
-        mut ground_to_world,
-        mut head_yaw,
-        mut fall_down_state,
-        mut last_kick_time,
-    ) in &mut robots
+    for (robot, parameters, mut ground_to_world, mut head_yaw, mut posture, mut last_kick_time) in
+        &mut robots
     {
         let Some(frame) = robot_frames.0.get(&robot.id()) else {
             continue;
         };
 
         match &frame.motion_command {
-            MotionCommand::Walk { .. } => {
-                let step = step_from_motion_command(&frame.motion_command, &parameters.walking);
+            MotionCommand::Walk {
+                path,
+                orientation_mode,
+                target_orientation,
+                distance_to_be_aligned,
+                speed,
+                ..
+            } => {
+                let step = step_from_walk_command(
+                    path,
+                    *orientation_mode,
+                    *target_orientation,
+                    *distance_to_be_aligned,
+                    *speed,
+                    &parameters.walking,
+                );
                 ground_to_world.ground_to_world = apply_walk_to_pose(
                     ground_to_world.ground_to_world,
                     step,
@@ -119,10 +127,12 @@ pub fn move_robots(
                     &config,
                 );
             }
-            MotionCommand::VisualKick {
+            MotionCommand::Kick {
                 ball_position,
                 kick_direction,
-                kick_power,
+                strong,
+                soft,
+                target_speed,
                 ..
             } => {
                 let ball = &mut *ball;
@@ -138,10 +148,10 @@ pub fn move_robots(
                     &mut last_kick_time.last_kick_time,
                     *ball_position,
                     *kick_direction,
-                    *kick_power,
+                    kick_ball_speed(&config, *strong, *soft, *target_speed),
                 )
             }
-            MotionCommand::StandUp => fall_down_state.fall_down_state = None,
+            MotionCommand::StandUp => posture.posture = None,
             MotionCommand::Damping | MotionCommand::Prepare | MotionCommand::Stand { .. } => {}
         }
 
@@ -274,20 +284,13 @@ fn desired_head_yaw(
     tick_duration: Duration,
     config: &SimulationConfig,
 ) -> f32 {
+    // This simulation models head yaw only; target height affects pitch on the robot.
     match head_motion {
         Some(HeadMotion::MoveWithVelocity { yaw, .. }) => {
             current_yaw.angle() + yaw * tick_duration.as_secs_f32()
         }
         Some(HeadMotion::LookAt { target, .. }) => {
             Orientation2::from_vector(target.coords()).angle()
-        }
-        Some(HeadMotion::LookLeftAndRightOf { target }) => {
-            let elapsed = now
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f32();
-            Orientation2::from_vector(target.coords()).angle()
-                + elapsed.sin() * config.head_glance_angle
         }
         Some(HeadMotion::LookAround) | Some(HeadMotion::SearchForLostBall) => {
             let period = config.head_scan_period.as_secs_f32();
@@ -305,10 +308,7 @@ fn desired_head_yaw(
                 (elapsed * std::f32::consts::TAU / period).sin() * amplitude
             }
         }
-        Some(HeadMotion::ZeroAngles)
-        | Some(HeadMotion::Center { .. })
-        | Some(HeadMotion::Unstiff)
-        | None => 0.0,
+        Some(HeadMotion::Center { .. }) | Some(HeadMotion::Damping) | None => 0.0,
     }
 }
 
@@ -355,7 +355,21 @@ fn apply_walk_with_velocity_to_pose<Frame>(
 enum KickAttempt {
     Kicked,
     CoolingDown,
-    NotInRange,
+    NotReady,
+}
+
+// This models the requested ball speed, not the learned quick-kick motion.
+fn kick_ball_speed(config: &SimulationConfig, strong: bool, soft: bool, target_speed: f32) -> f32 {
+    let [minimum, maximum] = if soft {
+        config.soft_kick_speed_limits
+    } else {
+        config.kick_speed_limits
+    };
+    if !soft && strong {
+        maximum
+    } else {
+        target_speed.clamp(minimum, maximum)
+    }
 }
 
 fn apply_kick_to_ball(
@@ -368,10 +382,10 @@ fn apply_kick_to_ball(
     last_kick_time: &mut SystemTime,
     expected_ball_position: Point2<Ground>,
     kick_direction: Orientation2<Ground>,
-    kick_power: KickPower,
+    kick_speed: f32,
 ) -> KickAttempt {
     let Some(ball) = ball else {
-        return KickAttempt::NotInRange;
+        return KickAttempt::NotReady;
     };
     if now.duration_since(*last_kick_time).unwrap_or_default() < config.kick_cooldown {
         return KickAttempt::CoolingDown;
@@ -379,19 +393,22 @@ fn apply_kick_to_ball(
 
     let expected_ball_in_world = ground_to_world * expected_ball_position;
     if (ball.position - expected_ball_in_world).norm() > config.kick_radius {
-        return KickAttempt::NotInRange;
+        return KickAttempt::NotReady;
     }
 
     let actual_ball_in_ground = ground_to_world.inverse() * ball.position;
-    if actual_ball_in_ground.coords().norm() > config.kick_radius {
-        return KickAttempt::NotInRange;
+    let ball_distance = actual_ball_in_ground.coords().norm();
+    if ball_distance > config.kick_radius
+        || ball_distance <= f32::EPSILON
+        || actual_ball_in_ground
+            .coords()
+            .dot(&kick_direction.as_unit_vector())
+            < ball_distance * config.kick_alignment_tolerance.cos()
+    {
+        return KickAttempt::NotReady;
     }
 
-    let speed = match kick_power {
-        KickPower::Rumpelstilzchen => config.kick_ball_speed_rumpelstilzchen,
-        KickPower::Schlong => config.kick_ball_speed_schlong,
-    };
-    ball.velocity = ground_to_world * (kick_direction.as_unit_vector() * speed);
+    ball.velocity = ground_to_world * (kick_direction.as_unit_vector() * kick_speed);
     *last_touched_by = Some(kicking_team);
     *last_kick_time = now;
     KickAttempt::Kicked
@@ -409,10 +426,10 @@ fn apply_visual_kick_kinematics(
     last_kick_time: &mut SystemTime,
     ball_position: Point2<Ground>,
     kick_direction: Orientation2<Ground>,
-    kick_power: KickPower,
+    kick_speed: f32,
 ) {
-    let kick_direction_vector = kick_direction.as_unit_vector();
-    match apply_kick_to_ball(
+    let orientation_to_ball = Orientation2::from_vector(ball_position.coords());
+    let kick_pose = match apply_kick_to_ball(
         now,
         ball,
         last_touched_by,
@@ -422,19 +439,30 @@ fn apply_visual_kick_kinematics(
         last_kick_time,
         ball_position,
         kick_direction,
-        kick_power,
+        kick_speed,
     ) {
-        KickAttempt::Kicked | KickAttempt::CoolingDown => return,
-        KickAttempt::NotInRange => {}
-    }
+        KickAttempt::Kicked | KickAttempt::CoolingDown => Point2::origin(),
+        KickAttempt::NotReady => {
+            let minimum_distance = config.robot_radius + ball_radius;
+            let standoff_distance = (config.kick_radius * 0.9).max(minimum_distance);
+            let maximum_orbit_angle = (minimum_distance / standoff_distance)
+                .clamp(0.0, 1.0)
+                .acos()
+                .min(config.walk_rotation_speed * tick_duration.as_secs_f32());
+            let orbit_angle = orientation_to_ball
+                .rotation_to(kick_direction)
+                .angle()
+                .clamp(-maximum_orbit_angle, maximum_orbit_angle);
+            ball_position
+                - Rotation2::new(orbit_angle)
+                    * orientation_to_ball.as_unit_vector()
+                    * standoff_distance
+        }
+    };
 
-    let standoff_distance = (config.kick_radius * 0.9)
-        .min(ball_position.coords().dot(&kick_direction_vector))
-        .max(config.robot_radius + ball_radius);
-    let kick_pose = ball_position - kick_direction_vector * standoff_distance;
     *ground_to_world = apply_walk_to_pose(
         *ground_to_world,
-        step_towards_target(kick_pose, kick_direction, 1.0, config, tick_duration),
+        step_towards_target(kick_pose, orientation_to_ball, 1.0, config, tick_duration),
         tick_duration,
         config,
     );
@@ -473,14 +501,14 @@ mod tests {
         time::{Duration, SystemTime},
     };
 
-    use booster::walking::WalkingParameters;
     use coordinate_systems::{Ground, World};
     use hsl_network_messages::{PlayerNumber, Team};
     use linear_algebra::{Isometry2, Orientation2, point, vector};
+    use motion::walking::WalkingParameters;
     use types::{
         behavior_tree::{NodeTrace, Status},
         field_dimensions::{FieldDimensions, Side},
-        motion_command::{HeadMotion, KickPower, MotionCommand, OrientationMode},
+        motion_command::{HeadMotion, MotionCommand, OrientationMode},
         parameters::BehaviorParameters,
         path::direct_path,
         world_state::WorldState,
@@ -510,7 +538,9 @@ mod tests {
             RobotFrame {
                 world_state: WorldState::default(),
                 motion_command: MotionCommand::Walk {
-                    head: HeadMotion::ZeroAngles,
+                    head: HeadMotion::Center {
+                        image_region_target: Default::default(),
+                    },
                     path: direct_path(point![0.0, 0.0], point![2.0, 0.0]),
                     orientation_mode: OrientationMode::AlignWithPath,
                     target_orientation: Orientation2::new(FRAC_PI_2),
@@ -547,7 +577,7 @@ mod tests {
                 ground_to_world: Isometry2::identity(),
             },
             SimulatorHeadYaw::default(),
-            SimulatorFallDownState::default(),
+            SimulatorPosture::default(),
             SimulatorLastKickTime {
                 last_kick_time: SystemTime::UNIX_EPOCH,
             },
@@ -559,6 +589,22 @@ mod tests {
         let ground_to_world = query.single(app.world()).expect("robot should exist");
         assert_eq!(ground_to_world.ground_to_world.orientation().angle(), 0.0);
         assert!(ground_to_world.ground_to_world.translation().x() > 0.0);
+    }
+
+    #[test]
+    fn kick_speed_respects_soft_policy_and_strong_override() {
+        let config = SimulationConfig::default();
+        for (strong, soft, requested, expected) in [
+            (false, false, 1.2, 1.2),
+            (false, false, 0.0, 0.5),
+            (false, false, 9.0, 3.4),
+            (true, false, 1.2, 3.4),
+            (true, true, 1.2, 1.2),
+            (false, true, 0.0, 0.1),
+            (false, true, 9.0, 1.7),
+        ] {
+            assert_eq!(kick_ball_speed(&config, strong, soft, requested), expected);
+        }
     }
 
     #[test]
@@ -581,7 +627,7 @@ mod tests {
             &mut last_kick_time,
             point![1.0, 0.0],
             Orientation2::identity(),
-            KickPower::Rumpelstilzchen,
+            1.2,
         );
 
         assert_eq!(
@@ -611,15 +657,12 @@ mod tests {
             &mut last_kick_time,
             point![0.2, 0.0],
             Orientation2::identity(),
-            KickPower::Rumpelstilzchen,
+            1.2,
         );
 
         assert_eq!(
             ball.expect("ball should still exist").velocity,
-            vector![
-                SimulationConfig::default().kick_ball_speed_rumpelstilzchen,
-                0.0
-            ]
+            vector![1.2, 0.0]
         );
         assert_eq!(last_touched_by, Some(Team::Hulks));
     }
@@ -647,7 +690,7 @@ mod tests {
             &mut last_kick_time,
             point![1.0, 0.0],
             Orientation2::identity(),
-            KickPower::Rumpelstilzchen,
+            1.2,
         );
 
         assert!(ground_to_field.translation().x() > 0.0);
@@ -669,6 +712,7 @@ mod tests {
             Orientation2::identity(),
             Some(HeadMotion::LookAt {
                 target: point![0.0, 1.0],
+                height_above_ground: 0.0,
                 image_region_target: Default::default(),
             }),
             SystemTime::UNIX_EPOCH,

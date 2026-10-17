@@ -2,8 +2,9 @@ use filtering::hysteresis::less_than_with_hysteresis;
 use hsl_network_messages::Team;
 use linear_algebra::{point, vector};
 use types::{
-    controller_input::Button, filtered_game_controller_state::FilteredGameControllerState,
-    primary_state::PrimaryState,
+    controller_input::Button, fall_detection::Posture,
+    filtered_game_controller_state::FilteredGameControllerState,
+    filtered_game_state::FilteredGameState, primary_state::PrimaryState,
 };
 use voronoi::Ownership;
 
@@ -20,10 +21,10 @@ pub fn is_ball_interception_candidate(blackboard: &mut Blackboard) -> bool {
         let ball_is_in_front_of_robot = ball_in_ground.coords().norm()
             < parameters.maximum_ball_distance
             && ball_in_ground.x() > 0.0;
-        let ball_is_moving_towards_robot =
-            ball.velocity.x() < -parameters.minimum_ball_velocity_towards_robot;
+        let ball_is_moving_towards_robot = (ground_to_field.inverse() * ball.velocity).x()
+            < -parameters.minimum_ball_velocity_towards_robot;
 
-        let ball_in_field_velocity = ground_to_field * ball.velocity;
+        let ball_in_field_velocity = ball.velocity;
         let ball_is_moving = ball_in_field_velocity.norm() > parameters.minimum_ball_velocity;
         let ball_is_moving_towards_own_half =
             ball_in_field_velocity.x() < -parameters.minimum_ball_velocity_towards_own_half;
@@ -48,8 +49,8 @@ pub fn is_close_to_ball(blackboard: &mut Blackboard) -> bool {
         is_close = less_than_with_hysteresis(
             blackboard.last_close_enough_to_kick,
             distance_to_ball,
-            parameters.distance_for_kick,
-            parameters.distance_for_kick_hysteresis,
+            parameters.kick_activation_distance,
+            parameters.kick_activation_hysteresis,
         );
         blackboard.last_close_enough_to_kick = is_close;
     }
@@ -68,7 +69,7 @@ pub fn is_close_to_ball_aligned(blackboard: &mut Blackboard) -> bool {
             ground_to_field.inverse() * point!(blackboard.field_dimensions.length / 2.0, 0.0);
         let target_kick_position = ball_in_ground
             - (goal_position - ball_in_ground).normalize()
-                * blackboard.parameters.kicking.kick_position_ball_distance;
+                * blackboard.parameters.kicking.approach_ball_standoff;
 
         let parameters = &blackboard.parameters.substates;
         let distance_to_ball = target_kick_position.coords().norm();
@@ -138,11 +139,31 @@ pub fn is_closest_to_ball(blackboard: &mut Blackboard) -> bool {
     is_closest
 }
 
-pub fn is_fallen(blackboard: &mut Blackboard) -> bool {
+fn posture(blackboard: &Blackboard) -> Option<Posture> {
     blackboard
         .world_state
-        .fall_down_state
-        .is_some_and(|fall_down_state| fall_down_state.is_recovery_available)
+        .fall_detection
+        .filter(|fall_detection| fall_detection.is_valid(blackboard.world_state.now))
+        .map(|fall_detection| fall_detection.posture)
+}
+
+pub fn should_do_fall_protection(blackboard: &mut Blackboard) -> bool {
+    matches!(posture(blackboard), None | Some(Posture::Falling))
+}
+
+pub fn is_fallen(blackboard: &mut Blackboard) -> bool {
+    matches!(posture(blackboard), Some(Posture::Fallen { .. }))
+}
+
+pub fn is_ready_for_stand_up(blackboard: &mut Blackboard) -> bool {
+    matches!(
+        posture(blackboard),
+        Some(
+            Posture::Fallen {
+                is_ready_for_standup: true
+            } | Posture::StandingUp
+        )
+    )
 }
 
 pub fn is_goalkeeper(blackboard: &mut Blackboard) -> bool {
@@ -191,6 +212,29 @@ pub fn hulks_is_kicking_team(blackboard: &mut Blackboard) -> bool {
         blackboard.world_state.filtered_game_controller_state,
         Some(FilteredGameControllerState {
             kicking_team: Some(Team::Hulks),
+            ..
+        })
+    )
+}
+
+pub fn is_ball_free(blackboard: &mut Blackboard) -> bool {
+    matches!(
+        blackboard.world_state.filtered_game_controller_state,
+        Some(FilteredGameControllerState {
+            game_state: FilteredGameState::Playing {
+                ball_is_free: true,
+                ..
+            },
+            ..
+        })
+    )
+}
+
+pub fn is_kickoff(blackboard: &mut Blackboard) -> bool {
+    matches!(
+        blackboard.world_state.filtered_game_controller_state,
+        Some(FilteredGameControllerState {
+            game_state: FilteredGameState::Playing { kick_off: true, .. },
             ..
         })
     )

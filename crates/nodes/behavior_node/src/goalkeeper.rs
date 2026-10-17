@@ -1,11 +1,7 @@
 use coordinate_systems::Field;
 use hsl_network_messages::SubState;
 use linear_algebra::{Orientation2, Pose2, Vector2, point};
-use types::{
-    behavior_tree::Status,
-    motion_command::{KickPower, OrientationMode},
-    motion_type::MotionType,
-};
+use types::{behavior_tree::Status, motion_command::OrientationMode, motion_type::MotionType};
 
 use crate::{
     action,
@@ -13,7 +9,7 @@ use crate::{
     condition,
     conditions::{hulks_is_kicking_team, is_closest_to_ball},
     head::look_at_ball_subtree,
-    kick::{apply_visual_kick_target, intercept, kick, kick_alternatives_subtree, use_kick_power},
+    kick::{apply_kick_target, disable_strong_kick, intercept, kick, kick_alternatives_subtree},
     negation,
     node::Blackboard,
     selection, sequence,
@@ -40,7 +36,7 @@ pub fn goalkeeper_subtree() -> Node<Blackboard> {
                     sequence!(
                         action!(kick),
                         action!(select_goalkeeper_kick_away_target),
-                        action!(use_kick_power, KickPower::Rumpelstilzchen),
+                        action!(disable_strong_kick),
                     ),
                     subtree!(kick_alternatives_subtree),
                 )
@@ -52,7 +48,7 @@ pub fn goalkeeper_subtree() -> Node<Blackboard> {
                     sequence!(
                         action!(kick),
                         action!(intercept),
-                        action!(use_kick_power, KickPower::Rumpelstilzchen),
+                        action!(disable_strong_kick),
                     ),
                     subtree!(kick_alternatives_subtree),
                 )
@@ -169,7 +165,7 @@ fn is_goalkeeper_interception_candidate(blackboard: &mut Blackboard) -> bool {
         }
 
         let ball_in_ground = ground_to_field.inverse() * ball.position;
-        let velocity = ball.velocity;
+        let velocity = ground_to_field.inverse() * ball.velocity;
         let time_to_closest_approach =
             -ball_in_ground.coords().dot(&velocity) / velocity.norm_squared();
         if time_to_closest_approach < 0.0 {
@@ -177,7 +173,11 @@ fn is_goalkeeper_interception_candidate(blackboard: &mut Blackboard) -> bool {
         }
 
         let interception_point = ball_in_ground + velocity * time_to_closest_approach;
-        interception_point.x() >= blackboard.parameters.kicking.kick_position_ball_distance
+        interception_point.x()
+            >= blackboard
+                .parameters
+                .kicking
+                .minimum_interception_forward_distance
             && interception_point.coords().norm()
                 <= blackboard
                     .parameters
@@ -233,7 +233,7 @@ fn is_ball_close_enough_to_goal_to_become_striker(blackboard: &mut Blackboard) -
 
 fn is_ball_near_own_goal(blackboard: &mut Blackboard) -> bool {
     blackboard.ball.as_ref().is_some_and(|ball| {
-        let own_goal_x = blackboard.field_dimensions.length / 2.0;
+        let own_goal_x = -blackboard.field_dimensions.length / 2.0;
         let maximum_ball_x = own_goal_x + blackboard.parameters.goalkeeper.passive_distance;
 
         ball.position.x() < maximum_ball_x
@@ -354,7 +354,7 @@ fn select_goalkeeper_kick_away_target(blackboard: &mut Blackboard) -> Status {
             -blackboard.field_dimensions.width / 4.0
         };
 
-        apply_visual_kick_target(blackboard, point!(0.0, target_y), 0.0)
+        apply_kick_target(blackboard, point!(0.0, target_y))
     } else {
         Status::Failure
     }
@@ -362,9 +362,7 @@ fn select_goalkeeper_kick_away_target(blackboard: &mut Blackboard) -> Status {
 
 fn ball_interception_velocity_in_field(blackboard: &Blackboard) -> Option<Vector2<Field>> {
     let ball = blackboard.ball.as_ref()?;
-    let ground_to_field = blackboard.world_state.robot.ground_to_field?;
-
-    Some(ground_to_field * ball.velocity)
+    Some(ball.velocity)
 }
 
 fn is_interception_velocity_towards_own_half(

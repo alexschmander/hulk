@@ -54,6 +54,7 @@ pub fn dynamic_payload_to_json(payload: &DynamicPayload, policy: DynamicJsonRend
 pub fn dynamic_value_to_json(value: &DynamicValue, policy: DynamicJsonRenderPolicy) -> Value {
     match value {
         DynamicValue::Bool(value) => Value::Bool(*value),
+        DynamicValue::Unit => Value::Null,
         DynamicValue::Int8(value) => Value::Number((*value).into()),
         DynamicValue::Int16(value) => Value::Number((*value).into()),
         DynamicValue::Int32(value) => Value::Number((*value).into()),
@@ -178,7 +179,10 @@ fn enum_to_json(value: &EnumValue, policy: DynamicJsonRenderPolicy) -> Value {
     Value::Object(fields)
 }
 
-fn enum_payload_to_json(payload: &EnumPayloadValue, policy: DynamicJsonRenderPolicy) -> Value {
+pub(crate) fn enum_payload_to_json(
+    payload: &EnumPayloadValue,
+    policy: DynamicJsonRenderPolicy,
+) -> Value {
     match payload {
         EnumPayloadValue::Unit => Value::Null,
         EnumPayloadValue::Newtype(value) => dynamic_value_to_json(value, policy),

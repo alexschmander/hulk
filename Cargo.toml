@@ -25,33 +25,32 @@ members = [
   "crates/nodes/ball_filter",
   "crates/nodes/ball_state_composer",
   "crates/nodes/behavior_node",
-  "crates/nodes/booster_sdk_interface",
   "crates/nodes/button_event_bridge",
   "crates/nodes/button_event_handler",
   "crates/nodes/camera_matrix_calculator",
   "crates/nodes/controller_handler",
   "crates/nodes/detection",
   "crates/nodes/fall_down_state_receiver",
+  "crates/nodes/fall_detection",
   "crates/nodes/field_mark_association",
   "crates/nodes/game_controller_filter",
   "crates/nodes/game_controller_state_filter",
   "crates/nodes/global_parameter_provider",
   "crates/nodes/ground_provider",
+  "crates/nodes/hardware_interface",
   "crates/nodes/head_motion",
   "crates/nodes/image_receiver",
-  "crates/nodes/image_segmenter",
   "crates/nodes/kinematics_provider",
   "crates/nodes/led_handler",
-  "crates/nodes/line_detection",
   "crates/nodes/localization-2d",
   "crates/nodes/localization-3d",
-  "crates/nodes/look_around",
-  "crates/nodes/look_at",
   "crates/nodes/low_state_bridge",
   "crates/nodes/mcap_recorder",
   "crates/nodes/message_filter",
   "crates/nodes/message_handler",
   "crates/nodes/microphone_recorder",
+  "crates/nodes/motion",
+  "crates/nodes/motion_inference",
   "crates/nodes/motor_commands_collector",
   "crates/nodes/obstacle_filter",
   "crates/nodes/odometer_bridge",
@@ -61,7 +60,6 @@ members = [
   "crates/nodes/rule_obstacle_composer",
   "crates/nodes/safe_pose_checker",
   "crates/nodes/search_suggestor",
-  "crates/nodes/segment_filter",
   "crates/nodes/stereo_visual_odometry",
   "crates/nodes/support_foot_estimator",
   "crates/nodes/team_ball_filter",
@@ -74,7 +72,6 @@ members = [
   "crates/nodes/world_to_field_provider",
   "crates/path_planner",
   "crates/projection",
-  "crates/ransac",
   "crates/repository",
   "crates/ros-z-cdr",
   "crates/ros-z-cli",
@@ -134,7 +131,6 @@ bevy_mujoco = { path = "crates/bevy_mujoco" }
 bincode = "1.3.3"
 bindgen = "0.71.1"
 booster = { path = "crates/booster" }
-booster_sdk_interface = { path = "crates/nodes/booster_sdk_interface" }
 button_event_bridge = { path = "crates/nodes/button_event_bridge" }
 button_event_handler = { path = "crates/nodes/button_event_handler" }
 bytemuck = "1"
@@ -165,6 +161,7 @@ enum-iterator = "2.1.0"
 enum_dispatch = "0.3.13"
 env_logger = "0.11.8"
 event-listener = "5"
+fall_detection = { path = "crates/nodes/fall_detection" }
 fall_down_state_receiver = { path = "crates/nodes/fall_down_state_receiver" }
 field_mark_association = { path = "crates/nodes/field_mark_association" }
 filtering = { path = "crates/filtering" }
@@ -176,6 +173,7 @@ gilrs = "0.11.2"
 glob = "0.3.2"
 global_parameter_provider = { path = "crates/nodes/global_parameter_provider" }
 ground_provider = { path = "crates/nodes/ground_provider" }
+hardware_interface = { path = "crates/nodes/hardware_interface" }
 head_motion = { path = "crates/nodes/head_motion" }
 hex = "0.4"
 hsl_network = { path = "crates/hsl_network" }
@@ -185,7 +183,6 @@ hulk_widgets = { path = "crates/hulk_widgets" }
 humantime = "2.3.0"
 image = { version = "0.25.5", default-features = false, features = ["jpeg"] }
 image_receiver = { path = "crates/nodes/image_receiver" }
-image_segmenter = { path = "crates/nodes/image_segmenter" }
 indicatif = "0.18.4"
 itertools = "0.14.0"
 json5 = "0.4.1"
@@ -196,15 +193,12 @@ kornia-algebra = { git = "https://github.com/oleflb/kornia-rs", rev = "7659356f1
 lazy_static = "1.5.0"
 led_handler = { path = "crates/nodes/led_handler" }
 levenberg-marquardt = "0.15.0"
-line_detection = { path = "crates/nodes/line_detection" }
 linear_algebra = { path = "crates/linear_algebra" }
 linear_sum_assignment = { path = "crates/linear_sum_assignment" }
 localization-2d = { path = "crates/nodes/localization-2d" }
 localization-3d = { path = "crates/nodes/localization-3d" }
 localization-factrs = { path = "crates/localization-factrs" }
 log = "0.4.25"
-look_around = { path = "crates/nodes/look_around" }
-look_at = { path = "crates/nodes/look_at" }
 low_state_bridge = { path = "crates/nodes/low_state_bridge" }
 mcap = "0.25.0"
 mcap_recorder = { path = "crates/nodes/mcap_recorder" }
@@ -212,6 +206,8 @@ message_filter = { path = "crates/nodes/message_filter" }
 message_handler = { path = "crates/nodes/message_handler" }
 microphone_recorder = { path = "crates/nodes/microphone_recorder" }
 microphones = { path = "crates/microphones" }
+motion = { path = "crates/nodes/motion" }
+motion_inference = { path = "crates/nodes/motion_inference" }
 motor_commands_collector = { path = "crates/nodes/motor_commands_collector" }
 nalgebra = { version = "0.34.2", features = [
   "convert-glam030",
@@ -258,7 +254,6 @@ quote = "1.0.38"
 rand = "0.9.0"
 rand_chacha = { version = "0.9.0", features = ["serde"] }
 rand_distr = "0.5.0"
-ransac = { path = "crates/ransac" }
 regex = "1.11.1"
 repository = { path = "crates/repository" }
 reqwest = { version = "0.12.28", features = ["blocking"] }
@@ -276,7 +271,6 @@ rustfft = "6.4.1"
 safe_pose_checker = { path = "crates/nodes/safe_pose_checker" }
 scenario = { path = "crates/scenario" }
 search_suggestor = { path = "crates/nodes/search_suggestor" }
-segment_filter = { path = "crates/nodes/segment_filter" }
 semver = "1.0.25"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.138"

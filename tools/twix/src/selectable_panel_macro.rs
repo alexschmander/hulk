@@ -69,6 +69,18 @@ macro_rules! impl_selectable_panel {
         }
 
         impl SelectablePanel {
+            pub fn toggle_pause(&mut self) {
+                match self {
+                    $(Self::$name(panel) => <$name as $crate::panel::Panel>::toggle_pause(panel),)*
+                }
+            }
+
+            pub fn focus_topic(&mut self) {
+                match self {
+                    $(Self::$name(panel) => <$name as $crate::panel::Panel>::focus_topic(panel),)*
+                }
+            }
+
             pub fn new(context: $crate::panel::PanelCreationContext<'_>) -> color_eyre::Result<Self> {
                 let saved: $crate::panel::SavedPanel = serde_json::from_value(
                     context

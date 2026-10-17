@@ -8,7 +8,9 @@ Run it from the repository with:
 ./twix /42
 ```
 
-The positional namespace is optional. If provided, it must be an absolute ROS-Z namespace such as `/42`; bare values such as `42` are invalid. If omitted, Twix uses the last stored namespace and then falls back to `/`.
+The positional namespace is optional.
+If provided, it must be an absolute ROS-Z namespace such as `/42`; bare values such as `42` are invalid.
+If omitted, Twix uses the last stored namespace and then falls back to `/`.
 
 To connect through a specific Zenoh router endpoint at startup, pass `--router`:
 
@@ -16,50 +18,118 @@ To connect through a specific Zenoh router endpoint at startup, pass `--router`:
 ./twix /42 --router tcp/127.0.0.1:7447
 ```
 
-To start with one blank workspace instead of restoring the saved session, run Twix with `--clear`. User presets are retained.
+To start with one blank workspace instead of restoring the saved session, run Twix with `--clear`.
+User presets are retained.
 
-Twix checks the local repository version at startup and warns when the running binary is older than the checked-out `tools/twix/Cargo.toml` version. Use `--repository-root <path>` to point that check at a different checkout.
+Twix checks the local repository version at startup and warns when the running binary is older than the checked-out `tools/twix/Cargo.toml` version.
+Use `--repository-root <path>` to point that check at a different checkout.
 
 ## Workspaces and presets
 
-Workspaces are named groups in one shared docking layout. Every tab bar uses the same controls and drag-and-drop behavior.
+Workspaces are named groups in one shared docking layout.
+Every tab bar uses the same controls and drag-and-drop behavior.
 Drag a panel to the outer tab bar, drag an entire workspace into another tab group, or drop beside a group to split the layout.
-Moving panels preserves their live state and unfinished edits. Hover over a tab while dragging to reveal its contents.
+Moving panels preserves their live state and unfinished edits.
+Hover over a tab while dragging to reveal its contents.
 
 Click **+** in any tab bar to search panel types, bundled layouts, and user presets.
-The outer tab bar also offers **Blank workspace**. Search is focused immediately;
-use the arrow keys and Enter to open a layout, or Escape to cancel without creating a tab.
+The outer tab bar also offers **Blank workspace**.
+Search is focused immediately; use the arrow keys and Enter to open a layout, or Escape to cancel without creating a tab.
 Click a tab to switch, or right-click its title to rename it.
 The close icon or middle-click closes a panel or an entire group immediately, discarding its current state.
 Closing the final panel leaves a fresh Text panel.
 
 The **+** picker contains bundled layouts (**Overview**, **Vision**, **Parameters**) and your saved layouts.
 Opening a preset inserts a fresh copy into the chosen tab group, leaving existing panels intact.
-Changes affect only that working copy. Right-click any panel or group and choose **Save as preset…** to save that subtree;
-an existing name changes the action to **Overwrite**. The name editor is focused immediately and stays open while editing.
+Changes affect only that working copy.
+Right-click any panel or group and choose **Save as preset…** to save that subtree; an existing name changes the action to **Overwrite**.
+The name editor is focused immediately and stays open while editing.
 The trash icon beside a user preset in the **+** picker deletes it after confirmation; open copies are unaffected.
 The save dialog selects its name field immediately; type a name and press Enter to save, or Escape to cancel.
 
-Presets include nested groups, names, splits, active tabs, focus, and panel settings. Namespace, router, and theme remain global.
-The whole docking layout is autosaved and restored on restart. Named groups retain their identity when moved or reduced to one child.
+Presets include nested groups, names, splits, active tabs, focus, and panel settings.
+Namespace, router, and theme remain global.
+The whole docking layout is autosaved and restored on restart.
+Named groups retain their identity when moved or reduced to one child.
 Only saved panel settings are restored, not live samples or unfinished parameter value edits.
 Sessions and presets use the same saved layout format.
-An unreadable session opens a blank workspace and displays an error; the original data is preserved
-under `workspace_session_recovery` in eframe storage when the new session is saved.
+An unreadable session opens a blank workspace and displays an error; the original data is preserved under `workspace_session_recovery` in eframe storage when the new session is saved.
 
-User presets are JSON files in `dirs::config_dir()/hulks/twix-ros-z/presets/`
-(`$XDG_CONFIG_HOME/hulks/twix-ros-z/presets/` on Linux, defaulting to `~/.config/hulks/twix-ros-z/presets/`).
-To contribute a bundled preset, save it through the UI, copy the file to `tools/twix/presets/`,
-and register it in `tools/twix/src/presets.rs`. Bundled files are embedded in the binary.
+User presets are JSON files in `dirs::config_dir()/hulks/twix-ros-z/presets/` (`$XDG_CONFIG_HOME/hulks/twix-ros-z/presets/` on Linux, defaulting to `~/.config/hulks/twix-ros-z/presets/`).
+To contribute a bundled preset, save it through the UI, copy the file to `tools/twix/presets/`, and register it in `tools/twix/src/presets.rs`.
+Bundled files are embedded in the binary.
 Validation checks the tree structure before constructing any panels.
 Run `cargo test -p twix --bin twix` for preset validation, session, and headless layout tests.
 These cover bundled presets, file operations, picker dialogs, and layout rendering and round trips.
 
-## Panels and keybindings
+## Panels
 
-ROS-Z Twix currently contains Text, Image, Map, Parameter, and Audio panels. The Text panel observes one ROS-Z topic through `ros-z-debug` and renders the latest dynamic payload as JSON. The Image panel observes `TimeWrapper<ros2::sensor_msgs::image::Image>` topics, defaults to `inputs/left_image`, and renders the latest raw camera frame. The Parameter panel discovers ROS-Z nodes with remote parameter services, shows full snapshots or selected paths as JSON, and writes selected paths to active layers with revision checks. The Audio panel defaults to `audio_spectrums` and displays microphone spectra and a waterfall for the selected channel.
+Choose a panel from the **+** picker.
 
-ROS-Z Twix reads keybindings from `hulks/twix-ros-z.toml`. Legacy Twix keeps using `hulks/twix.toml`, so the two tools do not share incompatible keybinding schemas. The default ROS-Z keybindings are:
+| Panel | Purpose |
+| --- | --- |
+| Text | Display a topic's latest payload or a selected field as JSON. |
+| Image | Display the latest raw camera frame from a `TimeWrapper<ros2::sensor_msgs::image::Image>` topic, defaulting to `inputs/left_image`. |
+| Map | Display field or ground views with selectable layers for robot pose, balls, obstacles, and paths. |
+| Parameter | Discover nodes with remote parameter services, display snapshots or selected paths as JSON, and write selected paths to active layers with revision checks. |
+| Audio | Display microphone spectra and a waterfall for the selected channel, defaulting to `audio_spectrums`. |
+| [Plot](#plot-panel) | Compare numeric topics or fields over time. |
+
+## Topic and field selection
+
+The Text and Plot panels' **Topic** inputs accept both a topic and a nested field path.
+In Text, enter just the topic to display its whole message, or append a field path with a dot and press Enter:
+
+- `detected_objects.inner` selects the wrapped detections.
+- `detected_objects.inner[2].bounding_box.confidence` selects the third detected object's confidence.
+  Arrays and sequences use zero-based indices, and paths can continue through nested structs and arrays.
+- `status.state::Walking.speed` selects a field in an enum variant's payload.
+  The selected value is unavailable while another variant is active.
+- `topic."field.with.dots"` selects a field whose name contains punctuation.
+  Field and variant names can be JSON-quoted.
+
+Topics and fields autocomplete in the same input.
+Array completions include templates such as `detected_objects.inner[...]`.
+Selecting a template highlights `...` so you can replace it with an index, move past the closing bracket, and continue into the element's fields.
+Templates also work when the current array is empty.
+For a topic whose root is an array, use `topic[2]`.
+
+Press **Ctrl+F** to focus and select the topic input in the active Text, Image, Audio, or live Plot panel.
+In Plot, this focuses the first line; adding a line focuses its own input.
+Press **Ctrl+Space** or **Arrow Down** in a completion input to open its dropdown, including when the input is empty.
+Arrow Down also highlights the first suggestion.
+Use the arrow keys to choose a completion and Enter to apply it.
+The input keeps focus with the cursor after the completion, so you can continue typing the path.
+
+Present optionals are unwrapped when continuing through a path.
+Absent optionals and missing sequence elements appear as unavailable values; invalid paths show an error.
+In Text, selecting an optional or enum itself displays its full value.
+Map entries are not traversable in this first version, but Text can display the whole map.
+
+Field completions use the schema from the latest received sample of the selected topic, including fields in absent optionals and inactive enum variants.
+Select a topic first to browse its fields, or enter a full path directly.
+Sequence index suggestions use the current length and show at most 64 indices; larger indices can be entered manually.
+Changing the field does not reconnect the topic subscription.
+Layouts save the topic and field path separately and restore them into the combined input.
+The saved field path keeps its leading separator, for example `.inner[2]` or `[0].x`.
+For topic names containing dots, the longest matching discovered topic takes precedence when separating topic and field path.
+
+## Plot panel
+
+Enter a numeric topic or field in the **Topic** input, for example `detected_objects.inner[2].bounding_box.confidence`.
+Use **Add item** to compare several sources on the same axes, and hover over a line to see its values.
+Each item's style button switches between a line and individual samples, and its info button shows the item's status and any selection problem.
+Gaps in a line mean the value was unavailable, for example an absent optional or a missing array element.
+
+The X axis shows the seconds before the newest sample, and **History** sets the time window.
+**Pause**, or **Space** after clicking the plot, freezes it so you can zoom and pan with the mouse or touchpad.
+**Reset view** or a double-click restores the full time window.
+
+## Keybindings
+
+ROS-Z Twix reads keybindings from `hulks/twix-ros-z.toml`.
+Legacy Twix keeps using `hulks/twix.toml`, so the two tools do not share incompatible keybinding schemas.
+The default ROS-Z keybindings are:
 
 | Key | Action |
 | --- | --- |
@@ -67,6 +137,7 @@ ROS-Z Twix reads keybindings from `hulks/twix-ros-z.toml`. Legacy Twix keeps usi
 | `C-T` | `open_tab` |
 | `C-o` | `focus_namespace` |
 | `C-p` | `focus_panel` |
+| `C-f` | `focus_topic` |
 | `C-h`, `C-Left` | `focus_left` |
 | `C-j`, `C-Down` | `focus_below` |
 | `C-k`, `C-Up` | `focus_above` |
@@ -75,6 +146,7 @@ ROS-Z Twix reads keybindings from `hulks/twix-ros-z.toml`. Legacy Twix keeps usi
 | `C-d` | `duplicate_tab` |
 | `C-S-Backspace` | `close_all` |
 
-Supported action names are `open_split`, `open_tab`, `focus_namespace`, `focus_panel`, `focus_left`, `focus_below`, `focus_above`, `focus_right`, `close_tab`, `duplicate_tab`, `close_all`, and `no_op`.
+Supported action names are `open_split`, `open_tab`, `focus_namespace`, `focus_panel`, `focus_topic`, `focus_left`, `focus_below`, `focus_above`, `focus_right`, `close_tab`, `duplicate_tab`, `close_all`, and `no_op`.
 
-Directional focus selects the nearest visible panel and outlines it. Press `Tab` after moving focus to enter that panel's controls; subsequent `Tab` and `Shift-Tab` presses follow the normal control order.
+Directional focus selects the nearest visible panel and outlines it.
+Press `Tab` after moving focus to enter that panel's controls; subsequent `Tab` and `Shift-Tab` presses follow the normal control order.
