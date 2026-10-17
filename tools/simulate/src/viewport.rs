@@ -18,22 +18,71 @@ use crate::{
     simulation::ControlledRobot,
 };
 
-pub fn setup_scene(
-    mut cameras: Query<(&mut PanOrbitCamera, &mut Transform, &mut Camera), Added<PanOrbitCamera>>,
+#[derive(Resource)]
+pub(super) struct ViewportAspectRatio(f32);
+
+pub(super) fn setup_scene(
+    parameters: Res<crate::parameters::CurrentSimulatorParameters>,
+    aspect_ratio: Option<Res<ViewportAspectRatio>>,
+    mut cameras: Query<
+        (
+            &mut PanOrbitCamera,
+            &mut Transform,
+            &mut Camera,
+            &Projection,
+        ),
+        Added<PanOrbitCamera>,
+    >,
     mut lights: Query<&mut Transform, (With<DirectionalLight>, Without<Camera>)>,
 ) {
-    for (mut orbit, mut transform, mut camera) in &mut cameras {
+    for (mut orbit, mut transform, mut camera, projection) in &mut cameras {
         // egui_bevy uses this component to identify its render target camera.
         // Keep it attached while the simulator owns camera movement.
         orbit.enabled_motion.orbit = false;
         orbit.enabled_motion.pan = false;
         orbit.enabled_motion.zoom = false;
-        *transform = Transform::from_xyz(0.0, 4.0, 11.0).looking_at(Vec3::ZERO, Vec3::Y);
+        if let Projection::Perspective(projection) = projection {
+            *transform = starting_camera(
+                &parameters.field_dimensions,
+                parameters.goal_height,
+                projection.fov,
+                aspect_ratio
+                    .as_ref()
+                    .map_or(projection.aspect_ratio, |aspect| aspect.0),
+            );
+        }
         camera.clear_color = ClearColorConfig::Default;
         for mut light in &mut lights {
             *light = Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y);
         }
     }
+}
+
+/// Frame the pitch and goals at 45 degrees, with space around the edges for labels.
+fn starting_camera(
+    field: &types::field_dimensions::FieldDimensions,
+    goal_height: f32,
+    fov: f32,
+    aspect_ratio: f32,
+) -> Transform {
+    use std::f32::consts::FRAC_1_SQRT_2;
+
+    let half_length = field.length / 2.0 + field.border_strip_width.max(field.goal_depth);
+    let half_width = field.width / 2.0 + field.border_strip_width;
+    let scale = (fov / 2.0).tan();
+    let horizontal_depth = half_length / (scale * aspect_ratio);
+    let mut height = 0.0_f32;
+    for y in [0.0, goal_height + field.goal_post_diameter / 2.0] {
+        for z in [-half_width, half_width] {
+            // At 45 degrees, camera-space up and depth are rotations of field y/z.
+            let vertical_depth = (y - z).abs() * FRAC_1_SQRT_2 / scale;
+            let depth_offset = (y + z) * FRAC_1_SQRT_2;
+            height =
+                height.max((horizontal_depth.max(vertical_depth) + depth_offset) * FRAC_1_SQRT_2);
+        }
+    }
+    height *= 1.1;
+    Transform::from_xyz(0.0, height, height).looking_at(Vec3::ZERO, Vec3::Y)
 }
 
 #[derive(Default)]
@@ -211,6 +260,9 @@ impl Viewport {
         });
     }
     pub fn input(&mut self, ui: &mut Ui, rect: Rect, world: &mut World) {
+        if rect.is_positive() && rect.is_finite() {
+            world.insert_resource(ViewportAspectRatio(rect.width() / rect.height()));
+        }
         if let Some((_, activity)) = &self.captured {
             activity
                 .frame
@@ -760,6 +812,38 @@ mod tests {
         assert_eq!(moved.translation, pose.translation);
         assert!((moved.rotation * Vec3::X).abs_diff_eq(Vec3::Z, 1e-5));
     }
+    #[test]
+    fn starting_camera_frames_every_field_at_45_degrees() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../etc/parameters");
+        for location in ["hsl_small", "hsl_middle", "hsl_large"] {
+            let field = crate::FieldConfiguration::load(&root, location).unwrap();
+            let dimensions = field.dimensions;
+            let half_length =
+                dimensions.length / 2.0 + dimensions.border_strip_width.max(dimensions.goal_depth);
+            let half_width = dimensions.width / 2.0 + dimensions.border_strip_width;
+            for aspect in [0.5, 1.0, 16.0 / 9.0] {
+                let fov = PerspectiveProjection::default().fov;
+                let view = CameraView {
+                    pose: starting_camera(&dimensions, field.goal_height, fov, aspect),
+                    rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0 * aspect, 600.0)),
+                    scale: (fov / 2.0).tan(),
+                };
+                assert!((view.pose.forward().y + std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+                for x in [-half_length, half_length] {
+                    for z in [-half_width, half_width] {
+                        for y in [0.0, field.goal_height + dimensions.goal_post_diameter / 2.0] {
+                            let point = view.project(Vec3::new(x, y, z)).unwrap();
+                            assert!(
+                                view.rect.shrink(8.0).contains(point),
+                                "{location}, aspect {aspect}: corner {point:?} outside the viewport"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn projection_and_picking_use_the_same_viewport_coordinates() {
         let view = CameraView {
