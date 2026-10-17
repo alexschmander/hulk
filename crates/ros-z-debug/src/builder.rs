@@ -34,6 +34,7 @@ impl CachedSubscriptionNodeExt for Arc<Node> {
 /// target node name. Dropping the returned subscription handle stops the receive
 /// task when no other handles remain.
 pub struct CachedSubscriptionBuilder {
+    receipt_clock: Option<Arc<dyn Fn() -> ros_z::time::Time + Send + Sync>>,
     publisher: Option<ros_z::attachment::EndpointGlobalId>,
     node: Arc<Node>,
     topic: TopicReference,
@@ -46,6 +47,7 @@ impl CachedSubscriptionBuilder {
     /// Create a builder for a cached subscription owned by the returned handle.
     pub fn new(node: Arc<Node>, topic: impl Into<String>) -> Result<Self> {
         Ok(Self {
+            receipt_clock: None,
             publisher: None,
             node,
             topic: TopicReference::new(topic.into())?,
@@ -118,6 +120,15 @@ impl CachedSubscriptionBuilder {
         self.policy.retention()
     }
 
+    /// Supply an observer clock, for example a shared simulator clock.
+    pub fn receipt_clock(
+        mut self,
+        clock: Arc<dyn Fn() -> ros_z::time::Time + Send + Sync>,
+    ) -> Self {
+        self.receipt_clock = Some(clock);
+        self
+    }
+
     /// Build the typed subscription and spawn its receive task.
     pub async fn build_typed<T>(self) -> Result<CachedSubscription<T>>
     where
@@ -131,6 +142,7 @@ impl CachedSubscriptionBuilder {
             policy,
             schema_discovery_timeout: _,
             publisher,
+            receipt_clock,
         } = self;
         let resolved_topic = topic.resolve(&target_identity)?;
         let mut subscriber_builder = node.subscriber::<T>(&resolved_topic).qos(subscriber_qos(
@@ -160,6 +172,10 @@ impl CachedSubscriptionBuilder {
             resolved_topic: resolved_topic.clone(),
             type_info: type_info.clone(),
         });
+        let receipt_clock = receipt_clock.unwrap_or_else(|| {
+            let clock = node.clock().clone();
+            Arc::new(move || clock.now())
+        });
         let state = CachedSubscriptionState::spawn(
             CachedSubscriptionStatusSnapshot::with_metadata(
                 CachedSubscriptionStatus::WaitingForFirstSample,
@@ -169,7 +185,7 @@ impl CachedSubscriptionBuilder {
             policy.retention(),
             policy.update_buffer_capacity(),
             move |state, cancellation| {
-                receive_typed_loop(subscriber, state, cancellation, metadata)
+                receive_typed_loop(subscriber, state, cancellation, metadata, receipt_clock)
             },
         );
 
@@ -200,6 +216,7 @@ impl CachedSubscriptionBuilder {
             policy,
             schema_discovery_timeout,
             publisher,
+            receipt_clock,
         } = self;
         let resolved_topic = topic.resolve(&target_identity)?;
         let mut subscriber_builder = node
@@ -229,6 +246,10 @@ impl CachedSubscriptionBuilder {
             resolved_topic: resolved_topic.clone(),
             type_info: type_info.clone(),
         });
+        let receipt_clock = receipt_clock.unwrap_or_else(|| {
+            let clock = node.clock().clone();
+            Arc::new(move || clock.now())
+        });
         let state = CachedSubscriptionState::spawn(
             CachedSubscriptionStatusSnapshot::with_metadata(
                 CachedSubscriptionStatus::WaitingForFirstSample,
@@ -238,7 +259,7 @@ impl CachedSubscriptionBuilder {
             policy.retention(),
             policy.update_buffer_capacity(),
             move |state, cancellation| {
-                receive_dynamic_loop(subscriber, state, cancellation, metadata)
+                receive_dynamic_loop(subscriber, state, cancellation, metadata, receipt_clock)
             },
         );
 
@@ -273,6 +294,7 @@ async fn receive_typed_loop<T>(
     state: std::sync::Weak<CachedSubscriptionState<T>>,
     cancellation: CancellationToken,
     metadata: Arc<SampleMetadata>,
+    receipt_clock: Arc<dyn Fn() -> ros_z::time::Time + Send + Sync>,
 ) where
     T: Message,
     T::Codec: Send + Sync,
@@ -291,6 +313,14 @@ async fn receive_typed_loop<T>(
             Ok(received) => {
                 let publication_id = received.publication_id();
                 state.store_latest(Arc::new(SampleRecord {
+                    receipt_time: receipt_clock(),
+                    wall_receipt_time: ros_z::time::Clock::wallclock().now(),
+                    retained_bytes: if state.accounts_payload_bytes() {
+                        <T::Codec as ros_z::message::WireEncoder>::serialize(&received.message)
+                            .map_or(usize::MAX, |bytes| bytes.len())
+                    } else {
+                        0
+                    },
                     value: received.message,
                     source_time: received.source_time,
                     effective_time: received.source_time,
@@ -313,6 +343,7 @@ async fn receive_dynamic_loop(
     state: std::sync::Weak<CachedSubscriptionState<DynamicPayload>>,
     cancellation: CancellationToken,
     metadata: Arc<SampleMetadata>,
+    receipt_clock: Arc<dyn Fn() -> ros_z::time::Time + Send + Sync>,
 ) {
     loop {
         let received = tokio::select! {
@@ -328,6 +359,14 @@ async fn receive_dynamic_loop(
             Ok(received) => {
                 let publication_id = received.publication_id();
                 state.store_latest(Arc::new(SampleRecord {
+                    receipt_time: receipt_clock(),
+                    wall_receipt_time: ros_z::time::Clock::wallclock().now(),
+                    retained_bytes: if state.accounts_payload_bytes() {
+                        ros_z::dynamic::DynamicCdrCodec::try_serialize_payload(&received.message)
+                            .map_or(usize::MAX, |bytes| bytes.len())
+                    } else {
+                        0
+                    },
                     value: received.message,
                     source_time: received.source_time,
                     effective_time: received.source_time,

@@ -411,3 +411,37 @@ Stopping drains and finalizes the recordings in background workers while the pan
 Recording failures and dropped samples appear in the simulator header and the final status files; they do not stop the match.
 Failure to create a recording destination prevents that robot from starting.
 MCAP replay is topic playback and does not reconstruct a deterministic physics run.
+
+## Agent access through MCP
+
+Run `./simulator-mcp` from an MCP client as a local stdio server. It launches its own headless simulator worker. The launcher sets the MuJoCo library path; the same models and ONNX Runtime setup described above are required. Set `ORT_DYLIB_PATH` when the runtime is not on the loader's search path. Scene rendering requires headless EGL. With ONNX Runtime 1.22.1 on the tested Linux system, also use the `LD_PRELOAD` workaround above to avoid its exit-time destructor crash; worker exit failures are reported by the stop operation.
+
+Example client configuration (replace the repository and library paths):
+
+```json
+{
+  "mcpServers": {
+    "simulator": {
+      "command": "/path/to/hulk/simulator-mcp",
+      "env": { "ORT_DYLIB_PATH": "/path/to/libonnxruntime.so" }
+    }
+  }
+}
+```
+
+Start with `server_info`, then `simulator_start` with a unique `request_id` and configuration such as `{"location":"hsl_middle","profile":"motion_behavior","referee":"automatic"}`. Startup returns an operation; poll `operation_status` for its session and target IDs. The session starts paused. Discover the graph and schemas, establish `rosz_observe` subscriptions, then advance or resume. Use a fresh request ID for each mutation; retries with the same arguments and ID return the original handle.
+
+`rosz_read` gets current state or retained history by target, topic, field path, and time range. Paths use `.field.subfield`, `[index]`, and `::Variant` syntax; empty selects the whole value. Wide integers are decimal strings. Present optional values use `{"$type":"some","value":...}`. The schema tool provides canonical schemas and topic examples. Writes use native ROS-Z publication, parameter transactions, and dynamically discovered services.
+
+Historical reads may explicitly set `allow_recording_fallback: true`. This finalizes a recording segment while simulation continues, then reads immutable segments. Each sample identifies its publication, receipts, and data source. The manifest `recording-segments.json` also lets `mcap-replay` replay the full session. Latest-state reads never use recordings. Observations and finalized recordings remain readable after the worker stops.
+
+`view_render` produces scene snapshots, data plots, simple coordinate maps, or real published images. `video_capture` produces an animated GIF of a future interval: wait for `armed`, then advance the simulator separately. Capture never advances physics. Read returned artifact URIs through MCP `resources/read`. Artifacts default to `logs/simulator-mcp/<id>`; `SIMULATOR_MCP_ARTIFACTS` overrides this directory.
+
+Follow the [developer walkthrough](../../docs/tooling/simulator_mcp_design.md#developer-walkthrough) for a worked session with tool calls. The [design and limitations](../../docs/tooling/simulator_mcp_design.md) and [machine-readable contract](../../docs/tooling/simulator_mcp_contract.schema.json) describe all 22 tools. To validate the real stdio server, including scene rendering:
+
+```sh
+cargo build -p simulate --bin simulator-mcp
+uv run --no-project --with jsonschema python tools/simulate/tests/mcp_smoke.py --render
+```
+
+Use the MuJoCo/ONNX environment above for both commands. Omit `--render` when EGL is unavailable. The test prints its temporary directory containing logs and inspection artifacts.

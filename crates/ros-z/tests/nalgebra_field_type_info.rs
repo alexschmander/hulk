@@ -150,6 +150,8 @@ fn dynamic_value_to_json(value: &DynamicValue) -> Value {
 
 fn test_json_policy() -> DynamicJsonRenderPolicy {
     DynamicJsonRenderPolicy {
+        tag_optionals: false,
+        wide_integers_as_strings: false,
         bytes: ByteRenderPolicy::FullArray,
         non_finite_float: NonFiniteFloatRenderPolicy::Null,
     }

@@ -15,17 +15,22 @@ pub struct TimeIndexedHistory<V> {
 struct TimestampIndex<T> {
     entries: BTreeMap<Time, VecDeque<Arc<T>>>,
     len: usize,
+    bytes: usize,
+    weight: fn(&T) -> usize,
 }
 
 impl<T> TimestampIndex<T> {
-    fn new() -> Self {
+    fn new(weight: fn(&T) -> usize) -> Self {
         Self {
             entries: BTreeMap::new(),
             len: 0,
+            bytes: 0,
+            weight,
         }
     }
 
     fn insert(&mut self, timestamp: Time, value: Arc<T>) {
+        self.bytes = self.bytes.saturating_add((self.weight)(&value));
         self.entries.entry(timestamp).or_default().push_back(value);
         self.len += 1;
     }
@@ -87,10 +92,13 @@ impl<T> TimestampIndex<T> {
     }
 
     fn remove_older_than(&mut self, minimum: Time) {
-        let mut older = std::mem::take(&mut self.entries);
-        let mut retained = older.split_off(&minimum);
-        self.len = retained.values().map(VecDeque::len).sum();
-        std::mem::swap(&mut self.entries, &mut retained);
+        while self
+            .entries
+            .first_key_value()
+            .is_some_and(|(time, _)| *time < minimum)
+        {
+            self.pop_oldest();
+        }
     }
 
     fn pop_oldest(&mut self) -> Option<Arc<T>> {
@@ -98,6 +106,7 @@ impl<T> TimestampIndex<T> {
         let values = self.entries.get_mut(&oldest_timestamp)?;
         let value = values.pop_front()?;
         self.len -= 1;
+        self.bytes = self.bytes.saturating_sub((self.weight)(&value));
 
         if values.is_empty() {
             self.entries.remove(&oldest_timestamp);
@@ -110,13 +119,20 @@ impl<T> TimestampIndex<T> {
 impl<V> TimeIndexedHistory<V> {
     pub fn new(policy: RetentionPolicy) -> Self {
         Self {
-            entries: TimestampIndex::new(),
+            entries: TimestampIndex::new(|record| record.retained_bytes),
             policy,
         }
     }
 
     pub fn insert(&mut self, record: Arc<SampleRecord<V>>) {
-        let source_time = record.effective_time;
+        let source_time = match self.policy {
+            RetentionPolicy::TimeWindow(window) => match window.clock() {
+                crate::RetentionClock::Source => record.effective_time,
+                crate::RetentionClock::Receipt => record.receipt_time,
+                crate::RetentionClock::WallReceipt => record.wall_receipt_time,
+            },
+            _ => record.effective_time,
+        };
         self.entries.insert(source_time, record);
 
         self.evict();
@@ -147,6 +163,15 @@ impl<V> TimeIndexedHistory<V> {
             RetentionPolicy::TimeWindow(window) => (window.duration(), window.max_samples()),
         };
 
+        if let RetentionPolicy::TimeWindow(window) = self.policy
+            && let Some(max_bytes) = window.max_bytes()
+        {
+            while self.entries.bytes > max_bytes.get() {
+                if self.entries.pop_oldest().is_none() {
+                    break;
+                }
+            }
+        }
         let minimum_source_time = newest_source_time.saturating_sub(duration);
         self.entries.remove_older_than(minimum_source_time);
 
@@ -195,6 +220,9 @@ mod tests {
 
     fn record(value: i32, source_time_nanos: i64) -> Arc<SampleRecord<i32>> {
         Arc::new(SampleRecord {
+            receipt_time: Time::zero(),
+            wall_receipt_time: Time::zero(),
+            retained_bytes: 8,
             value,
             source_time: Time::from_nanos(source_time_nanos),
             effective_time: Time::from_nanos(source_time_nanos),
@@ -202,6 +230,40 @@ mod tests {
             publication_id: test_publication_id(),
             metadata: test_metadata(),
         })
+    }
+
+    #[test]
+    fn receipt_window_ignores_regressing_source_clock_and_enforces_byte_limit() {
+        let mut history = TimeIndexedHistory::new(
+            RetentionPolicy::time_window(Duration::from_nanos(10))
+                .unwrap()
+                .with_clock(crate::RetentionClock::Receipt)
+                .with_max_bytes(std::num::NonZeroUsize::new(16).unwrap()),
+        );
+        for (value, source, receipt) in [(1, 1000, 1), (2, -100, 2), (3, 5000, 3)] {
+            let mut sample = record(value, source);
+            Arc::get_mut(&mut sample).unwrap().receipt_time = Time::from_nanos(receipt);
+            history.insert(sample);
+        }
+        assert_eq!(
+            history
+                .get_all()
+                .iter()
+                .map(|s| s.value)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        let mut sample = record(4, -999);
+        Arc::get_mut(&mut sample).unwrap().receipt_time = Time::from_nanos(20);
+        history.insert(sample);
+        assert_eq!(
+            history
+                .get_all()
+                .iter()
+                .map(|s| s.value)
+                .collect::<Vec<_>>(),
+            vec![4]
+        );
     }
 
     #[test]

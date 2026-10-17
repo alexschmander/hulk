@@ -168,6 +168,7 @@ pub(crate) struct CachedSubscriptionState<V> {
     query: Mutex<Option<PlanObservation>>,
     latest: ArcSwapOption<SampleRecord<V>>,
     query_records: Mutex<Option<Vec<Arc<SampleRecord<V>>>>>,
+    max_bytes: Option<usize>,
     history: Option<Mutex<TimeIndexedHistory<V>>>,
     meta: Mutex<CachedSubscriptionMeta>,
     cancellation_token: CancellationToken,
@@ -247,6 +248,10 @@ impl<V> CachedSubscriptionState<V> {
             query: Mutex::new(None),
             latest: ArcSwapOption::empty(),
             query_records: Mutex::new(None),
+            max_bytes: match retention {
+                RetentionPolicy::TimeWindow(window) => window.max_bytes().map(|n| n.get()),
+                _ => None,
+            },
             history,
             meta: Mutex::new(CachedSubscriptionMeta::Open { status, updates }),
             cancellation_token: CancellationToken::new(),
@@ -317,7 +322,20 @@ impl<V> CachedSubscriptionState<V> {
         self.query.lock().take();
     }
 
+    pub(crate) fn accounts_payload_bytes(&self) -> bool {
+        self.max_bytes.is_some()
+    }
+
     pub(crate) fn store_latest(&self, record: Arc<SampleRecord<V>>) {
+        if self
+            .max_bytes
+            .is_some_and(|limit| record.retained_bytes > limit)
+        {
+            self.set_receive_error(CachedSubscriptionStatus::protocol_error(
+                "Sample exceeds retained payload byte budget",
+            ));
+            return;
+        }
         let mut meta = self.meta.lock();
         let CachedSubscriptionMeta::Open { status, updates } = &mut *meta else {
             return;
@@ -528,6 +546,9 @@ mod tests {
         source_time: Time,
     ) -> Arc<SampleRecord<NonClonePayload>> {
         Arc::new(SampleRecord {
+            receipt_time: Time::zero(),
+            wall_receipt_time: Time::zero(),
+            retained_bytes: 8,
             value,
             source_time,
             effective_time: source_time,
@@ -554,6 +575,9 @@ mod tests {
 
     fn dynamic_record_at(value: i32, source_time: Time) -> Arc<SampleRecord<DynamicPayload>> {
         Arc::new(SampleRecord {
+            receipt_time: Time::zero(),
+            wall_receipt_time: Time::zero(),
+            retained_bytes: 8,
             value: dynamic_payload(value),
             source_time,
             effective_time: source_time,
@@ -561,6 +585,34 @@ mod tests {
             publication_id: test_publication_id(),
             metadata: test_metadata(),
         })
+    }
+
+    #[test]
+    fn oversized_sample_is_not_retained_as_latest_or_history() {
+        let state = Arc::new(CachedSubscriptionState::new(
+            CachedSubscriptionStatusSnapshot::new(CachedSubscriptionStatus::WaitingForFirstSample),
+            RetentionPolicy::time_window(Duration::from_secs(10))
+                .unwrap()
+                .with_max_bytes(NonZeroUsize::new(4).unwrap()),
+            NonZeroUsize::new(16).unwrap(),
+        ));
+        state.store_latest(sample_record(NonClonePayload(7)));
+        assert!(state.handle().latest().is_none());
+        assert!(
+            state
+                .handle()
+                .window(Time::zero(), Time::from_nanos(i64::MAX))
+                .is_empty()
+        );
+        assert!(
+            state
+                .handle()
+                .status()
+                .status()
+                .message()
+                .unwrap()
+                .contains("byte budget")
+        );
     }
 
     #[test]

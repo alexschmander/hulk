@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::File,
-    io::{Read, Seek},
+    io::{Read, Seek, SeekFrom},
     path::Path,
     sync::Arc,
 };
@@ -207,7 +207,25 @@ pub struct Recording {
 
 impl Recording {
     pub fn open(path: &Path, namespace: &str) -> Result<Self> {
-        let mut file = File::open(path).wrap_err_with(|| format!("opening {}", path.display()))?;
+        let manifest = if path.is_dir() {
+            Some(path.join("recording-segments.json"))
+        } else if path.extension().is_some_and(|e| e == "json") {
+            Some(path.to_owned())
+        } else if path.file_name().is_some_and(|n| n == "recording.mcap")
+            && path.with_file_name("recording-segments.json").exists()
+        {
+            Some(path.with_file_name("recording-segments.json"))
+        } else {
+            None
+        };
+        let file = if let Some(manifest) = manifest {
+            merge_segments(&manifest)?
+        } else {
+            File::open(path).wrap_err_with(|| format!("opening {}", path.display()))?
+        };
+        Self::open_file(file, namespace)
+    }
+    fn open_file(mut file: File, namespace: &str) -> Result<Self> {
         let summary = read_summary(&mut file)?;
         let stats = summary
             .stats
@@ -368,4 +386,66 @@ mod tests {
         #[cfg(unix)]
         assert_eq!((&recording.file).stream_position().unwrap(), before);
     }
+}
+
+// Checkpoint segments have independent channel IDs. Normalize them into an anonymous,
+// indexed file for the existing seek/cache implementation; original segments stay immutable.
+fn merge_segments(manifest: &Path) -> Result<File> {
+    let descriptor: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest)?)?;
+    let files = descriptor["files"]
+        .as_array()
+        .ok_or_eyre("Invalid recording manifest")?;
+    let mut merged = tempfile::tempfile()?;
+    {
+        let mut writer = mcap::WriteOptions::new()
+            .compression(Some(mcap::Compression::Lz4))
+            .create(&mut merged)?;
+        for path in files {
+            let path = manifest
+                .parent()
+                .unwrap()
+                .join(path.as_str().ok_or_eyre("Invalid segment path")?);
+            let file = File::open(path)?;
+            // Only finalized, immutable files are published in the manifest.
+            let mapped = unsafe { memmap2::Mmap::map(&file)? };
+            let mut channels = BTreeMap::new();
+            for message in mcap::MessageStream::new(&mapped)? {
+                let message = message?;
+                if message.channel.topic == "_recording/receipt" {
+                    continue;
+                }
+                let channel_id = if let Some(id) = channels.get(&message.channel.id) {
+                    *id
+                } else {
+                    let schema = message
+                        .channel
+                        .schema
+                        .as_ref()
+                        .ok_or_eyre("Missing segment schema")?;
+                    let schema_id =
+                        writer.add_schema(&schema.name, &schema.encoding, &schema.data)?;
+                    let id = writer.add_channel(
+                        schema_id,
+                        &message.channel.topic,
+                        &message.channel.message_encoding,
+                        &message.channel.metadata,
+                    )?;
+                    channels.insert(message.channel.id, id);
+                    id
+                };
+                writer.write_to_known_channel(
+                    &MessageHeader {
+                        channel_id,
+                        sequence: message.sequence,
+                        log_time: message.log_time,
+                        publish_time: message.publish_time,
+                    },
+                    &message.data,
+                )?;
+            }
+        }
+        writer.finish()?;
+    }
+    merged.seek(SeekFrom::Start(0))?;
+    Ok(merged)
 }
