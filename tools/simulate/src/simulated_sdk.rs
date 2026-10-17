@@ -175,11 +175,11 @@ fn requested_mode(request: &RpcReqMsg) -> Option<RobotMode> {
 const DAMPING_KD: f32 = 1.0;
 const PREPARE_SECONDS: f64 = 2.0;
 // Serial order: head, left arm, right arm, left leg, right leg. Arm targets match
-// the FastGetUp policy offsets; the ankle targets keep the simulated feet level.
+// fall detection's Prepare readiness pose; ankle targets keep the simulated feet level.
 // The floating base is never pinned or teleported.
 pub(crate) const PREPARE_POSE: [f32; 22] = [
-    0.0, 0.0, 0.0, -1.4, -0.4, 0.0, 0.0, 1.4, 0.4, 0.0, -0.2, 0.0, 0.0, 0.4, -0.2, 0.0, -0.2, 0.0,
-    0.0, 0.4, -0.2, 0.0,
+    0.0, 0.0, 0.2, -1.45, 0.0, -0.5, 0.2, 1.45, 0.0, 0.5, -0.2, 0.0, 0.0, 0.4, -0.2, 0.0, -0.2,
+    0.0, 0.0, 0.4, -0.2, 0.0,
 ];
 
 #[derive(Default)]
@@ -583,7 +583,11 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 commands
-                    .publish(&hardware_interface::LedCommand::SetParam { r: 1, g: 2, b: 3 })
+                    .publish(&hardware_interface::LedCommand::Set(LedColor {
+                        r: 1,
+                        g: 2,
+                        b: 3,
+                    }))
                     .await
                     .unwrap();
                 if tokio::time::timeout(
@@ -783,23 +787,6 @@ mod tests {
             .bind_parameter_as::<fall_detection::Parameters>("fall_detection")
             .unwrap();
         let parameters = parameters.snapshot();
-        let inference_node = context
-            .create_node("policy_parameters")
-            .build()
-            .await
-            .unwrap();
-        let inference = inference_node
-            .bind_parameter_as::<motion_inference::config::Parameters>("motion_inference")
-            .unwrap();
-        let offsets: Vec<_> = motion_inference::config::Policy::FastGetUp
-            .offset(inference.snapshot().typed())
-            .into_iter()
-            .collect();
-        assert_eq!(
-            &PREPARE_POSE[2..10],
-            &offsets[2..10],
-            "Prepare arms must match FastGetUp offsets"
-        );
         let readiness: Vec<_> = parameters
             .typed()
             .standing_up
@@ -808,8 +795,8 @@ mod tests {
             .collect();
         assert_eq!(
             &readiness[..8],
-            &offsets[2..10],
-            "fall readiness must accept the same arm pose"
+            &PREPARE_POSE[2..10],
+            "fall readiness must accept the simulator Prepare arm pose"
         );
         for side in [-1.0, 1.0] {
             let mut data = model();
@@ -820,7 +807,7 @@ mod tests {
                 side * std::f64::consts::FRAC_1_SQRT_2,
                 0.0,
             ]);
-            // Zero arm positions start outside the FastGetUp readiness pose.
+            // Zero arm positions start outside the configured readiness pose.
             data.forward();
             let robot = RobotBinding::new(&data, "").unwrap();
             let mut controller = Controller::default();
@@ -844,7 +831,7 @@ mod tests {
             assert_eq!(
                 last.unwrap().posture,
                 types::fall_detection::Posture::Fallen {
-                    ready_for_standup: true
+                    is_ready_for_standup: true
                 },
                 "Prepare must reach the configured readiness pose; observation: {:?}",
                 fall_detection::Observation::from_low_state(
