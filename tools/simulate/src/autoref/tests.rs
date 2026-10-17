@@ -324,6 +324,175 @@ fn indirect_goal_and_second_touch_restrictions_survive_ball_free() {
     }
 }
 #[test]
+fn local_game_stuck_starts_when_a_player_reaches_the_ball() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    step(&mut e, &s, 10.0);
+    s.robots[0].position = [0.75, 0.0, 0.65];
+    step(&mut e, &s, 12.0); // Near enough for global stuck, outside local proximity.
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::NoPenalty
+    );
+    s.robots[0].position[0] = 0.65;
+    step(&mut e, &s, 0.01);
+    step(&mut e, &s, 9.9);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::NoPenalty,
+        "time spent approaching the ball must not count as local game stuck"
+    );
+    step(&mut e, &s, 0.2);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::LocalGameStuck
+    );
+}
+
+#[test]
+fn local_game_stuck_gives_each_approaching_robot_time_to_play() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    step(&mut e, &s, 10.0); // The kickoff ends while everyone is far from the ball.
+    s.robots[0].position = [0.3, 0.0, 0.65];
+    step(&mut e, &s, 0.01);
+    step(&mut e, &s, 10.1);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::LocalGameStuck
+    );
+
+    // Removal leaves the ball stationary while the next player approaches.
+    s.robots[0].position = [-3.0, 3.3, 0.65];
+    s.robots[0].penalized = true;
+    step(&mut e, &s, 0.1);
+    step(&mut e, &s, 12.0);
+    s.robots[1].position = [0.65, 0.0, 0.65];
+    s.robots[1].speed = 0.2;
+    step(&mut e, &s, 0.01);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(2)].penalty,
+        Penalty::NoPenalty,
+        "a newly approaching player inherited the stationary ball's old timer"
+    );
+    s.robots[1].speed = 0.0;
+    step(&mut e, &s, 9.9);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(2)].penalty,
+        Penalty::NoPenalty
+    );
+    step(&mut e, &s, 0.2);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(2)].penalty,
+        Penalty::LocalGameStuck
+    );
+}
+
+#[test]
+fn local_game_stuck_does_not_penalize_a_new_closer_player() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    step(&mut e, &s, 10.0);
+    s.robots[0].position = [0.65, 0.0, 0.65];
+    step(&mut e, &s, 0.01);
+    step(&mut e, &s, 9.9);
+    s.robots[1].position = [0.3, 0.0, 0.65];
+    step(&mut e, &s, 0.2);
+    let game = e.core.get_game(false);
+    assert_eq!(
+        game.teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::LocalGameStuck
+    );
+    assert_eq!(
+        game.teams[Side::Home][PlayerNumber::new(2)].penalty,
+        Penalty::NoPenalty
+    );
+}
+
+#[test]
+fn local_game_stuck_resets_on_departure_and_ball_movement() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    step(&mut e, &s, 10.0);
+    s.robots[0].position = [0.65, 0.0, 0.65];
+    step(&mut e, &s, 0.01);
+    step(&mut e, &s, 6.0);
+    s.robots[0].position[0] = 0.75;
+    step(&mut e, &s, 0.1);
+    s.robots[0].position[0] = 0.65;
+    step(&mut e, &s, 0.1);
+    step(&mut e, &s, 6.0);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::NoPenalty
+    );
+    move_ball(&mut s, [0.11, 0.0, 0.11]);
+    step(&mut e, &s, 0.1);
+    step(&mut e, &s, 9.9);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::NoPenalty
+    );
+    step(&mut e, &s, 0.2);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::LocalGameStuck
+    );
+}
+
+#[test]
+fn local_game_stuck_ignores_stopped_and_paused_time() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    step(&mut e, &s, 10.0);
+    s.robots[0].position = [0.3, 0.0, 0.65];
+    step(&mut e, &s, 0.01);
+    step(&mut e, &s, 6.0);
+    for _ in 0..10 {
+        step(&mut e, &s, 0.0);
+    }
+    e.call(Call::StopPlay).unwrap();
+    step(&mut e, &s, 0.1);
+    step(&mut e, &s, 60.0);
+    e.call(Call::ResumePlay).unwrap();
+    step(&mut e, &s, 0.1);
+    step(&mut e, &s, 3.9);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::NoPenalty
+    );
+    step(&mut e, &s, 0.2);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::LocalGameStuck
+    );
+}
+
+#[test]
+fn local_game_stuck_starts_fresh_when_automatic_calls_are_enabled() {
+    let (mut e, mut s) = fixture();
+    playing(&mut e, &s);
+    step(&mut e, &s, 10.0);
+    s.robots[0].position = [0.3, 0.0, 0.65];
+    step(&mut e, &s, 0.01);
+    step(&mut e, &s, 6.0);
+    e.enabled = false;
+    step(&mut e, &s, 60.0);
+    e.enabled = true;
+    step(&mut e, &s, 0.01);
+    step(&mut e, &s, 9.9);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::NoPenalty
+    );
+    step(&mut e, &s, 0.2);
+    assert_eq!(
+        e.core.get_game(false).teams[Side::Home][PlayerNumber::new(1)].penalty,
+        Penalty::LocalGameStuck
+    );
+}
+
+#[test]
 fn timeout_and_global_stuck_use_the_core_restart_lifecycle() {
     let (mut e, mut s) = fixture();
     playing(&mut e, &s);
