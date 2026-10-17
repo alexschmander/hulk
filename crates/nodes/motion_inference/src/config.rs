@@ -108,6 +108,9 @@ pub struct KickParameters {
     pub ball_position_scale: f32,
     pub ball_velocity_scale: f32,
     pub target_speed_scale: f32,
+    /// Extend the strike along its aim; zero preserves the uncalibrated policy.
+    #[serde(default)]
+    pub follow_through_distance: f32,
     pub shift_direction_degrees: [f32; 2],
     pub shift_foot_distance: [f32; 2],
     pub shift_ball_distance: [f32; 2],
@@ -175,6 +178,11 @@ impl Parameters {
         );
         let locomotion = &self.locomotion;
         let kick = &self.kick;
+        ensure!(
+            kick.follow_through_distance.is_finite()
+                && (0.0..=0.15).contains(&kick.follow_through_distance),
+            "kick.follow_through_distance must be in [0, 0.15] metres"
+        );
         let get_up = &self.get_up;
         ensure!(
             get_up.progress_rate.is_finite() && get_up.progress_rate > 0.0,

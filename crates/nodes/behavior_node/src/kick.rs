@@ -4,6 +4,7 @@ use types::{
     behavior_tree::Status,
     motion_command::{BodyMotion, HeadMotion, ImageRegion, MotionCommand},
     motion_type::MotionType,
+    parameters::KickingParameters,
 };
 
 use crate::{
@@ -56,6 +57,7 @@ pub fn kick(blackboard: &mut Blackboard) -> Status {
             kick_direction: Default::default(),
             strong: false,
         });
+        use_kick(blackboard, false);
         if blackboard.last_motion_type == Some(MotionType::Kick) {
             use_last_kick_settings(blackboard);
         }
@@ -127,7 +129,7 @@ pub fn is_target_in_strong_kick_range(blackboard: &mut Blackboard) -> bool {
 }
 
 pub fn allow_strong_kicks(blackboard: &mut Blackboard) -> bool {
-    blackboard.parameters.kicking.allow_strong_kicks
+    blackboard.parameters.kicking.allow_strong_kicks && !blackboard.parameters.kicking.soft
 }
 
 pub fn use_last_kick_settings(blackboard: &mut Blackboard) -> Status {
@@ -157,13 +159,34 @@ pub fn use_last_kick_settings(blackboard: &mut Blackboard) -> Status {
 }
 
 pub fn use_kick(blackboard: &mut Blackboard, strong: bool) -> Status {
-    if let Some(BodyMotion::Kick {
-        strong: motion_strong,
-        ..
-    }) = blackboard.body_motion.as_mut()
-    {
-        *motion_strong = strong;
+    blackboard
+        .body_motion
+        .as_mut()
+        .map_or(Status::Failure, |motion| {
+            configure_kick(motion, &blackboard.parameters.kicking, strong)
+        })
+}
 
+fn configure_kick(motion: &mut BodyMotion, parameters: &KickingParameters, strong: bool) -> Status {
+    if let BodyMotion::Kick {
+        strong: motion_strong,
+        soft,
+        quick,
+        target_speed,
+        ..
+    } = motion
+    {
+        // Scaled maximum-speed requests were stronger than the model's strong flag.
+        *motion_strong = false;
+        *soft = !strong;
+        *quick = parameters.quick && !*soft;
+        *target_speed = if strong {
+            parameters.strong_target_speed
+        } else if parameters.soft {
+            parameters.soft_target_speed
+        } else {
+            parameters.target_speed
+        };
         return Status::Success;
     }
     Status::Failure
@@ -268,4 +291,51 @@ fn kick_ball_position_in_ground(
                 .as_ref()
                 .map(|ball| ground_to_field.inverse() * ball.position)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selecting_a_kick_replaces_all_previous_flags_and_speed() {
+        let mut motion = BodyMotion::Kick {
+            ball_position: point![0.5, 0.1],
+            ball_velocity: Vector2::zeros(),
+            kick_direction: Orientation2::new(0.0),
+            target_speed: 0.0,
+            soft: false,
+            strong: true,
+            quick: true,
+        };
+        let mut parameters = KickingParameters {
+            quick: true,
+            ..Default::default()
+        };
+        for (short, strong, expected_soft, expected_speed) in [
+            (false, false, true, 0.3),
+            (false, true, false, 3.4),
+            (true, false, true, 0.1),
+        ] {
+            parameters.soft = short;
+            assert_eq!(
+                configure_kick(&mut motion, &parameters, strong),
+                Status::Success
+            );
+            let BodyMotion::Kick {
+                soft,
+                strong: maximum,
+                quick,
+                target_speed,
+                ..
+            } = motion
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                (soft, maximum, quick, target_speed),
+                (expected_soft, false, !expected_soft, expected_speed)
+            );
+        }
+    }
 }

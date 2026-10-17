@@ -32,6 +32,7 @@
     ball_position_scale: 0.1,
     ball_velocity_scale: 0.1,
     target_speed_scale: 0.1,
+    follow_through_distance: 0.12,
     shift_direction_degrees: [80.0, 100.0],
     shift_foot_distance: [0.16, 0.22],
     shift_ball_distance: [0.06, 0.15],

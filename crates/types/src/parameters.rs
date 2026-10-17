@@ -392,6 +392,10 @@ pub struct KickingParameters {
     pub quick: bool,
     /// Desired outgoing ball speed in m/s.
     pub target_speed: f32,
+    #[serde(default = "default_soft_target_speed")]
+    pub soft_target_speed: f32,
+    #[serde(default = "default_strong_target_speed")]
+    pub strong_target_speed: f32,
     pub allow_strong_kicks: bool,
     /// Ball distance at the centre of the walk-to-kick handoff band, in metres.
     pub kick_activation_distance: f32,
@@ -410,7 +414,9 @@ impl Default for KickingParameters {
         Self {
             soft: false,
             quick: false,
-            target_speed: 3.4,
+            target_speed: 0.3,
+            soft_target_speed: default_soft_target_speed(),
+            strong_target_speed: default_strong_target_speed(),
             allow_strong_kicks: false,
             kick_activation_distance: 0.0,
             kick_activation_hysteresis: 0.0,
@@ -419,6 +425,14 @@ impl Default for KickingParameters {
             minimum_interception_forward_distance: 0.0,
         }
     }
+}
+
+fn default_soft_target_speed() -> f32 {
+    0.1
+}
+
+fn default_strong_target_speed() -> f32 {
+    3.4
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ros_z::Message)]

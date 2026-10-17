@@ -108,9 +108,10 @@ impl Locomotion {
         sensor: &SensorFrame,
         request: KickRequest,
         joints: &JointLimits,
+        soft: bool,
     ) -> (Point2<Ground>, Point2<Ground>) {
         self.record_history(sensor, joints);
-        let ball = kick::shifted_ball(sensor, request, &self.parameters.kick);
+        let ball = kick::shifted_ball(sensor, request, &self.parameters.kick, soft);
         let previous = self
             .previous_ball
             .filter(|previous| (ball - *previous).norm() <= self.parameters.kick.ball_jump_distance)
@@ -153,7 +154,12 @@ impl Locomotion {
             // RLWalkPhase::calcJoints retains these targets before downstream composition/clipping.
             self.previous_target[joint] = position[joint];
         }
-        let limit = self.parameters.locomotion.frequency_offset_limit;
+        // Kick observations retain the action before physical gait clipping.
+        let limit = if policy == Policy::Walk {
+            self.parameters.locomotion.frequency_offset_limit
+        } else {
+            action_limit
+        };
         self.frequency_offset = actions[LEGS.len()].clamp(-limit, limit);
         position_targets(position, kp, kd)
     }

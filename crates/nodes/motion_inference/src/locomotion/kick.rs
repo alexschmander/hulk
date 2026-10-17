@@ -1,7 +1,7 @@
 use std::f32::consts::{PI, TAU};
 use types::joint_limits::JointLimits;
 
-use ::kinematics::joints::Joints;
+use ::kinematics::{forward, joints::Joints};
 use coordinate_systems::{Ground, Robot};
 use linear_algebra::{Orientation2, Point2, Vector3};
 use nalgebra::{UnitComplex, UnitQuaternion};
@@ -128,15 +128,26 @@ pub(super) fn shifted_ball(
     sensor: &SensorFrame,
     kick: KickRequest,
     parameters: &KickParameters,
+    soft: bool,
 ) -> Point2<Ground> {
     let direction = kick.direction.angle();
     let to_kick_direction = UnitComplex::new(-direction);
     let (roll, pitch, _) = sensor.rotation().euler_angles();
     let level = UnitQuaternion::from_euler_angles(roll, pitch, 0.0);
-    let left =
-        to_kick_direction * (level * leg(&sensor.position.left_leg, true).0.inner.coords).xy();
-    let right =
-        to_kick_direction * (level * leg(&sensor.position.right_leg, false).0.inner.coords).xy();
+    let sole_midpoint = (forward::left_sole_to_robot(&sensor.position.left_leg)
+        .translation()
+        .inner
+        .coords
+        + forward::right_sole_to_robot(&sensor.position.right_leg)
+            .translation()
+            .inner
+            .coords)
+        * 0.5;
+    let origin = (level * sole_midpoint).xy();
+    let left = to_kick_direction
+        * ((level * leg(&sensor.position.left_leg, true).0.inner.coords).xy() - origin);
+    let right = to_kick_direction
+        * ((level * leg(&sensor.position.right_leg, false).0.inner.coords).xy() - origin);
     let mut ball = to_kick_direction * kick.ball_position.inner.coords;
     let angle_weight = 1.0
         - ramp(
@@ -154,6 +165,16 @@ pub(super) fn shifted_ball(
         * (ramp(ball.y - left.y, minimum, maximum)
             - (1.0 - ramp(ball.y - right.y, -maximum, -minimum)));
     ball.y += angle_weight * foot_weight * shift;
+    // Calibration preserves the 0.1 m/s soft touch and fully extends a 0.3 m/s pass.
+    let strength = if soft {
+        ramp(kick.target_speed, 0.1, 0.3)
+    } else {
+        1.0
+    };
+    // Incoming balls already close the gap; full extension worsened their aim.
+    let incoming_speed = -(to_kick_direction * kick.ball_velocity.inner).x;
+    ball.x +=
+        parameters.follow_through_distance * strength * (1.0 - ramp(incoming_speed, 0.0, 0.05));
     Point2::wrap(
         (UnitComplex::new(direction) * ball)
             .cap_magnitude(parameters.ball_position_limit)

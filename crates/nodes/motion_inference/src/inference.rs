@@ -304,11 +304,12 @@ impl Execution {
         match &mut self.state {
             State::Locomotion(state) => match request {
                 InferenceCommand::Kick(KickCommand { soft, request }) => {
-                    let ball_positions = state.record_kick_sample(sensor, request, joints);
+                    let ball_positions = state.record_kick_sample(sensor, request, joints, soft);
                     kick::Observation::new(
                         state,
                         sensor,
-                        &velocity.walking,
+                        // This existing estimator is raw finite-difference velocity.
+                        &velocity.get_up,
                         standing,
                         request,
                         soft,
@@ -391,4 +392,160 @@ pub fn joints_are_finite(joints: &Joints<MotorCommand>) -> bool {
             ]
         })
         .all(f32::is_finite)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use linear_algebra::{Orientation2, Vector3, point, vector};
+
+    fn fixture() -> (Parameters, SensorFrame, JointLimits) {
+        let parameters: Parameters = serde_json::from_value(
+            json5::from_str::<serde_json::Value>(include_str!(
+                "../../../../etc/parameters/base/motion_inference.json5"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let position = Policy::Kick.offset(&parameters);
+        let sensor = SensorFrame {
+            timestamp: Time::zero(),
+            position,
+            velocity: Joints::fill(10.0),
+            orientation: nalgebra::Quaternion::identity(),
+            gyro: Vector3::zeros(),
+            last_commanded_position: position,
+        };
+        let joints = JointLimits {
+            position: Joints::fill([-3.0, 3.0]),
+            maximum_torque: Joints::fill(50.0),
+        };
+        (parameters, sensor, joints)
+    }
+
+    #[test]
+    fn calibrated_kick_tensor_preserves_training_inputs_and_ball_history() {
+        let (mut parameters, sensor, joints) = fixture();
+        parameters.kick.shift_distance = 0.0;
+        let parameters = Arc::new(parameters);
+        let mut velocity = VelocityEstimator::default();
+        velocity.walking = Joints::fill(1.0);
+        velocity.get_up = Joints::fill(10.0);
+        for (angle, soft, speed, incoming, extension) in [
+            (0.0, false, 3.4, false, 0.12),
+            (std::f32::consts::FRAC_PI_4, false, 3.4, false, 0.12),
+            (-std::f32::consts::FRAC_PI_2, true, 0.3, false, 0.12),
+            (0.0, true, 0.1, false, 0.0),
+            (0.0, true, 0.2, false, 0.06),
+            (0.0, false, 3.4, true, 0.0),
+            (0.0, true, 0.3, true, 0.0),
+        ] {
+            let mut request = KickRequest {
+                ball_position: point![0.4, 0.05],
+                ball_velocity: vector![if incoming { -0.3 } else { 0.2 }, 0.0],
+                direction: Orientation2::new(angle),
+                target_speed: speed,
+                strong: false,
+                quick: false,
+            };
+            let expected =
+                request.ball_position + vector![angle.cos() * extension, angle.sin() * extension];
+            let policy = if soft { Policy::SoftKick } else { Policy::Kick };
+            let mut state =
+                Execution::new(policy, &sensor, Time::zero(), parameters.clone(), &joints);
+            let State::Locomotion(locomotion) = &mut state.state else {
+                unreachable!()
+            };
+            let mut actions = [0.0; 13];
+            actions[12] = 1.25;
+            locomotion.decode(policy, &actions, &sensor);
+            locomotion.advance(0.02, false);
+            assert!((locomotion.phase - 0.04).abs() < 1e-6);
+            let command = |request| InferenceCommand::Kick(KickCommand { soft, request });
+            let first = state.prepare_input(
+                Time::zero(),
+                &sensor,
+                &velocity,
+                command(request),
+                false,
+                &joints,
+            );
+            assert_eq!(first[23], 1.0, "raw joint velocity, scaled once");
+            assert_eq!(first[47], 1.25, "frequency feedback precedes gait clipping");
+            assert!((first[56] - speed * 0.1).abs() < 1e-6);
+            assert!((first[6] - expected.x() * 0.1).abs() < 1e-6);
+            assert!((first[7] - expected.y() * 0.1).abs() < 1e-6);
+            request.ball_position += vector![0.01, 0.0];
+            let second = state.prepare_input(
+                Time::zero(),
+                &sensor,
+                &velocity,
+                command(request),
+                false,
+                &joints,
+            );
+            assert_eq!(&second[57..59], &first[6..8]);
+            assert!((second[6] - first[6] - 0.001).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn foot_bias_is_invariant_to_translating_both_soles_relative_to_the_torso() {
+        let (parameters, mut sensor, joints) = fixture();
+        let parameters = Arc::new(parameters);
+        let command = InferenceCommand::Kick(KickCommand {
+            soft: false,
+            request: KickRequest {
+                ball_position: point![0.5, 0.08],
+                ball_velocity: Vector2::zeros(),
+                direction: Orientation2::new(0.0),
+                target_speed: 3.4,
+                strong: false,
+                quick: false,
+            },
+        });
+        let input = |sensor: &SensorFrame| {
+            Execution::new(
+                Policy::Kick,
+                sensor,
+                Time::zero(),
+                parameters.clone(),
+                &joints,
+            )
+            .prepare_input(
+                Time::zero(),
+                sensor,
+                &VelocityEstimator::default(),
+                command,
+                false,
+                &joints,
+            )
+        };
+        let before = input(&sensor);
+        sensor.position.left_leg.hip_roll = 0.25;
+        sensor.position.right_leg.hip_roll = 0.25;
+        sensor.position.left_leg.ankle_down = -0.25;
+        sensor.position.right_leg.ankle_down = -0.25;
+        let after = input(&sensor);
+        assert!((before[6] - after[6]).abs() < 1e-6);
+        assert!((before[7] - after[7]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn follow_through_distance_is_bounded_and_optional_in_old_configs() {
+        let (mut parameters, _, _) = fixture();
+        parameters.validate().unwrap();
+        for distance in [-0.01, 0.16, f32::NAN] {
+            parameters.kick.follow_through_distance = distance;
+            assert!(parameters.validate().is_err());
+        }
+        let mut old = serde_json::to_value(parameters).unwrap();
+        old["kick"]
+            .as_object_mut()
+            .unwrap()
+            .remove("follow_through_distance");
+        let old: Parameters = serde_json::from_value(old).unwrap();
+        assert_eq!(old.kick.follow_through_distance, 0.0);
+        old.validate().unwrap();
+    }
 }
