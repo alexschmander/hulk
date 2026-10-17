@@ -36,6 +36,15 @@ add_executable(bhuman-motion-worker "${CMAKE_CURRENT_LIST_DIR}/main.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/MotionInputs.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/CognitionInputs.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/TeamTransport.cpp" "${generated}/protocol_generated.h")
+# Upstream forces mold for desktop executables; the adapter also supports the system linker.
+include(CheckLinkerFlag)
+check_linker_flag(CXX "-fuse-ld=mold" BHUMAN_HAS_MOLD)
+if(NOT BHUMAN_HAS_MOLD)
+  get_target_property(worker_link_options bhuman-motion-worker LINK_OPTIONS)
+  list(REMOVE_ITEM worker_link_options "-fuse-ld=mold")
+  set_property(TARGET bhuman-motion-worker PROPERTY LINK_OPTIONS "${worker_link_options}")
+  message(STATUS "mold is unavailable; using the compiler's default linker for B-Human")
+endif()
 set_property(TARGET bhuman-motion-worker PROPERTY CXX_COMPILER_LAUNCHER "")
 target_compile_features(bhuman-motion-worker PRIVATE cxx_std_20)
 target_compile_definitions(bhuman-motion-worker PRIVATE LINUX BHUMAN_REVISION="${BHUMAN_REVISION}")
