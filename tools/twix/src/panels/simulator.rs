@@ -323,9 +323,9 @@ mod enabled {
                             &count.to_string(),
                         )
                         .on_hover_text(format!(
-                                "Start with {count} {}",
-                                if count == 1 { "robot" } else { "robots" }
-                            ));
+                            "Start with {count} {}",
+                            if count == 1 { "robot" } else { "robots" }
+                        ));
                         if response.clicked() {
                             self.settings.robot_count = count;
                         }
@@ -336,7 +336,13 @@ mod enabled {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for count in 0..=5 {
-                        if widgets::segment(ui, self.settings.opponent_count == count, &count.to_string()).clicked() {
+                        if widgets::segment(
+                            ui,
+                            self.settings.opponent_count == count,
+                            &count.to_string(),
+                        )
+                        .clicked()
+                        {
                             self.settings.opponent_count = count;
                         }
                     }
@@ -344,8 +350,13 @@ mod enabled {
                 ui.add_space(10.0);
                 ui.label(RichText::new("Referee").strong());
                 ui.horizontal(|ui| {
-                    for (mode,label) in [(simulate::RefereeMode::External,"External GameController"),(simulate::RefereeMode::Automatic,"Auto referee")] {
-                        if widgets::segment(ui,self.settings.referee == mode,label).clicked() { self.settings.referee = mode; }
+                    for (mode, label) in [
+                        (simulate::RefereeMode::External, "External GameController"),
+                        (simulate::RefereeMode::Automatic, "Auto referee"),
+                    ] {
+                        if widgets::segment(ui, self.settings.referee == mode, label).clicked() {
+                            self.settings.referee = mode;
+                        }
                     }
                 });
                 if self.settings.referee == simulate::RefereeMode::Automatic {

@@ -6,75 +6,90 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-game_controller_core = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "a6cc98bb9f7c0f03912134b333194af3fa880798" }
-game_controller_autoreferee = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "a6cc98bb9f7c0f03912134b333194af3fa880798" }
-game_controller_msgs = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "a6cc98bb9f7c0f03912134b333194af3fa880798" }
-bytes = "1"
-enum-map = "2.7"
-serde_yaml = "0.9"
-json5 = { workspace = true }
-rand = { workspace = true }
-rand_distr = { workspace = true }
 ball_filter = { workspace = true }
-camera_matrix_calculator = { workspace = true }
-controller_handler = { workspace = true }
-field_mark_association = { workspace = true }
-geometry = { workspace = true }
-ground_provider = { workspace = true }
-kinematics_provider = { workspace = true }
-led_handler = { workspace = true }
-localization-2d = { workspace = true }
-localization-3d = { workspace = true }
-low_state_bridge = { workspace = true }
-obstacle_filter = { workspace = true }
-odometry = { workspace = true }
-ros2 = { workspace = true }
-ros-z-streams = { workspace = true }
-search_suggestor = { workspace = true }
-support_foot_estimator = { workspace = true }
-visual_kick_ball_selector = { workspace = true }
-whistle_filter = { workspace = true }
-world_to_field_provider = { workspace = true }
 ball_state_composer = { workspace = true }
+base64 = "0.22"
 behavior_node = { workspace = true }
-bevy = { workspace = true, features = ["3d_bevy_render", "png", "mesh_picking"] }
+bevy = { workspace = true, features = [
+  "3d_bevy_render",
+  "png",
+  "mesh_picking",
+] }
 booster = { workspace = true }
 button_event_bridge = { workspace = true }
 button_event_handler = { workspace = true }
+bytes = "1"
+camera_matrix_calculator = { workspace = true }
 cdr = { workspace = true }
 color-eyre = { workspace = true }
+controller_handler = { workspace = true }
 coordinate_systems = { workspace = true }
 eframe = { workspace = true }
 egui_bevy = { workspace = true }
 egui_material_icons = { workspace = true }
+enum-map = "2.7"
 fall_detection = { workspace = true }
+field_mark_association = { workspace = true }
+font8x8 = "0.3"
+game_controller_autoreferee = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "a6cc98bb9f7c0f03912134b333194af3fa880798" }
+game_controller_core = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "a6cc98bb9f7c0f03912134b333194af3fa880798" }
 game_controller_filter = { workspace = true }
+game_controller_msgs = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "a6cc98bb9f7c0f03912134b333194af3fa880798" }
 game_controller_state_filter = { workspace = true }
+geometry = { workspace = true }
 global_parameter_provider = { workspace = true }
+ground_provider = { workspace = true }
 hardware_interface = { workspace = true }
 head_motion = { workspace = true }
 hsl_network_messages = { workspace = true }
+image = { workspace = true, features = ["png", "gif"] }
+json5 = { workspace = true }
+jsonschema = { version = "0.46", default-features = false }
 kinematics = { workspace = true }
+kinematics_provider = { workspace = true }
+led_handler = { workspace = true }
 linear_algebra = { workspace = true }
+localization-2d = { workspace = true }
+localization-3d = { workspace = true }
 log = { workspace = true }
+low_state_bridge = { workspace = true }
 mcap = { workspace = true }
+memmap2 = "0.9"
 message_filter = { workspace = true }
 message_handler = { workspace = true }
 motion = { workspace = true }
 motion_inference = { workspace = true }
-mujoco-rs = { version = "5.0.0", features = ["auto-download-mujoco", "renderer"] }
+mujoco-rs = { version = "5.0.0", features = [
+  "auto-download-mujoco",
+  "renderer",
+] }
 nalgebra = { workspace = true }
+obstacle_filter = { workspace = true }
+odometry = { workspace = true }
 player_states_receiver = { workspace = true }
 primary_state_filter = { workspace = true }
 projection = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rmcp = { version = "3.5.1", default-features = false, features = [
+  "server",
+  "transport-io",
+] }
 robot_logs = { workspace = true }
 ros-z = { workspace = true }
+ros-z-debug = { workspace = true }
+ros-z-schema = { workspace = true }
+ros-z-streams = { workspace = true }
+ros2 = { workspace = true }
 rule_obstacle_composer = { workspace = true }
 safe_pose_checker = { workspace = true }
+search_suggestor = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 sha2 = { workspace = true }
 socket2 = { workspace = true }
+support_foot_estimator = { workspace = true }
 team_ball_filter = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
@@ -82,21 +97,16 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 types = { workspace = true }
-zenoh = { workspace = true }
-ros-z-debug = { workspace = true }
-ros-z-schema = { workspace = true }
-font8x8 = "0.3"
-base64 = "0.22"
-memmap2 = "0.9"
-rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-io"] }
-jsonschema = { version = "0.46", default-features = false }
 uuid = { workspace = true, features = ["v4"] }
-image = { workspace = true, features = ["png", "gif"] }
+visual_kick_ball_selector = { workspace = true }
+whistle_filter = { workspace = true }
+world_to_field_provider = { workspace = true }
+zenoh = { workspace = true }
 
 [[bin]]
 name = "simulator-mcp"
 path = "src/bin/simulator_mcp.rs"
 
 [dev-dependencies]
-ros-z-schema = { workspace = true }
 bincode = { workspace = true }
+ros-z-schema = { workspace = true }
