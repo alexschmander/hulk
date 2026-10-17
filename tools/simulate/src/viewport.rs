@@ -1,4 +1,4 @@
-use crate::RobotId;
+use crate::{RobotId, TeamId};
 use bevy::{
     camera::primitives::Aabb,
     camera_controller::pan_orbit_camera::prelude::PanOrbitCamera,
@@ -14,7 +14,7 @@ use std::sync::{
 
 use crate::{
     bevy_mujoco::{SharedPhysics, SimulationMode},
-    scene::{ball::Ball, object::ObjectPart, robot::RobotHead},
+    scene::{ball::Ball, goal::Goal, object::ObjectPart, robot::RobotHead},
     simulation::ControlledRobot,
 };
 
@@ -368,7 +368,51 @@ impl Viewport {
     fn paint_scene(&mut self, ui: &Ui, rect: Rect, world: &mut World, selected: Option<RobotId>) {
         self.labels.clear();
         if let Some(view) = CameraView::new(world, rect) {
-            let members = world.resource::<crate::team::Team>().members();
+            let team = world.resource::<crate::team::Team>();
+            let members = team.members();
+            let hulks_away = team.away(TeamId::Hulks);
+            let parameters = world.resource::<crate::parameters::CurrentSimulatorParameters>();
+            let dimensions = parameters.field_dimensions;
+            let post_radius = dimensions.goal_post_diameter / 2.0;
+            let half_width = dimensions.goal_inner_width / 2.0 + dimensions.goal_post_diameter;
+            let goal_bounds = Aabb::from_min_max(
+                Vec3::new(-dimensions.goal_depth - post_radius, 0.0, -half_width),
+                Vec3::new(
+                    post_radius,
+                    parameters.goal_height + post_radius,
+                    half_width,
+                ),
+            );
+            let painter = ui.painter().with_clip_rect(view.rect);
+            let mut goals = world.query_filtered::<&GlobalTransform, With<Goal>>();
+            for transform in goals.iter(world) {
+                let Some(goal) = view.project_bounds(&goal_bounds, transform) else {
+                    continue;
+                };
+                let defending = if (transform.translation().x > 0.0) == hulks_away {
+                    TeamId::Hulks
+                } else {
+                    TeamId::Opponents
+                };
+                let color = members
+                    .iter()
+                    .find(|member| member.id.team == defending)
+                    .map_or_else(
+                        || crate::autoref::team_color(ui.visuals(), defending),
+                        |member| crate::widgets::jersey_color(member, ui.visuals()),
+                    );
+                let name = crate::autoref::name(defending);
+                let font = egui::FontId::proportional(20.0);
+                let width = painter
+                    .layout_no_wrap(name.to_owned(), font.clone(), Color32::WHITE)
+                    .size()
+                    .x
+                    + 16.0;
+                let position = egui::pos2(goal.center().x, goal.top() - 18.0);
+                let rect = Rect::from_center_size(position, egui::vec2(width, 28.0));
+                let text = paint_badge(&painter, rect, color);
+                painter.text(position, egui::Align2::CENTER_CENTER, name, font, text);
+            }
             let mut heads =
                 world.query_filtered::<(&ObjectPart, &Aabb, &GlobalTransform), With<RobotHead>>();
             let label_size = egui::vec2(46.0, 28.0);
@@ -415,21 +459,7 @@ impl Viewport {
                                 crate::robot_namespace(member.id)
                             ));
                     }
-                    painter.rect_filled(rect, 5.0, color);
-                    // Keep white jerseys legible against field lines and goals.
-                    painter.rect_stroke(
-                        rect,
-                        5.0,
-                        Stroke::new(1.0, Color32::from_black_alpha(150)),
-                        egui::StrokeKind::Inside,
-                    );
-                    let text = if u16::from(color.r()) + u16::from(color.g()) + u16::from(color.b())
-                        > 380
-                    {
-                        Color32::BLACK
-                    } else {
-                        Color32::WHITE
-                    };
+                    let text = paint_badge(&painter, rect, color);
                     let accent = Rect::from_min_max(
                         egui::pos2(rect.left() + 5.0, rect.bottom() - 5.0),
                         egui::pos2(rect.right() - 5.0, rect.bottom() - 2.0),
@@ -476,6 +506,23 @@ impl Viewport {
         }
     }
 }
+/// Shared screen-space badge styling for player numbers and defending team names.
+fn paint_badge(painter: &egui::Painter, rect: Rect, color: Color32) -> Color32 {
+    painter.rect_filled(rect, 5.0, color);
+    // Keep white jerseys legible against field lines and goals.
+    painter.rect_stroke(
+        rect,
+        5.0,
+        Stroke::new(1.0, Color32::from_black_alpha(150)),
+        egui::StrokeKind::Inside,
+    );
+    if u16::from(color.r()) + u16::from(color.g()) + u16::from(color.b()) > 380 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
+
 /// Shortcut legend while the mouse is captured and the cursor is hidden.
 fn capture_legend(ui: &Ui, rect: Rect) {
     egui::Area::new(ui.id().with("capture_legend"))
