@@ -54,6 +54,9 @@ The current Nix Twix package builds ordinary Twix; it does not bundle the simula
 
 Open the **Simulator** preset or add a **Simulator** panel.
 Select one to five HULKs, zero to five opponents, a field location, ball and profile, then press **Start simulator**.
+Clear **Record MCAP** before starting to improve performance while keeping robot logs.
+The choice persists with the panel and applies to both teams and robots added later.
+Stop and start the simulator to change it.
 The field preview draws the selected location's parameter dimensions and the spawn slots for both teams.
 Parameter and model directories are under **Parameter and model paths**.
 Twix selects the robot's namespace automatically.
@@ -252,6 +255,7 @@ cargo test -p twix --features simulator --bin twix
 cargo test -p simulate startup_pause_resume_and_scene_edits_preserve_time -- --ignored
 SIMULATOR_TEST_PROFILE=localization cargo test -p simulate five_players_dynamic -- --ignored
 SIMULATOR_TEST_OPPONENTS=2 SIMULATOR_TEST_ADD_RUNNING=1 cargo test -p simulate five_players_dynamic -- --ignored
+SIMULATOR_TEST_OPPONENTS=1 SIMULATOR_TEST_MCAP_ENABLED=false cargo test -p simulate five_players_dynamic -- --ignored
 
 git clone https://github.com/RoboCup-HumanoidSoccerLeague/GameController /tmp/hsl-game-controller
 HSL_PLAYERS=5 SIMULATOR_TEST_ROBOTS=5 SIMULATOR_TEST_OPPONENTS=5 HSL_TEST_FILTER=five_players_dynamic tools/simulate/tests/hsl/roundtrip.sh /tmp/hsl-game-controller
@@ -365,7 +369,7 @@ done
 
 ## Robot logs and recordings
 
-Every simulator robot records automatically, including robots added during a match.
+By default every simulator robot records automatically, including robots added during a match.
 Sessions are stored in `logs/simulator/<session>/`, with separate `hulks/<player>/` and `opponents/<player>/` directories.
 Set `SIMULATOR_RECORDING_ROOT` before launching Twix to change the root directory.
 The recording label in the simulator header shows the selected robot's directory on hover.
@@ -401,6 +405,25 @@ Booster transport packets and service requests are not ROS-Z topics; their corre
 The default is Info, independently of the viewer's filter and Twix's terminal filter.
 `queue_capacity` bounds each recording queue and defaults to 8,192 samples.
 Edit these settings in the parameter files before starting; live changes are rejected.
+
+In Twix, use **Record MCAP** in the setup screen before starting.
+This choice overrides `mcap_enabled` in the parameter files for every robot in the session.
+For headless sessions, set `mcap_enabled: false` in the location's
+`simulator_recording.json5` overlay before starting. A ready-made overlay is in
+`tools/simulate/parameters/recording_presets/disabled.json5`. This skips the MCAP
+subscriber and writer; JSONL logs, live logs and parameter snapshots remain enabled.
+The toolbar shows **LOGS** instead of **REC**. Recording checkpoints and archive
+fallback are unavailable while MCAP is disabled. Removing the setting restores
+the default full recording on the next headless start.
+
+For experiments that only need logs and selected robot states, copy
+`tools/simulate/parameters/recording_presets/state_only.json5` to
+`etc/parameters/location/<location>/simulator_recording.json5` before starting.
+This opt-in preset records behavior, motion-inference status and timing, camera
+diagnostics, localization estimates, filtered balls and obstacles. It omits raw
+sensors, body geometry, ground truth and detailed inference traces. Robot nodes
+and their publications still run normally. Remove the location overlay to return
+to the default full recording.
 
 MCAP `log_time` is simulation time at receipt, so pauses and speed changes replay on the simulation timeline.
 MCAP `publish_time` preserves the publisher's original source timestamp, including wall-clock gamepad inputs.
@@ -451,3 +474,35 @@ uv run --no-project --with jsonschema python tools/simulate/tests/mcp_smoke.py -
 ```
 
 Use the MuJoCo/ONNX environment above for both commands. Omit `--render` when EGL is unavailable. The test prints its temporary directory containing logs and inspection artifacts.
+
+## Performance comparison
+
+`tests/performance.py` compares saved simulator MCP binaries across all four
+profiles at 1v1, 2v2, 3v3 and 5v5. Save the baseline binary before rebuilding your
+changes, then run:
+
+```sh
+uv run --no-project --with jsonschema python tools/simulate/tests/performance.py \
+  --binary before=/path/to/baseline-simulator-mcp \
+  --binary after=/path/to/updated-simulator-mcp \
+  --output logs/simulator-performance/results.json
+```
+
+Use the same MuJoCo and ONNX environment as the MCP smoke test. Each session
+starts fresh, advances five simulation seconds to warm up, then measures three
+three-second wall-time windows at requested 4x playback. Robots remain in Initial
+with an external referee, rendering disabled and full topic recording enabled.
+The results measure standing simulation throughput and CPU cost; they do not
+measure a running match or GUI rendering.
+
+The script alternates binary order between cases and reports simulation speed,
+worker CPU seconds per simulation second, memory and recording drops. It checks
+recording finalization and removes its temporary recordings after each session.
+Results and stderr logs remain beside the output JSON. Rerunning the same command
+resumes completed cases. Use `--repeats` for additional fresh-session trials or
+`--profiles` and `--players` to select cases.
+
+To isolate MCAP overhead, use the same updated binary for both labels and add
+`--recording before=on --recording after=off`. The runner supplies temporary
+parameter overlays with identical settings apart from `mcap_enabled`, verifies
+that disabled sessions create no MCAP files, and keeps robot logs enabled.

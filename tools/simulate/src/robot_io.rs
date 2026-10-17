@@ -36,6 +36,33 @@ pub(crate) const JOINTS: [&str; 22] = [
 
 pub(crate) type Data = MjData<Box<MjModel>>;
 
+/// Ground contact forces are shared by every robot's support-foot measurement.
+#[derive(Default)]
+pub(crate) struct GroundContacts {
+    touching: Vec<bool>,
+}
+
+impl GroundContacts {
+    pub fn update(&mut self, data: &Data) {
+        self.touching.resize(data.xpos().len(), false);
+        self.touching.fill(false);
+        let bodies = data.model().geom_bodyid();
+        for (index, contact) in data.contact().iter().enumerate() {
+            if contact.geom.iter().any(|&id| id < 0) {
+                continue;
+            }
+            let [first, second] = contact.geom.map(|id| bodies[id as usize] as usize);
+            let body = match (first, second) {
+                (0, body) | (body, 0) => body,
+                _ => continue,
+            };
+            if data.contact_force(index)[0] > 1.0 {
+                self.touching[body] = true;
+            }
+        }
+    }
+}
+
 pub struct RobotBinding {
     joints: Vec<(usize, usize, usize)>, // position address, velocity address, actuator
     trunk: usize,
@@ -212,6 +239,16 @@ impl RobotBinding {
     }
 
     pub fn observe(&self, data: &Data) -> Observation {
+        let mut contacts = GroundContacts::default();
+        contacts.update(data);
+        self.observe_with_contacts(data, &contacts)
+    }
+
+    pub(crate) fn observe_with_contacts(
+        &self,
+        data: &Data,
+        contacts: &GroundContacts,
+    ) -> Observation {
         let sensors = data.sensordata();
         let orientation = quaternion(&sensors[self.orientation..self.orientation + 4]);
         let (roll, pitch, yaw) = orientation.euler_angles();
@@ -309,20 +346,8 @@ impl RobotBinding {
                     kinematics::robot_dimensions::RobotDimensions::RIGHT_FOOT_TO_RIGHT_SOLE.inner,
                 )),
         );
-        let mut contacts = [false; 2];
-        for (index, contact) in data.contact().iter().enumerate() {
-            if contact.geom.iter().any(|&id| id < 0) || data.contact_force(index)[0] <= 1.0 {
-                continue;
-            }
-            let bodies = contact
-                .geom
-                .map(|id| data.model().geom_bodyid()[id as usize] as usize);
-            for (foot, &body) in self.feet.iter().enumerate() {
-                contacts[foot] |= bodies.contains(&body) && bodies.contains(&0);
-            }
-        }
         use types::support_foot::SupportFootState;
-        let support = match contacts {
+        let support = match self.feet.map(|body| contacts.touching[body]) {
             [true, true] => Some(SupportFootState::Both),
             [true, false] => Some(SupportFootState::Left),
             [false, true] => Some(SupportFootState::Right),
@@ -388,6 +413,38 @@ pub(crate) mod tests {
         let mut data = MjData::new(Box::new(model));
         data.forward();
         data
+    }
+
+    #[test]
+    fn ground_contacts_are_per_body_and_clear_when_contact_ends() {
+        let mut spec = MjSpec::from_xml_string(
+            r#"<mujoco><worldbody>
+              <geom type="plane" size="0 0 .01"/>
+              <body name="first" pos="-.3 0 .049"><freejoint/><geom type="box" size=".05 .05 .05" mass="1"/></body>
+              <body name="second" pos=".3 0 1"><freejoint/><geom type="box" size=".05 .05 .05" mass="1"/></body>
+            </worldbody></mujoco>"#,
+        ).unwrap();
+        let mut data = MjData::new(Box::new(spec.compile().unwrap()));
+        data.forward();
+        let first = data
+            .model()
+            .name_to_id(MjtObj::mjOBJ_BODY, "first")
+            .unwrap();
+        let second = data
+            .model()
+            .name_to_id(MjtObj::mjOBJ_BODY, "second")
+            .unwrap();
+        let mut contacts = GroundContacts::default();
+        contacts.update(&data);
+        assert!(contacts.touching[first]);
+        assert!(!contacts.touching[second]);
+
+        data.qpos_mut()[2] = 1.0;
+        data.qpos_mut()[9] = 0.049;
+        data.forward();
+        contacts.update(&data);
+        assert!(!contacts.touching[first]);
+        assert!(contacts.touching[second]);
     }
 
     #[test]

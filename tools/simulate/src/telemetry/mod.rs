@@ -2,7 +2,10 @@
 mod logs;
 pub(crate) mod recording;
 
-use color_eyre::{Result, eyre::ensure};
+use color_eyre::{
+    Result,
+    eyre::{ensure, eyre},
+};
 use ros_z::{prelude::*, time::Clock};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,10 +19,15 @@ use tracing_subscriber::prelude::*;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ros_z::Message)]
 #[serde(deny_unknown_fields)]
 pub struct Parameters {
+    #[serde(default = "default_mcap_enabled")]
+    pub mcap_enabled: bool,
     pub topics: Vec<String>,
     pub queue_capacity: usize,
     /// Error=1, Warn=2, Info=3, Debug=4, Trace=5.
     pub capture_level: u8,
+}
+fn default_mcap_enabled() -> bool {
+    true
 }
 #[derive(Clone, Default)]
 pub struct Health(Arc<Mutex<Option<String>>>);
@@ -91,7 +99,7 @@ impl Startup {
 pub struct Telemetry {
     capture: logs::Capture,
     logs: logs::Logs,
-    pub(crate) recording: recording::Recording,
+    recording: Option<recording::Recording>,
     pub health: Health,
     pub directory: PathBuf,
 }
@@ -136,15 +144,21 @@ impl Telemetry {
             }
         }
         let health = Health::default();
-        let recording = recording::Recording::start(
-            context,
-            node.clone(),
-            namespace,
-            &startup.directory,
-            &parameters,
-            health.clone(),
-        )
-        .await?;
+        let recording = if parameters.mcap_enabled {
+            Some(
+                recording::Recording::start(
+                    context,
+                    node.clone(),
+                    namespace,
+                    &startup.directory,
+                    &parameters,
+                    health.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let logs = logs::Logs::start(&node, startup.file, startup.receiver, health.clone()).await?;
         Ok(Self {
             capture: startup.capture,
@@ -154,28 +168,51 @@ impl Telemetry {
             directory: startup.directory,
         })
     }
+    pub fn mcap_enabled(&self) -> bool {
+        self.recording.is_some()
+    }
+    pub(crate) async fn recording_checkpoint(&self) -> Result<recording::Checkpoint> {
+        self.recording
+            .as_ref()
+            .ok_or_else(|| eyre!("MCAP recording is disabled"))?
+            .checkpoint()
+            .await
+    }
     pub fn status(&self) -> Option<String> {
         if let Some(error) = self.health.get() {
             return Some(error);
         }
-        if self.recording.is_finished() {
+        if self
+            .recording
+            .as_ref()
+            .is_some_and(|recording| recording.is_finished())
+        {
             return Some("MCAP recording stopped unexpectedly".into());
         }
         let logs = self.capture.dropped.load(Ordering::Relaxed);
-        let samples = self.recording.dropped.load(Ordering::Relaxed);
+        let samples = self
+            .recording
+            .as_ref()
+            .map_or(0, |recording| recording.dropped.load(Ordering::Relaxed));
         (logs + samples > 0)
             .then(|| format!("Dropped {logs} log entries and {samples} recording samples"))
     }
     pub async fn finish(self) -> Option<String> {
         self.capture.level.store(0, Ordering::Relaxed);
-        let dropped_samples = self.recording.dropped.clone();
+        let mcap_enabled = self.mcap_enabled();
+        let dropped_samples = self
+            .recording
+            .as_ref()
+            .map(|recording| recording.dropped.clone());
         if let Err(error) = self.logs.finish().await {
             self.health.error(format!("Log finalization: {error:#}"));
         }
-        if let Err(error) = self.recording.finish().await {
+        if let Some(recording) = self.recording
+            && let Err(error) = recording.finish().await
+        {
             self.health.error(format!("MCAP finalization: {error:#}"));
         }
-        let summary = serde_json::json!({"error": self.health.get(), "dropped_samples": dropped_samples.load(Ordering::Relaxed), "dropped_logs": self.capture.dropped.load(Ordering::Relaxed)});
+        let summary = serde_json::json!({"error": self.health.get(), "mcap_enabled": mcap_enabled, "dropped_samples": dropped_samples.map_or(0, |dropped| dropped.load(Ordering::Relaxed)), "dropped_logs": self.capture.dropped.load(Ordering::Relaxed)});
         if let Err(error) = std::fs::write(
             self.directory.join("finished.json"),
             serde_json::to_vec_pretty(&summary).unwrap(),
@@ -232,6 +269,7 @@ pub fn session(configuration: &crate::Configuration, clock: &Clock) -> Result<Pa
             "initial_robot_count": configuration.robot_count, "initial_opponent_count": configuration.opponent_count,
             "model_directory": configuration.model_directory, "simulation_start": clock.now().as_nanos(),
             "field": configuration.field_configuration, "referee": configuration.referee, "competition": configuration.competition,
+            "mcap_enabled_override": configuration.mcap_enabled,
             "clock": "MCAP log_time is simulation time; publish_time preserves each publisher's clock; _recording/receipt preserves wall arrival times",
         }))?,
     )?;

@@ -145,6 +145,7 @@ impl Session {
             opponent_count: configuration["opponent_count"].as_u64().unwrap_or(0) as u8,
             field_configuration: Some(field),
             profile,
+            mcap_enabled: None,
         };
         let team = runtime.block_on(Team::new_with_controller(
             runtime.handle().clone(),
