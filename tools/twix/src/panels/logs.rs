@@ -210,7 +210,7 @@ pub struct LogsPanel {
     history_session: String,
     history_error: Option<String>,
     history_loading: bool,
-    replay_revision: u64,
+    presentation_identity: (u64, u64),
     repaint: Option<ObservationRepaint>,
     updates: Option<TopicObservationUpdateReceiver>,
     entries: Vec<Entry>,
@@ -229,7 +229,7 @@ impl LogsPanel {
         self.history_error = None;
         self.history_loading = false;
         self.filter.cleared_until = None;
-        self.replay_revision = context.backend.replay_revision();
+        self.presentation_identity = context.backend.presentation_identity();
         self.observation = None;
         self.repaint = None;
         self.updates = None;
@@ -832,7 +832,7 @@ impl Panel for LogsPanel {
             history_session: String::new(),
             history_error: None,
             history_loading: false,
-            replay_revision: 0,
+            presentation_identity: (0, 0),
             repaint: None,
             updates: None,
             entries: Vec::new(),
@@ -921,7 +921,7 @@ impl Panel for LogsPanel {
     fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
         if self.namespace != context.backend.namespace()
             || !Arc::ptr_eq(&self.backend, context.backend)
-            || self.replay_revision != context.backend.replay_revision()
+            || self.presentation_identity != context.backend.presentation_identity()
         {
             self.connect(context);
         }
@@ -1288,7 +1288,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(panel.entries[0].sequence, 0);
-        backend.set_replay_sources(Some(Default::default()));
+        let mut connection = backend.query_connection();
+        connection.cursor = ros_z_debug::query::CursorHandle::new(ros_z_debug::query::Cursor::At(
+            ros_z::time::Time::zero(),
+        ));
+        backend.set_connection(connection);
         let _ = egui.run_ui(Default::default(), |ui| {
             panel.ui(
                 ui,
@@ -1303,7 +1307,7 @@ mod tests {
             "MCAP replay must not load a live robot archive"
         );
         assert!(panel.entries.is_empty());
-        backend.set_replay_sources(None);
+        backend.use_live();
         wait_for(&mut panel, &backend, &egui, 1, "replacement robot").await;
         drop(panel);
         restarted.finish().await.unwrap();

@@ -952,3 +952,68 @@ fn oversized_cache_chunk_is_loaded_once_for_multiple_selected_records() {
         "cached index and one grouped payload load"
     );
 }
+
+#[test]
+fn simulator_recordings_use_receipt_time_and_preserve_source_metadata() {
+    let file = NamedTempFile::new().unwrap();
+    let mut channel = (*channels::<Time>(&["images"])[0]).clone();
+    channel
+        .metadata
+        .insert("ros_z.replay_clock".into(), "log_time".into());
+    let mut writer = WriteOptions::new().create(file.reopen().unwrap()).unwrap();
+    writer
+        .write(&mcap::Message {
+            channel: Arc::new(channel),
+            sequence: 0,
+            log_time: 20,
+            publish_time: 1000,
+            data: Cow::Owned(<Time as Message>::Codec::serialize(&Time::from_nanos(10)).unwrap()),
+        })
+        .unwrap();
+    writer.finish().unwrap();
+    let mut recording = open(file.path());
+    let plan = Source::from(TopicSource::new(
+        "/replay/images",
+        TimeProjection::SourceTime,
+    ))
+    .select(Selection::latest(), plan::cursor())
+    .plan();
+    let result = finish(&mut recording, &plan, Time::from_nanos(20));
+    let sample = &records(&result)[0];
+    assert_eq!(sample.record.time, Time::from_nanos(20));
+    assert_eq!(sample.record.source_time, Time::from_nanos(1000));
+    assert_eq!(sample.record.log_time, Some(Time::from_nanos(20)));
+    let result = finish(&mut recording, &plan, Time::from_nanos(19));
+    assert!(records(&result).is_empty());
+}
+
+#[test]
+fn simulator_checkpoint_segments_share_the_query_timeline() {
+    let directory = tempfile::tempdir().unwrap();
+    for (name, source) in [("a.mcap", 100), ("b.mcap", 200)] {
+        let file = fixture_records(true, true, &[(0, source, source, source)]);
+        std::fs::copy(file.path(), directory.path().join(name)).unwrap();
+    }
+    std::fs::write(
+        directory.path().join("recording-segments.json"),
+        r#"{"files":["a.mcap","b.mcap"]}"#,
+    )
+    .unwrap();
+    let mut recording = open(directory.path());
+    let plan = Source::from(TopicSource::new(
+        "/replay/images",
+        TimeProjection::SourceTime,
+    ))
+    .select(Selection::latest(), plan::cursor())
+    .plan();
+    for stamp in [100, 200] {
+        let result = finish(&mut recording, &plan, Time::from_nanos(stamp));
+        let sample = &records(&result)[0];
+        assert_eq!(
+            decode_record::<Time>(&sample.record, &sample.topic)
+                .unwrap()
+                .value,
+            Time::from_nanos(stamp)
+        );
+    }
+}
