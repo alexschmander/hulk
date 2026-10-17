@@ -49,8 +49,8 @@ mod enabled {
                 robot_count: 1,
                 opponent_count: 0,
                 bhuman_opponents: false,
-                bhuman_worker: std::env::var("BHUMAN_WORKER").unwrap_or_default(),
-                bhuman_source: std::env::var("BHUMAN_SOURCE").unwrap_or_default(),
+                bhuman_worker: String::new(),
+                bhuman_source: String::new(),
                 location: "incheon_small".into(),
                 profile: Profile::default(),
                 referee: simulate::RefereeMode::default(),
@@ -98,12 +98,19 @@ mod enabled {
         const ICON: &'static str = egui_material_icons::icons::ICON_SPORTS_SOCCER.codepoint;
 
         fn new(context: PanelCreationContext<'_>) -> Self {
+            let mut settings: Settings = context
+                .value
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default();
+            if settings.bhuman_worker.is_empty() {
+                settings.bhuman_worker = std::env::var("BHUMAN_WORKER").unwrap_or_default();
+            }
+            if settings.bhuman_source.is_empty() {
+                settings.bhuman_source = std::env::var("BHUMAN_SOURCE").unwrap_or_default();
+            }
             Self {
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                settings: context
-                    .value
-                    .and_then(|value| serde_json::from_value(value.clone()).ok())
-                    .unwrap_or_default(),
+                settings,
                 simulator: None,
                 finishing: None,
                 pending: None,

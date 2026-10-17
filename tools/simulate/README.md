@@ -41,7 +41,7 @@ Set `ORT_DYLIB_PATH` to your ONNX Runtime library if it is not available in the 
 ./twix --simulator /hulks/1
 ```
 
-The repository launcher builds Twix with its optional `simulator` Cargo feature and forwards every argument unchanged.
+The repository launcher builds Twix with its optional `simulator` Cargo feature and forwards Twix options to the executable.
 Twix itself parses `--simulator` and selects the isolated transport, regardless of the flag's position.
 To install the same executable through Pepsi:
 
@@ -55,6 +55,12 @@ On Linux it defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/mujoco-rs`.
 Set `MUJOCO_DOWNLOAD_DIR` only to override that location.
 Keep that cache after installation. On Linux, Twix records the selected MuJoCo library directory in its runtime search path, so the installed executable does not need the shell launcher or `LD_LIBRARY_PATH`.
 The ONNX Runtime library, robot assets, parameters, and models are still required as described above and in **Parameter and model paths**.
+
+For native B-Human opponents on Linux x86-64, use
+`./twix --simulator --bhuman /hulks/1`. This also builds the pinned worker in the
+local cache, enables the B-Human selector and configures its paths and ONNX Runtime.
+See the [B-Human setup](bhuman/README.md) for build dependencies and overrides.
+
 Robot N uses global Zenoh prefix `hulk_simulator/hulks/N` and ROS namespace `/hulks/N`, including raw Booster topics, discovery, parameters and RPCs.
 The top-left namespace selector switches Twix and simulator body controls between `/hulks/1` through `/hulks/5` and `/opponents/1` through `/opponents/5`.
 The namespace selector autocompletes live graph namespaces, including robots discovered across the simulator scopes.
@@ -276,8 +282,8 @@ No robotics source changes are required.
 
 [B-Human 2026 opponents](bhuman/README.md) run native behavior and motion in one
 process per robot, with perfect world models and native whistle, button and LED
-handlers. Build Twix with `--features bhuman` to select them during simulator setup.
-The native worker is built separately; vision and audio capture are excluded.
+handlers. Launch with `./twix --simulator --bhuman /hulks/1`, then enable
+**B-Human 2026** below the opponent count. Vision and audio capture are excluded.
 
 ## Verify
 

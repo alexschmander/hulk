@@ -42,10 +42,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     default = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "hulk-bhuman" / REVISION
     parser.add_argument("--cache", type=Path, default=default)
+    parser.add_argument("--print-cache", action="store_true", help="Print the resolved cache directory without building")
     parser.add_argument("--source", type=Path, help="Reuse an existing pinned release checkout")
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--generate-rust", action="store_true", help="Regenerate the checked-in Rust protocol")
     args = parser.parse_args()
+    if args.print_cache:
+        print(args.cache.resolve())
+        return
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
         parser.error("The first worker build supports Linux/x86-64")
     if args.jobs < 1:

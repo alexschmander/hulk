@@ -9,22 +9,33 @@ localization, camera capture, microphone capture or whistle detector runs.
 ## Build and select opponents
 
 The native worker supports Linux on x86-64. Install Git, Python 3.12 or newer,
-CMake 3.24 or newer, Ninja, Clang and mold, then run:
+CMake 3.24 or newer, Ninja, Clang and mold. Fetch the simulator Git LFS assets as
+described in the [simulator README](../README.md), then launch:
 
 ```sh
-python3 tools/simulate/bhuman/build.py
+./twix --simulator --bhuman /hulks/1
 ```
 
-The script prints the worker executable and source checkout paths. It caches
-dependencies under `$XDG_CACHE_HOME/hulk-bhuman/<revision>`, using `~/.cache`
-as the default cache root. Use `--cache PATH`, `--source PATH` to reuse an existing
-release checkout, or `--jobs N` to set build concurrency.
+The launcher builds the pinned worker, enables Twix's `bhuman` Cargo feature,
+and supplies the worker and source paths. It configures MuJoCo and uses the
+worker's ONNX Runtime for HULK motion inference, including the preload workaround.
+An existing `ORT_DYLIB_PATH` takes precedence. Dependencies are cached under
+`$XDG_CACHE_HOME/hulk-bhuman/<revision>`, using `~/.cache` as the default cache root.
+Subsequent launches rebuild the worker incrementally.
 
-Build Twix with `cargo run -p twix --features bhuman`. In the simulator setup,
-select **B-Human 2026** below the opponent count and enter the two paths printed
-by the build script. `BHUMAN_WORKER` and `BHUMAN_SOURCE` supply their initial values.
+In the simulator setup, set the opponent count above zero and select
+**B-Human 2026**. The worker and source fields are filled from the launcher.
+To reuse a separately built worker, set both `BHUMAN_WORKER` and `BHUMAN_SOURCE`
+before launching; this skips the native build.
 HULKs keep their selected estimator profile; B-Human uses perfect world models.
 The MCP startup contract currently selects HULKs self-play.
+
+For a separate worker build, run `python3 tools/simulate/bhuman/build.py`.
+It prints the worker and source paths. Use `--cache PATH`, `--source PATH` to
+reuse an existing release checkout, or `--jobs N` to set build concurrency.
+With Cargo directly, enable `--features bhuman`, pass
+`--zenoh-namespace hulk_simulator`, and configure the worker paths, MuJoCo and
+ONNX Runtime yourself.
 
 The build pins B-Human commit `2e3374ba896da8288607f9a1881b876642fe18b8` and its
 CompiledNN and SimRobot submodules, FlatBuffers 25.2.10 and ONNX Runtime 1.22.0.

@@ -4,4 +4,48 @@ THIS_DIRECTORY="$(dirname "$(readlink -f "$0")")"
 
 export MUJOCO_DOWNLOAD_DIR="${MUJOCO_DOWNLOAD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/mujoco-rs}"
 
-exec cargo run --manifest-path="${THIS_DIRECTORY}/tools/twix/Cargo.toml" --features simulator -- "$@"
+feature=simulator
+arguments=()
+bhuman=false
+simulator=false
+parse_options=true
+for argument in "$@"; do
+  if $parse_options && [[ "$argument" == --bhuman ]]; then
+    bhuman=true
+    continue
+  fi
+  if $parse_options && [[ "$argument" == --simulator ]]; then
+    simulator=true
+  fi
+  if [[ "$argument" == -- ]]; then
+    parse_options=false
+  fi
+  arguments+=("$argument")
+done
+
+if $bhuman; then
+  feature=bhuman
+  if ! $simulator; then
+    arguments=(--simulator "${arguments[@]}")
+  fi
+  if [[ -z "${BHUMAN_WORKER:-}" ]]; then
+    bhuman_builder="${THIS_DIRECTORY}/tools/simulate/bhuman/build.py"
+    bhuman_cache="$(python3 "$bhuman_builder" --print-cache)"
+    source_args=()
+    if [[ -n "${BHUMAN_SOURCE:-}" ]]; then
+      source_args=(--source "$BHUMAN_SOURCE")
+    fi
+    python3 "$bhuman_builder" "${source_args[@]}"
+    export BHUMAN_WORKER="$bhuman_cache/worker-build/bhuman-motion-worker"
+    export BHUMAN_SOURCE="${BHUMAN_SOURCE:-$bhuman_cache/source}"
+  fi
+  if [[ ! -x "$BHUMAN_WORKER" || -z "${BHUMAN_SOURCE:-}" || ! -d "$BHUMAN_SOURCE/Config" ]]; then
+    echo "B-Human requires an executable BHUMAN_WORKER and a BHUMAN_SOURCE checkout containing Config." >&2
+    exit 1
+  fi
+  export ORT_DYLIB_PATH="${ORT_DYLIB_PATH:-$BHUMAN_SOURCE/Util/onnxruntime/lib/Linux/libonnxruntime.so.1}"
+  export LD_PRELOAD="$ORT_DYLIB_PATH${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
+
+exec cargo run --manifest-path="${THIS_DIRECTORY}/tools/twix/Cargo.toml" --features "$feature" -- "${arguments[@]}"
