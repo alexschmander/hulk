@@ -21,7 +21,8 @@ and supplies the worker and source paths. It configures MuJoCo and uses the
 worker's ONNX Runtime for HULK motion inference, including the preload workaround.
 An existing `ORT_DYLIB_PATH` takes precedence. Dependencies are cached under
 `$XDG_CACHE_HOME/hulk-bhuman/<revision>`, using `~/.cache` as the default cache root.
-Subsequent launches rebuild the worker incrementally.
+Builds use all detected CPU threads by default. Subsequent launches rebuild
+the worker incrementally.
 
 In the simulator setup, set the opponent count above zero and select
 **B-Human 2026**. The worker and source fields are filled from the launcher.
