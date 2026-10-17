@@ -398,11 +398,20 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         {
             blackboard.walking_velocity_limits = *limits;
         }
-        let state_message_send_interval = filtered_game_controller_state_cache.get_latest()
-            .and_then(|state| super::send_message::state_message_send_interval(&state, &blackboard.parameters.network));
+        let state_message_send_interval = filtered_game_controller_state_cache
+            .get_latest()
+            .and_then(|state| {
+                super::send_message::state_message_send_interval(
+                    &state,
+                    &blackboard.parameters.network,
+                )
+            });
         if let Some(interval) = state_message_send_interval
-            && Some(interval) != published_state_message_send_interval {
-            hsl_state_message_send_interval_pub.publish(&interval).await?;
+            && Some(interval) != published_state_message_send_interval
+        {
+            hsl_state_message_send_interval_pub
+                .publish(&interval)
+                .await?;
             published_state_message_send_interval = Some(interval);
         }
 

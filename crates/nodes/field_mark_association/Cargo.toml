@@ -11,8 +11,8 @@ booster.workspace = true
 color-eyre = { workspace = true }
 coordinate_systems = { workspace = true }
 linear_algebra = { workspace = true }
-localization-fagra.workspace = true
 linear_sum_assignment = { workspace = true }
+localization-fagra.workspace = true
 nalgebra = { workspace = true }
 ndarray = { workspace = true }
 projection = { workspace = true }

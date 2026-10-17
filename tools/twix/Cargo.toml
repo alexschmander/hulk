@@ -36,12 +36,12 @@ repository = { workspace = true }
 rhai = { workspace = true }
 robot_logs = { workspace = true }
 ros-z = { workspace = true }
-ros-z-protocol = { workspace = true }
-zenoh = { workspace = true }
 ros-z-debug = { workspace = true }
+ros-z-protocol = { workspace = true }
 ros2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+simulate = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -50,7 +50,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 twix_visualization = { workspace = true }
 types = { workspace = true }
 uuid = { workspace = true }
-simulate = { workspace = true, optional = true }
+zenoh = { workspace = true }
 
 [features]
 simulator = ["dep:simulate"]

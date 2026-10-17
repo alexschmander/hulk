@@ -60,7 +60,6 @@ members = [
   "crates/nodes/rule_obstacle_composer",
   "crates/nodes/safe_pose_checker",
   "crates/nodes/search_suggestor",
-  "crates/search_heatmap",
   "crates/nodes/stereo_visual_odometry",
   "crates/nodes/support_foot_estimator",
   "crates/nodes/team_ball_filter",
@@ -82,6 +81,7 @@ members = [
   "crates/ros-z-schema",
   "crates/ros-z-streams",
   "crates/ros2",
+  "crates/search_heatmap",
   "crates/simulation_message",
   "crates/twix_visualization",
   "crates/types",
@@ -96,9 +96,9 @@ members = [
   "tools/mujoco-simulator/mujoco-rust-server",
   "tools/pepsi",
   "tools/robot_logs",
+  "tools/simulate",
   "tools/tensorrt-compile",
   "tools/twix",
-  "tools/simulate",
   "tools/widget_gallery",
 ]
 resolver = "2"
@@ -132,7 +132,6 @@ bat = { version = "0.25.0", default-features = false, features = [
 behavior_node = { path = "crates/nodes/behavior_node" }
 bevy = { version = "0.20", default-features = false }
 bevy_mujoco = { path = "crates/bevy_mujoco" }
-fagra = { git = "https://github.com/oleflb/fagra", rev = "7b37df61ed615c85f5d59265f5df53ff5d5dc1be" }
 bincode = "1.3.3"
 bindgen = "0.71.1"
 booster = { path = "crates/booster" }
@@ -166,6 +165,7 @@ enum-iterator = "2.1.0"
 enum_dispatch = "0.3.13"
 env_logger = "0.11.8"
 event-listener = "5"
+fagra = { git = "https://github.com/oleflb/fagra", rev = "7b37df61ed615c85f5d59265f5df53ff5d5dc1be" }
 fall_detection = { path = "crates/nodes/fall_detection" }
 fall_down_state_receiver = { path = "crates/nodes/fall_down_state_receiver" }
 field_mark_association = { path = "crates/nodes/field_mark_association" }
@@ -287,6 +287,7 @@ serde_json = "1.0.138"
 serial_test = "3.0"
 sha2 = "0.10.8"
 simba = "0.9.0"
+simulate = { path = "tools/simulate" }
 simulation_message = { path = "crates/simulation_message" }
 smallvec = "1.14.0"
 socket2 = { version = "0.6.4", features = ["all"] }
@@ -305,7 +306,6 @@ toml = "0.8.20"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 trigger = { path = "crates/nodes/trigger" }
-simulate = { path = "tools/simulate" }
 twix_visualization = { path = "crates/twix_visualization" }
 types = { path = "crates/types" }
 uuid = { version = "1.12.1", features = ["v4"] }
