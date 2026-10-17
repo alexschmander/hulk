@@ -9,8 +9,9 @@ localization, camera capture, microphone capture or whistle detector runs.
 ## Build and select opponents
 
 The native worker supports Linux on x86-64. Install Git, Python 3.12 or newer,
-CMake 3.24 or newer, Ninja, Clang and mold. Fetch the simulator Git LFS assets as
-described in the [simulator README](../README.md), then launch:
+CMake 3.24 or newer, Ninja and Clang. The build uses mold when available and
+otherwise uses the compiler's default linker. Fetch the simulator Git LFS assets
+as described in the [simulator README](../README.md), then launch:
 
 ```sh
 ./twix --simulator --bhuman /hulks/1
