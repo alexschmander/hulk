@@ -35,6 +35,8 @@ pub struct Configuration {
     pub opponent_count: u8,
     pub field_configuration: Option<crate::FieldConfiguration>,
     pub profile: Profile,
+    /// Overrides the recording parameter for this session; None uses the parameter layers.
+    pub mcap_enabled: Option<bool>,
 }
 
 #[derive(Resource, Clone)]
@@ -110,6 +112,7 @@ pub struct RobotStack {
     whistle: watch::Sender<Option<Time>>,
     frames: watch::Sender<Option<Frame>>,
     body: crate::reference::BodyReferences,
+    sensors: tokio::sync::Mutex<crate::sensors::Sensors>,
     readiness: crate::readiness::Readiness,
     pub primary: ros_z::cache::Cache<types::primary_state::PrimaryState>,
     pub inference: ros_z::cache::Cache<motion_inference::node::Status>,
@@ -139,6 +142,12 @@ impl RobotStack {
             r#"{control: {injected_motion_command: null}}"#,
         )?;
         std::fs::create_dir(overrides.path().join("live"))?;
+        if let Some(enabled) = configuration.mcap_enabled {
+            std::fs::write(
+                overrides.path().join("simulator_recording.json5"),
+                serde_json::to_vec(&serde_json::json!({"mcap_enabled": enabled}))?,
+            )?;
+        }
         write_calibration(overrides.path())?;
         std::fs::write(
             overrides.path().join("motion_inference.json5"),
@@ -310,6 +319,7 @@ impl RobotStack {
             .build()
             .await?;
         let body = crate::reference::BodyReferences::new(&node, configuration.profile).await?;
+        let sensors = crate::sensors::Sensors::new(context.session()).await?;
         let behavior =
             crate::behavior_inputs::BehaviorInputs::new(&node, configuration.profile).await?;
         let camera_inputs = crate::observations::CameraInputs::new(
@@ -445,6 +455,7 @@ impl RobotStack {
             whistle,
             frames,
             body,
+            sensors: tokio::sync::Mutex::new(sensors),
             readiness,
             primary,
             inference,
@@ -465,7 +476,7 @@ impl RobotStack {
             .telemetry
             .as_ref()
             .ok_or_else(|| color_eyre::eyre::eyre!("Recording unavailable"))?;
-        let checkpoint = telemetry.recording.checkpoint().await?;
+        let checkpoint = telemetry.recording_checkpoint().await?;
         Ok(serde_json::to_value(checkpoint)?)
     }
 
@@ -498,6 +509,12 @@ impl RobotStack {
         self.telemetry
             .as_ref()
             .map(|telemetry| (telemetry.directory.as_path(), telemetry.status()))
+    }
+
+    pub fn mcap_enabled(&self) -> bool {
+        self.telemetry
+            .as_ref()
+            .is_some_and(|telemetry| telemetry.mcap_enabled())
     }
 
     pub fn poll(&self) -> Option<String> {
@@ -617,7 +634,11 @@ impl RobotStack {
     pub fn publish_observation(&self, observation: &Observation, time: Time) -> Result<()> {
         self.runtime.block_on(async {
             self.body.publish(observation, time).await?;
-            crate::sensors::publish(self.context.session(), &observation.low_state, time).await
+            self.sensors
+                .lock()
+                .await
+                .publish(&observation.low_state, time)
+                .await
         })
     }
 

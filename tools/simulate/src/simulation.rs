@@ -1,7 +1,7 @@
 //! Physics and sensor publication run independently of Twix's repaint rate and active tab.
 use crate::{
     bevy_mujoco::{SharedPhysics, SimulationMode},
-    robot_io::RobotBinding,
+    robot_io::{GroundContacts, RobotBinding},
     robotics::Robotics,
     scene::{robot, visual::ObjectVisualAssets},
 };
@@ -235,6 +235,7 @@ impl PhysicsWorker {
                 controller: crate::simulated_sdk::Controller,
             }
             let mut states = std::collections::BTreeMap::<crate::RobotId, State>::new();
+            let mut contacts = GroundContacts::default();
             let mut placed = std::collections::HashSet::new();
             let mut generation = None;
             let mut last_frame = None;
@@ -309,11 +310,14 @@ impl PhysicsWorker {
                         if running && let Some(referee) = team.referee() {
                             referee.update(&mut world, &members, period)?;
                         }
+                        contacts.update(world.data());
                         let observations: Vec<_> = members
                             .iter()
                             .filter_map(|member| {
-                                let mut observation =
-                                    states.get(&member.id)?.binding.observe(world.data());
+                                let mut observation = states
+                                    .get(&member.id)?
+                                    .binding
+                                    .observe_with_contacts(world.data(), &contacts);
                                 if !running {
                                     observation.stationary();
                                 }

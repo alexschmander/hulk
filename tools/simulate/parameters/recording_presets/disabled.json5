@@ -1,0 +1,4 @@
+{
+  // Skip MCAP subscriptions and writing; logs.jsonl and live robot logs remain enabled.
+  mcap_enabled: false,
+}

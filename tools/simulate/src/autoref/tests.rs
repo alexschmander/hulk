@@ -552,6 +552,7 @@ fn automatic_referee_robot_roundtrip_and_physical_penalty_handling() {
         location: Some("hsl_small".into()),
         robot_count: 2,
         opponent_count: 2,
+        mcap_enabled: None,
         profile: std::env::var("SIMULATOR_TEST_PROFILE")
             .ok()
             .map(|s| serde_json::from_value(serde_json::Value::String(s)).unwrap())
