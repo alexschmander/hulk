@@ -6,7 +6,7 @@ use eframe::egui::{ColorImage, Context, TextureHandle, TextureOptions, Ui};
 use hulk_widgets::CompletionEdit;
 use image::RgbImage;
 use linear_algebra::{point, vector};
-use ros_z::{Message, entity::EndpointKind, time::Time};
+use ros_z::{Message, time::Time};
 use ros_z_debug::{
     RetentionPolicy, SampleRecord, TargetIdentity, TopicObservation, TopicReference,
 };
@@ -57,7 +57,7 @@ fn decode_color_image(image: &RosImage) -> Result<ColorImage, ImageDecodeError> 
 }
 
 pub struct ImagePanel {
-    replay_revision: u64,
+    presentation_identity: (u64, u64),
     image_history_capacity: usize,
     topic_editor: String,
     focus_topic_requested: bool,
@@ -93,7 +93,7 @@ impl Panel for ImagePanel {
             .to_string();
 
         let mut panel = Self {
-            replay_revision: context.backend.replay_revision(),
+            presentation_identity: context.backend.presentation_identity(),
             image_history_capacity: context
                 .value
                 .and_then(|value| value.get("image_history_capacity"))
@@ -138,11 +138,10 @@ impl Panel for ImagePanel {
         ui.label("Topic");
         let namespace = context.backend.namespace();
         let completions = {
-            let graph = context.backend.graph().lock();
+            let topics = context.backend.topics().snapshot();
             TopicCompletionQuery::new(&namespace, &self.topic_editor)
-                .endpoint_kind(EndpointKind::Publisher)
                 .type_name(RosImage::type_name())
-                .complete(graph.publishers())
+                .complete_topics(&topics.topics)
         };
         let response = ui.add(
             CompletionEdit::new(
@@ -158,8 +157,8 @@ impl Panel for ImagePanel {
     }
 
     fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
-        if self.replay_revision != context.backend.replay_revision() {
-            self.replay_revision = context.backend.replay_revision();
+        if self.presentation_identity != context.backend.presentation_identity() {
+            self.presentation_identity = context.backend.presentation_identity();
             if let ObservationState::Observing(observed) = &mut self.observation {
                 observed.render_cache = RenderedImageCache::for_panel();
             }

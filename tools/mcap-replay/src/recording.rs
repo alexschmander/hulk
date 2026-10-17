@@ -59,6 +59,7 @@ pub struct Channel {
     pub topic: String,
     pub type_info: TypeInfo,
     pub schema: Schema,
+    replay_receipt_time: bool,
 }
 
 impl Channel {
@@ -111,6 +112,11 @@ impl Channel {
             topic,
             type_info: TypeInfo::new(name, hash),
             schema: Arc::new(bundle),
+            replay_receipt_time: channel
+                .metadata
+                .get("ros_z.replay_clock")
+                .map(String::as_str)
+                == Some("log_time"),
         })
     }
 }

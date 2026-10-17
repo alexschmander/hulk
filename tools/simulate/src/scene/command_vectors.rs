@@ -217,7 +217,9 @@ mod tests {
         );
         let robot = nalgebra::point![2.0, 3.0, 0.6];
         let walk = MotionCommand::WalkWithVelocity {
-            head: HeadMotion::ZeroAngles,
+            head: HeadMotion::Center {
+                image_region_target: types::motion_command::ImageRegion::Top,
+            },
             velocity: vector![0.4, -0.2],
             angular_velocity: -0.5,
         };
@@ -228,7 +230,9 @@ mod tests {
         assert_eq!(arrows[1].unwrap().vector, Vec3::new(0.0, -0.5, 0.0));
         assert!(arrows[2].is_none());
         let kick = MotionCommand::Kick {
-            head: HeadMotion::ZeroAngles,
+            head: HeadMotion::Center {
+                image_region_target: types::motion_command::ImageRegion::Top,
+            },
             ball_position: point![1.0, 2.0],
             kick_direction: Orientation2::new(-std::f32::consts::FRAC_PI_2),
             target_speed: 3.4,

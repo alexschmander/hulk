@@ -94,6 +94,9 @@ fn wrap_record<T>(
     let (publisher, sequence) = record.publication.unwrap_or(([0; 16], record.id as i64));
     Arc::new(SampleRecord {
         value,
+        receipt_time: record.time,
+        wall_receipt_time: record.log_time.unwrap_or(record.time),
+        retained_bytes: record.data.len(),
         source_time: record.source_time,
         effective_time: record.time,
         transport_time: record.log_time,

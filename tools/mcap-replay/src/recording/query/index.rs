@@ -526,7 +526,12 @@ impl<'a> IndexScan<'a> {
         if header.channel_id != self.key.0 {
             return Ok(());
         }
-        let source = Time::from_nanos(header.publish_time.try_into()?);
+        let channel = &self.recording.channels[&header.channel_id];
+        let source = Time::from_nanos(if channel.replay_receipt_time {
+            header.log_time.try_into()?
+        } else {
+            header.publish_time.try_into()?
+        });
         batch.push(match self.key.1.project_cdr(source, &data, &self.schema) {
             Ok(time) => IndexedRecord::Timestamp(IndexEntry {
                 timestamp_ns: time.as_nanos(),

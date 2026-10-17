@@ -79,7 +79,7 @@ struct ViewerData {
 }
 
 struct Observations {
-    replay_revision: u64,
+    presentation_identity: (u64, u64),
     namespace: String,
     frame_id: Option<(u64, u64)>,
     last_anchor: Option<Time>,
@@ -96,7 +96,7 @@ struct Observations {
 impl Observations {
     fn new(context: &impl ObservationContext) -> color_eyre::Result<Self> {
         Ok(Self {
-            replay_revision: 0,
+            presentation_identity: (0, 0),
             namespace: String::new(),
             frame_id: None,
             last_anchor: None,
@@ -363,8 +363,8 @@ impl Panel for Map3DPanel {
                 if let Err(error) = observations.update_layers(&context, &self.settings) {
                     ui.colored_label(ui.visuals().error_fg_color, error.to_string());
                 }
-                if observations.replay_revision != context.backend.replay_revision() {
-                    observations.replay_revision = context.backend.replay_revision();
+                if observations.presentation_identity != context.backend.presentation_identity() {
+                    observations.presentation_identity = context.backend.presentation_identity();
                     observations.last_anchor = None;
                 }
                 observations.snapshot(&context.backend.namespace(), &self.settings)

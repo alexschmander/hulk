@@ -1,8 +1,3 @@
-// Exercise the same schema validation, indexes and seek implementation used by mcap-replay.
-#[allow(dead_code)]
-#[path = "../../../mcap-replay/src/recording.rs"]
-mod replay_recording;
-
 use super::*;
 use ros_z::time::Time;
 use std::time::Duration;
@@ -212,26 +207,6 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
             "/test_a/1"
         };
         assert!(!logs.contains(other), "robot logs mixed");
-        let mut replay =
-            replay_recording::Recording::open(&path.join("recording.mcap"), "/replay").unwrap();
-        assert!(
-            replay
-                .channels
-                .values()
-                .any(|channel| channel.topic == "/replay/logs")
-        );
-        let snapshot = replay.snapshot(1_000_000_000).unwrap();
-        let paused_input = snapshot
-            .iter()
-            .find(|message| {
-                replay.channels[&message.header.channel_id]
-                    .topic
-                    .ends_with("/ground_truth/test")
-            })
-            .unwrap();
-        assert_eq!(paused_input.header.publish_time, 99_000_000_000);
-        assert_eq!(paused_input.replay_time, 1_000_000_000);
-        assert!(!replay.snapshot(replay.end).unwrap().is_empty());
         let bytes = std::fs::read(path.join("recording.mcap")).unwrap();
         assert!(
             mcap::Summary::read(&bytes).unwrap().is_some(),
@@ -250,6 +225,16 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
         assert_eq!(
             ros_z::message::SerdeCdrCodec::<Option<u32>>::deserialize(&optional.data).unwrap(),
             Some(17)
+        );
+        let paused_input = messages
+            .iter()
+            .find(|m| m.channel.topic == "ground_truth/test" && m.publish_time == 99_000_000_000)
+            .unwrap();
+        assert_eq!(paused_input.publish_time, 99_000_000_000);
+        assert_eq!(paused_input.log_time, 1_000_000_000);
+        assert_eq!(
+            paused_input.channel.metadata["ros_z.replay_clock"],
+            "log_time"
         );
         let times: Vec<_> = messages
             .iter()
@@ -386,23 +371,24 @@ async fn checkpoint_is_readable_while_recording_continues_and_replay_spans_segme
         first
     );
     assert!(telemetry.finish().await.is_none());
-    let mut replay = replay_recording::Recording::open(directory.path(), "/replay").unwrap();
-    let topic = replay
-        .channels
-        .iter()
-        .find(|(_, c)| c.topic == "/replay/checkpoint_value")
-        .unwrap()
-        .0
-        .to_owned();
-    for (time, expected) in [(1_000_000_000, 1u64), (2_000_000_000, 2)] {
-        let snapshot = replay.snapshot(time).unwrap();
-        let sample = snapshot
-            .iter()
-            .find(|m| m.header.channel_id == topic)
-            .unwrap();
-        assert_eq!(
-            ros_z::message::SerdeCdrCodec::<u64>::deserialize(&sample.data.to_bytes()).unwrap(),
-            expected
-        );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("recording-segments.json")).unwrap(),
+    )
+    .unwrap();
+    let mut values = Vec::new();
+    for segment in manifest["files"].as_array().unwrap() {
+        let bytes = std::fs::read(directory.path().join(segment.as_str().unwrap())).unwrap();
+        for sample in mcap::MessageStream::new(&bytes)
+            .unwrap()
+            .map(Result::unwrap)
+        {
+            if sample.channel.topic == "checkpoint_value" {
+                values.push((
+                    sample.log_time,
+                    ros_z::message::SerdeCdrCodec::<u64>::deserialize(&sample.data).unwrap(),
+                ));
+            }
+        }
     }
+    assert_eq!(values, [(1_000_000_000, 1), (2_000_000_000, 2)]);
 }

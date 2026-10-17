@@ -262,6 +262,14 @@ impl TopicObserver {
         });
     }
 
+    /// Restore direct subscriptions, whose live history follows publisher time.
+    pub fn clear_backend(&self) {
+        self.inner.target_sender.send_modify(|inherited| {
+            inherited.connection = None;
+            inherited.backend_generation += 1;
+        });
+    }
+
     /// Create an observer using `node` for underlying debug subscriptions.
     pub fn new(node: Arc<Node>, options: TopicObserverOptions) -> Self {
         let (target_sender, _) = watch::channel(InheritedTarget {
