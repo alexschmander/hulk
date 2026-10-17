@@ -48,14 +48,14 @@ A session starts paused. Startup succeeds when the scene and robot stack are ini
 | `entity_id` | One scene object within a session. Bevy entity IDs and raw MuJoCo indices remain internal. |
 | `observation_id` | Owned subscriptions and retention settings. It survives individual tool calls until released or the MCP server exits. |
 | `operation_id` | Startup, advancement, service calls, rendering, or another outstanding action. Results remain readable for the server lifetime, subject to advertised bounded metadata retention. |
-| `query_id` and cursor | A frozen query result and page position. Proposed cursor lifetime is five wall-clock minutes. Expiry is an explicit error. |
+| `query_id` and cursor | A frozen query result and page position. Snapshots live until the last page, explicit release, or five wall-clock minutes. Expiry is an explicit error. |
 | Artifact URI | An image, plot, clip, or exported data file. The result includes its MIME type and size; saved files survive session stop. |
 
 Stopping cancels inputs and operations that need a live worker, joins the worker, and finalizes its recording. Observation inputs close; retained samples remain available until the observation is released or its advertised retention expires. Historical target identities remain usable for recording queries while the server retains that session's metadata.
 
 An MCP transport disconnect triggers bounded cleanup of its owned worker. A forced termination may lose the uncheckpointed recording tail; already published checkpoints remain readable. No session or operation recovery across an MCP server restart is promised in the first implementation.
 
-## Proposed tool catalog
+## Tool catalog
 
 Fields and alternatives are defined in the JSON schema. Dynamic ROS-Z payloads are further validated against the endpoint schema. Optional fields with a default use that default when omitted.
 
@@ -72,6 +72,8 @@ Fields and alternatives are defined in the JSON schema. Dynamic ROS-Z payloads a
 | `rosz_schema` | Target and topic, service, or parameter node | Canonical JSON schemas and examples. |
 | `rosz_observe` | Target, sources, retention, request ID | Observation handle and subscription status. |
 | `rosz_read` | Target, sources, latest or historical query, optional recording fallback | Bounded samples with provenance and coverage, or an operation if checkpoint/query work takes longer. |
+| `rosz_export` | Target, sources, interval, observations or recording, JSONL or CSV, request ID | Operation completing with data and metadata artifacts plus verification evidence. |
+| `query_release` | Query ID, request ID | Released snapshot/retry bytes and current query budget. |
 | `rosz_unobserve` | Observation, request ID | Releases the observation's retained resources. |
 | `rosz_wait` | Conditions with target IDs, wall timeout | Operation completing when fresh observations satisfy the condition. |
 | `rosz_parameter_read` | Target, node, optional path | Effective value, revision, layers, and source information. |
@@ -104,7 +106,9 @@ Byte retention charges serialized payload size. Decoded values, schemas, transpo
 
 Mutating calls include a caller-generated `request_id`. Within the server lifetime, repeating the same tool, target, request ID, and normalized arguments returns the same operation or handle. Reusing that ID with different arguments returns an error. Idempotency is not guaranteed after a server crash or for a remote service that has already acted without returning a response.
 
-Operation results and request IDs are retained for the server lifetime. Admission stops at 2,048 operations or 100,000 request IDs. Frozen pagination snapshots expire after five minutes, with a combined 64 MiB budget. Unpaginated reads do not consume that budget.
+Operation results and request IDs are retained for the server lifetime. Admission stops at 2,048 operations or 100,000 request IDs. Frozen pagination snapshots have a combined 64 MiB serialized-data budget and a limit of 128 active queries. Every paginated tool returns the same `query_id` used in its cursor. Reading the last page immediately releases the snapshot; `query_release` releases an unfinished query. Releasing an absent or already released ID succeeds with zero freed bytes. Unpaginated reads do not retain snapshots.
+
+Earlier cursors become invalid when a query completes. The server keeps only its last response for retry, bounded separately to 8 MiB and 128 completed queries. Oldest retry responses can be evicted under pressure. Both snapshots and retry responses expire five minutes after query creation, and budget inspection reclaims expired entries. `server_info.query_budget` reports counts, serialized bytes, and limits. These counters do not measure process RSS. Explicit release also removes the last-page retry response. Pages from an existing recording query are immediate reads and do not create new asynchronous operations.
 
 Long work returns an operation promptly. The operation moves through queued, running, and a terminal succeeded, failed, or cancelled state. Stages identify work such as initializing, armed, advancing, checkpointing, or encoding. `operation_status.wait_ms` waits up to 30 wall-clock seconds for progress or completion.
 
@@ -139,6 +143,8 @@ A body-button hold follows the simulator's existing one-second wall-time convent
 
 Use `ros-z-debug` observations across tool calls. Share underlying subscriptions for identical targets, topics, schema hashes, and compatible QoS where practical, while keeping handle ownership and memory accounting explicit. Retargeting an existing observation to another robot is excluded from this draft; open a new handle to avoid mixing histories.
 
+The opt-in `rosz_observe.preset: "motion_inference"` adds `motion_inference/trace`, `motion_inference/status`, and `motion_inference/timing`. It can accompany explicit sources. The returned observation lists the resulting sources and uses the normal retention budget. Arm it before advancing and retain its handle while diagnostics are needed. Local subscription readiness does not guarantee that the publisher has already discovered the subscriber. The preset enables live diagnostic publications; recording configuration still determines whether they enter MCAP.
+
 A latest-value read uses an existing observation or a transient subscription, with a one-second wait by default. A transient read releases its subscription after returning and does not retain continuing history. A latest-value query cannot opt into recording fallback; archived values belong in an explicitly historical query. Requested freshness is measured against the target's collection clock and reported with the sample times.
 
 Graph discovery is an observed local view with a revision and observation time. It is not proof that every distributed endpoint has been found. A schema hash pins decoding and input validation. Ambiguous topic types require a selection, and schema changes create explicit history boundaries.
@@ -162,6 +168,26 @@ For each source, return available intervals, subscription state, known loss, unk
 Queries freeze their selected caches and recording checkpoint references. Cursors page through that frozen result even while physics and recording continue. Pinning and decoding obey query memory budgets. `truncated` and a next cursor mean there are more results; coverage describes missing data.
 
 Fallback data is decoded and returned directly. It is not republished into the live graph. A recording from a different session is never selected merely because it uses the same robot namespace.
+
+### History exports
+
+`rosz_export` streams a fixed interval to JSONL or CSV plus a JSON metadata artifact. It returns an operation with normal cancellation and request-ID retry behavior. `data_source` defaults to `observations`; `recording` explicitly requests an immutable checkpoint and works during active or stopped sessions. Each export uses one collector. It does not merge or republish archived samples into observations.
+
+Observation exports freeze references to currently retained samples and deduplicate overlapping observations by publication identity per topic. The snapshot is bounded to 256 MiB of charged payload and record sizes. Recording exports stream selected messages from finalized segments and cache at most 1,024 decoded schemas. One export runs at a time. The file budget defaults to 1 GiB and can be raised to 16 GiB with `max_bytes`; exceeding it fails and removes the temporary data file. Completed artifacts remain on disk.
+
+JSONL contains the same sample objects as `rosz_read`, including publication identity, clocks, provenance, and full selected values. CSV uses fixed columns; `type_info`, `receipts`, `value`, and `provenance` cells contain JSON to preserve nested values and wide integers. Export order follows recording ingestion or the selected observation sources, without a global timestamp sort. The metadata artifact records the order, selected range, sources, coverage warnings, and verification evidence.
+
+Artifacts provide `local_path` for analysis on the server host. MCP resource reads support `?offset=<byte offset>&length=<bytes>` with lengths up to 1 MiB. An unchunked read is limited to 8 MiB. Read and concatenate the decoded byte chunks before parsing UTF-8, JSONL, or CSV.
+
+The archive reader inspects each segment's MCAP summary and skips chunks without the requested topics or simulation-receipt interval. A selected publication and its adjacent receipt may span chunks; both are read together. Source-time and wall-receipt queries filter after reading candidate topic chunks because their clocks do not share the MCAP log-time index. Files without usable indexes fall back to a linear scan. `archive_scan` reports this work and each topic's recording status through the checkpoint. `topic_never_recorded` means zero publications were recorded, while `no_samples_in_range` means the topic exists elsewhere in the checkpoint. Neither status proves why the data is absent.
+
+### Verification evidence
+
+Reads and exports return one verification summary for their selected rows. It groups publisher sequence intervals by topic and publisher, counts missing sequence numbers between the selected endpoints, and reports distinct schema hashes per topic. Out-of-order delivery can fill an earlier gap. Multiple field projections of one publication count as duplicate rows. Sequence prefixes and tails remain unknown, and multiple schema hashes do not identify an exact transition time.
+
+A summary includes recorder drops and tail status from its checkpoint. Drop counts cover the recorder lifetime through that barrier, not only the query interval. Parameter revisions come from the latest 1,024 MCP parameter reads and successful writes across the server, filtered by target. Each revision carries its MCP observation time and action. This is not a complete timeline of parameter changes from other clients; explicitly observe or export parameter event topics when that timeline is required.
+
+Sequence tracking is bounded to 1,024 topic/publisher pairs and 16,384 intervals, with at most 256 schema hashes per topic. `tracking_complete: false` reports exhausted tracking capacity or an unavailable publication identity. These limits affect the summary, not exported data. `completeness` remains `unknown`: no interior gaps and no reported recorder drops cannot prove that every intended publication existed or arrived.
 
 ### Clock and identity rules
 
@@ -311,5 +337,7 @@ The server owns one active Linux worker and private Zenoh router. It does not at
 Live data and history use ROS-Z and `ros-z-debug`. The server does not poll MCAP for latest state. History coverage is conservatively `unknown` or `not_observed`: timestamps alone do not establish complete delivery. Live source clock domains are currently reported as unknown. Source-schema changes fail reads that specify a hash; publication and service calls require one. Native dynamic service calls require one unambiguous discovered server. They cannot cancel a remote side effect after dispatch.
 
 Rendering uses headless EGL and the MuJoCo scene, without Twix's UI overlays. Rendering holds the physics lock for a snapshot and can slow wall-clock playback. Synthetic perception profiles do not publish camera images. Map layers need coordinates already expressed in the desired frame; plots require bounded intervals. Artifacts and recordings remain on disk until the user removes their directories.
+
+The pagination tests exercise repeated completion, explicit release, expiry, and bounded retries. Indexed archive tests cover publication/receipt pairs across chunk boundaries, absent topics, all query clocks, linear fallback, and cancellation. Export tests cover JSONL/CSV encoding, file budgets, and bounded artifact reads.
 
 The [stdio integration test](../../tools/simulate/tests/mcp_smoke.py) validates outputs and operation completions against the contract while exercising startup, exact stepping, ROS-Z reads/writes/services, optional recording fallback, publication deduplication, visuals, and shutdown history. Rust tests cover JSON/CDR round trips, receipt-clock retention, checkpoint ordering, and replay across finalized segments.
