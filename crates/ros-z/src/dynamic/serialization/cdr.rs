@@ -126,6 +126,7 @@ fn serialize_shape_value(
     writer: &mut CdrWriter<LittleEndian>,
 ) -> Result<(), DynamicError> {
     match (value, shape) {
+        (DynamicValue::Unit, TypeDef::Primitive(PrimitiveTypeDef::Unit)) => {}
         (DynamicValue::Bool(v), TypeDef::Primitive(PrimitiveTypeDef::Bool)) => {
             writer.write_bool(*v)
         }
@@ -413,6 +414,7 @@ fn skip_value(
     match shape {
         TypeDef::Primitive(primitive) => {
             let width = match primitive {
+                PrimitiveTypeDef::Unit => return Ok(()),
                 PrimitiveTypeDef::Bool => {
                     reader.read_bool()?;
                     return Ok(());

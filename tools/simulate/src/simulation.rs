@@ -369,14 +369,20 @@ impl PhysicsWorker {
                             samples.push((member.io.clone(), observation.clone(), time, frame));
                         }
                     }
+                    if advanced {
+                        team.advance(period)
+                            .map_err(|error| format!("Simulation clock: {error:#}"))?;
+                        if let Some(remaining) = &mut world.remaining_steps {
+                            *remaining = remaining.saturating_sub(1);
+                            if *remaining == 0 {
+                                world.mode = SimulationMode::Paused;
+                            }
+                        }
+                    }
                 }
                 for (io, observation, time, _) in &samples {
                     io.publish_observation(observation, *time)
                         .map_err(|error| format!("Sensor publication: {error:#}"))?;
-                }
-                if advanced {
-                    team.advance(period)
-                        .map_err(|error| format!("Simulation clock: {error:#}"))?;
                 }
                 for (io, _, _, frame) in samples {
                     if let Some(frame) = frame {

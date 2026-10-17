@@ -133,6 +133,8 @@ impl SharedPhysics {
 
 pub struct MujocoWorld {
     pub mode: SimulationMode,
+    /// A bounded run consumes this budget under the physics lock.
+    pub remaining_steps: Option<u64>,
     pub robots: Vec<Entity>,
     pub balls: Vec<Entity>,
     spec: SyncCell<MjSpec>,
@@ -150,6 +152,7 @@ impl Default for MujocoWorld {
 
         Self {
             mode: SimulationMode::Paused,
+            remaining_steps: None,
             robots: Vec::new(),
             balls: Vec::new(),
             spec: SyncCell::new(spec),
@@ -226,6 +229,33 @@ impl MujocoWorld {
         self.object_epochs.get(&entity).copied().unwrap_or_default()
     }
     pub fn set_object_pose(&mut self, entity: Entity, transform: Transform) -> Result<(), String> {
+        self.set_object_pose_with_velocity(entity, transform, true)
+    }
+    pub(crate) fn set_object_velocity(
+        &mut self,
+        entity: Entity,
+        velocity: [f64; 3],
+    ) -> Result<(), String> {
+        let binding = self
+            .objects
+            .get(&entity)
+            .ok_or_else(|| format!("Unknown object {entity:?}"))?;
+        let PoseTarget::FreeJoint(joint) = &binding.pose_target else {
+            return Err("Object has no free joint".into());
+        };
+        let data = self.data.as_mut().unwrap();
+        let info = data
+            .joint(joint)
+            .ok_or_else(|| "Missing free joint".to_owned())?;
+        info.view_mut(data).qvel[..3].copy_from_slice(&velocity);
+        Ok(())
+    }
+    pub(crate) fn set_object_pose_with_velocity(
+        &mut self,
+        entity: Entity,
+        transform: Transform,
+        clear_velocity: bool,
+    ) -> Result<(), String> {
         *self.object_epochs.entry(entity).or_default() += 1;
         if self.robots.contains(&entity) {
             self.motion_epoch += 1;
@@ -259,7 +289,9 @@ impl MujocoWorld {
                     rotation[2],
                     rotation[3],
                 ]);
-                view.qvel.fill(0.0);
+                if clear_velocity {
+                    view.qvel.fill(0.0);
+                }
             }
             PoseTarget::MocapBody(body) => {
                 let body_id = data

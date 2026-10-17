@@ -202,7 +202,8 @@ impl DynamicValue {
     pub fn is_primitive(&self) -> bool {
         matches!(
             self,
-            DynamicValue::Bool(_)
+            DynamicValue::Unit
+                | DynamicValue::Bool(_)
                 | DynamicValue::Int8(_)
                 | DynamicValue::Int16(_)
                 | DynamicValue::Int32(_)
@@ -227,7 +228,8 @@ impl DynamicValue {
         schema: &Schema,
     ) -> Result<(), DynamicError> {
         match (self, shape) {
-            (Self::Bool(_), TypeDef::Primitive(PrimitiveTypeDef::Bool))
+            (Self::Unit, TypeDef::Primitive(PrimitiveTypeDef::Unit))
+            | (Self::Bool(_), TypeDef::Primitive(PrimitiveTypeDef::Bool))
             | (Self::Int8(_), TypeDef::Primitive(PrimitiveTypeDef::I8))
             | (Self::Uint8(_), TypeDef::Primitive(PrimitiveTypeDef::U8))
             | (Self::Int16(_), TypeDef::Primitive(PrimitiveTypeDef::I16))

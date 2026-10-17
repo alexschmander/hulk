@@ -15,14 +15,32 @@ pub enum RetentionPolicy {
     TimeWindow(RetentionWindow),
 }
 
-/// Source-time retention window configuration.
+/// Clock used for retained history indexing and eviction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RetentionClock {
+    #[default]
+    Source,
+    Receipt,
+    WallReceipt,
+}
+
+/// Time window configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RetentionWindow {
     duration: Duration,
+    clock: RetentionClock,
+    max_bytes: Option<NonZeroUsize>,
     max_samples: Option<NonZeroUsize>,
 }
 
 impl RetentionWindow {
+    pub fn clock(self) -> RetentionClock {
+        self.clock
+    }
+    pub fn max_bytes(self) -> Option<NonZeroUsize> {
+        self.max_bytes
+    }
+
     /// Source-time duration retained from the newest sample.
     pub fn duration(self) -> Duration {
         self.duration
@@ -35,6 +53,21 @@ impl RetentionWindow {
 }
 
 impl RetentionPolicy {
+    /// Select the clock used for history queries and retention.
+    pub fn with_clock(mut self, clock: RetentionClock) -> Self {
+        if let Self::TimeWindow(window) = &mut self {
+            window.clock = clock;
+        }
+        self
+    }
+    /// Bound retained payload bytes as well as sample count and duration.
+    pub fn with_max_bytes(mut self, bytes: NonZeroUsize) -> Self {
+        if let Self::TimeWindow(window) = &mut self {
+            window.max_bytes = Some(bytes);
+        }
+        self
+    }
+
     /// Retain samples whose source time is inside `duration` from the newest sample.
     ///
     /// This also caps retained samples to [`DEFAULT_TIME_WINDOW_MAX_SAMPLES`] so
@@ -68,6 +101,8 @@ impl RetentionPolicy {
         }
 
         Ok(Self::TimeWindow(RetentionWindow {
+            clock: RetentionClock::Source,
+            max_bytes: None,
             duration,
             max_samples,
         }))

@@ -1,14 +1,12 @@
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
+use super::markings::{FieldMark, field_marks_from_field_dimensions};
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
 };
-use types::{
-    field_dimensions::FieldDimensions,
-    field_marks::{FieldMark, field_marks_from_field_dimensions},
-};
+use types::field_dimensions::FieldDimensions;
 
 use super::{goal, visual::ObjectVisualAssets};
 use crate::{

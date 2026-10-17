@@ -442,6 +442,7 @@ impl<T> ServiceServerBuilder<T> {
 }
 
 pub struct ServiceServer<T: Service, Q = Query> {
+    _schema: zenoh::query::Queryable<()>,
     key_expr: KeyExpr<'static>,
     _inner: zenoh::query::Queryable<()>,
     _lv_token: LivelinessToken,
@@ -557,7 +558,9 @@ where
             })?;
         self.warn_about_incompatible_endpoints(&entity);
 
+        let schema = crate::dynamic::service::advertise::<T>(&self.context, &entity).await?;
         Ok(ServiceServer {
+            _schema: schema,
             key_expr,
             _inner: inner,
             _lv_token: lv_token,
