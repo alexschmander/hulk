@@ -1,11 +1,12 @@
 # Simulator in Twix
 
-The Simulator panel runs one to five K1 robots per team with independent real motion, inference, fall detection, behavior and HSL message nodes.
+The Simulator panel runs one to five HULK K1 robots per team with independent real motion, inference, fall detection, behavior and HSL message nodes.
+Optional [B-Human 2026 opponents](bhuman/README.md) run their native behavior and motion with perfect world models.
 MuJoCo supplies physics and simulated sensor inputs.
 The panel reuses `egui_bevy::BevyWidget`, as the legacy simulator did.
 All simulator wiring and hardware substitutes live under `tools/simulate`; robotics crates need no simulator integration code.
 
-Select a profile before starting.
+Select a HULK profile before starting.
 The simulator sits on three explicitly requested upstream squashes: `oleflb/feat/localization-improvements`, `schluis/codex/ball-filter-realism-20261002` and `BenSampaolo/ball-search-behavior`.
 The new localization solver acquires at the default spawn; the former lookup-budget limitation no longer applies.
 The walking/head-motion fixture measured 0.0209 m maximum position error and 0.0072 rad maximum yaw error over three seconds of simulation time, using production parameters and no truth pose injection.
@@ -76,7 +77,7 @@ Twix selects the robot's namespace automatically.
 Only one simulator can run per Twix process.
 Restoring a saved layout does not start robotics or bind UDP sockets.
 
-Robots start upright and paused in **Initial**.
+HULK robots start upright and paused in **Initial**. B-Human players initialize their native game state on the first physics frame.
 Initial players alternate between both long touchlines in their own half, starting 0.5 m from the goal line and spaced 0.9 m toward midfield, facing inward.
 **Add robot** starts the next available player, at a vacant slot along the sideline, without moving existing robots.
 Placement follows the known GameController field side, defaulting to Home for HULKs and Away for opponents before the first packet.
@@ -84,7 +85,7 @@ A running match continues during startup; a paused match keeps the existing cloc
 Reset pose returns the selected robot to its original spawn slot, mirrored if GameController has changed its field side.
 Floating player numbers use the GameController's field-player or goalkeeper jersey color, with the commanded LED color as a small highlight; the selected player's number is ringed.
 Click a number to select that robot in Twix.
-Startup uses the real button bridge, handler and safe-pose check for Damping → Prepare → Initial.
+HULK startup uses the real button bridge, handler and safe-pose check for Damping → Prepare → Initial.
 It waits for the SDK's Prepare acknowledgement and an upright posture before leaving Prepare, then for Custom mode with active leg commands before releasing physics.
 While running, the panel header is the toolbar.
 With Auto referee, its first row is the match: score, half, clock, state, active restart, **Stop play**, the next match step and the **Referee desk** toggle.
@@ -272,6 +273,11 @@ Each team has a separate private UDP teammate channel, with copies forwarded to 
 Opponent adaptation rejects unsupported packet versions and other team pairings.
 All raw Booster and ROS traffic is scoped under `hulk_simulator/hulks/N` or `hulk_simulator/opponents/N`.
 No robotics source changes are required.
+
+[B-Human 2026 opponents](bhuman/README.md) run native behavior and motion in one
+process per robot, with perfect world models and native whistle, button and LED
+handlers. Build Twix with `--features bhuman` to select them during simulator setup.
+The native worker is built separately; vision and audio capture are excluded.
 
 ## Verify
 

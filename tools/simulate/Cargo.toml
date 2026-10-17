@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 
+[features]
+bhuman = ["dep:flatbuffers"]
+
 [dependencies]
 ball_filter = { workspace = true }
 ball_state_composer = { workspace = true }
@@ -30,6 +33,7 @@ egui_bevy = { workspace = true }
 egui_material_icons = { workspace = true }
 enum-map = "2.7"
 fall_detection = { workspace = true }
+flatbuffers = { version = "=25.2.10", optional = true }
 field_mark_association = { workspace = true }
 font8x8 = "0.3"
 game_controller_autoreferee = { git = "https://github.com/RoboCup-HumanoidSoccerLeague/GameController", rev = "a6cc98bb9f7c0f03912134b333194af3fa880798" }
@@ -113,6 +117,11 @@ tikv-jemallocator = { workspace = true }
 [[bin]]
 name = "simulator-mcp"
 path = "src/bin/simulator_mcp.rs"
+
+[[bin]]
+name = "bhuman-motion-smoke"
+path = "src/bin/bhuman_motion_smoke.rs"
+required-features = ["bhuman"]
 
 [dev-dependencies]
 bincode = { workspace = true }

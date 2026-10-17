@@ -26,6 +26,8 @@ pub use team::{RobotId, TeamId, robot_id, robot_namespace, transport_scope};
 mod autoref;
 mod behavior_inputs;
 mod bevy_mujoco;
+#[cfg(all(feature = "bhuman", unix))]
+pub mod bhuman;
 mod buttons;
 mod observations;
 mod parameters;
@@ -46,7 +48,7 @@ pub mod widgets;
 
 use bevy_mujoco::{SharedPhysics, SimulationMode};
 pub use profiles::{Estimators, Profile};
-pub use robotics::Configuration;
+pub use robotics::{Configuration, Opponent};
 pub use telemetry::finish_recordings;
 
 /// Global transport scope, including the otherwise unnamespaced Booster SDK.

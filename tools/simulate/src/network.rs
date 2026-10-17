@@ -204,7 +204,7 @@ pub(crate) fn drain<'a>(
 
 // Wire offsets from RoboCupGameControlData.hpp, version 20 (158 bytes).
 // Swap identifiers, never team records: their order defines the physical side.
-fn translate_state(packet: &mut [u8]) -> bool {
+pub(crate) fn translate_state(packet: &mut [u8]) -> bool {
     if packet.len() != 158 || &packet[..4] != b"RGme" || packet[4] != 20 {
         return false;
     }

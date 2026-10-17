@@ -248,7 +248,9 @@ impl Team {
             },
         )
         .await?;
-        crate::simulation::bootstrap(&io, &self.0.clock, &self.0.cancelled)?;
+        if !io.is_bhuman() {
+            crate::simulation::bootstrap(&io, &self.0.clock, &self.0.cancelled)?;
+        }
         let member = Member {
             id,
             io,
@@ -688,6 +690,7 @@ mod runtime_tests {
             router: Some(endpoint),
             namespace: robot_namespace(RobotId::FIRST),
             location: Some("incheon_small".into()),
+            opponent: crate::Opponent::Hulks,
             opponent_count: std::env::var("SIMULATOR_TEST_OPPONENTS")
                 .ok()
                 .map(|n| n.parse().unwrap())

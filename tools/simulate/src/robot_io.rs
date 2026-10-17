@@ -219,6 +219,15 @@ impl RobotBinding {
     }
 
     pub fn apply(&self, data: &mut Data, command: Option<&LowCommand>) {
+        self.apply_with_limits(data, command, None);
+    }
+
+    pub(crate) fn apply_with_limits(
+        &self,
+        data: &mut Data,
+        command: Option<&LowCommand>,
+        limits: Option<&[f32; 22]>,
+    ) {
         for (index, &(q, v, actuator)) in self.joints.iter().enumerate() {
             let torque = command.map_or(0.0, |command| {
                 let motor = &command.motor_commands[index];
@@ -227,7 +236,8 @@ impl RobotBinding {
                     + motor.kd as f64 * (motor.velocity as f64 - data.qvel()[v])
             });
             let [minimum, maximum] = data.model().actuator_ctrlrange()[actuator];
-            data.ctrl_mut()[actuator] = torque.clamp(minimum, maximum);
+            let limit = limits.map_or(f64::INFINITY, |limits| f64::from(limits[index]));
+            data.ctrl_mut()[actuator] = torque.clamp(minimum.max(-limit), maximum.min(limit));
         }
     }
 
@@ -575,6 +585,13 @@ pub(crate) mod tests {
         command.motor_commands[0].torque = 1000.0;
         binding.apply(&mut data, Some(&command));
         assert_eq!(data.ctrl()[actuator], 6.0);
+        let mut limits = [100.0; 22];
+        limits[0] = 0.75;
+        binding.apply_with_limits(&mut data, Some(&command), Some(&limits));
+        assert_eq!(data.ctrl()[actuator], 0.75);
+        command.motor_commands[0].torque = -1000.0;
+        binding.apply_with_limits(&mut data, Some(&command), Some(&limits));
+        assert_eq!(data.ctrl()[actuator], -0.75);
         binding.apply(&mut data, None);
         assert_eq!(data.ctrl()[actuator], 0.0);
     }

@@ -29,6 +29,9 @@ mod enabled {
         model_directory: PathBuf,
         robot_count: u8,
         opponent_count: u8,
+        bhuman_opponents: bool,
+        bhuman_worker: String,
+        bhuman_source: String,
         location: String,
         profile: Profile,
         referee: simulate::RefereeMode,
@@ -45,6 +48,9 @@ mod enabled {
                     .join("../../etc/neural_networks"),
                 robot_count: 1,
                 opponent_count: 0,
+                bhuman_opponents: false,
+                bhuman_worker: std::env::var("BHUMAN_WORKER").unwrap_or_default(),
+                bhuman_source: std::env::var("BHUMAN_SOURCE").unwrap_or_default(),
                 location: "incheon_small".into(),
                 profile: Profile::default(),
                 referee: simulate::RefereeMode::default(),
@@ -347,6 +353,16 @@ mod enabled {
                         }
                     }
                 });
+                #[cfg(all(feature = "bhuman", unix))]
+                {
+                    ui.checkbox(&mut self.settings.bhuman_opponents, "B-Human 2026");
+                    if self.settings.bhuman_opponents {
+                        ui.label("Worker executable");
+                        ui.text_edit_singleline(&mut self.settings.bhuman_worker);
+                        ui.label("B-Human source checkout");
+                        ui.text_edit_singleline(&mut self.settings.bhuman_source);
+                    }
+                }
                 ui.add_space(10.0);
                 ui.label(RichText::new("Referee").strong());
                 ui.horizontal(|ui| {
@@ -487,6 +503,17 @@ mod enabled {
             }
         }
 
+        fn opponent(&self) -> simulate::Opponent {
+            #[cfg(all(feature = "bhuman", unix))]
+            if self.settings.bhuman_opponents {
+                return simulate::Opponent::BHuman {
+                    executable: self.settings.bhuman_worker.clone().into(),
+                    source: self.settings.bhuman_source.clone().into(),
+                };
+            }
+            simulate::Opponent::Hulks
+        }
+
         fn start(&mut self, ui: &Ui, context: &PanelUiContext<'_>) {
             self.cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let cancelled = self.cancelled.clone();
@@ -507,6 +534,7 @@ mod enabled {
                 namespace: simulate::robot_namespace(simulate::RobotId::FIRST),
                 robot_count: self.settings.robot_count,
                 opponent_count: self.settings.opponent_count,
+                opponent: self.opponent(),
                 location: Some(self.settings.location.clone()),
                 field_configuration: Some(field),
                 router: context.backend.router().map(str::to_owned),
