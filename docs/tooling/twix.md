@@ -70,6 +70,8 @@ Choose a panel from the **+** picker.
 | --- | --- |
 | Text | Display a topic's latest payload or a selected field as JSON. |
 | Image | Display the latest raw camera frame from a `TimeWrapper<ros2::sensor_msgs::image::Image>` topic, defaulting to `inputs/left_image`. |
+| Behavior Tree | Inspect behavior decisions and execution traces. |
+| [3D Map](#3d-map) | Display the robot, cameras and field-mark associations in 3D. |
 | Map | Display field or ground views with selectable layers for robot pose, balls, obstacles, and paths. |
 | Parameter | Discover nodes with remote parameter services, display snapshots or selected paths as JSON, and write selected paths to active layers with revision checks. |
 | Audio | Display microphone spectra and a waterfall for the selected channel, defaulting to `audio_spectrums`. |
@@ -124,6 +126,15 @@ Gaps in a line mean the value was unavailable, for example an absent optional or
 The X axis shows the seconds before the newest sample, and **History** sets the time window.
 **Pause**, or **Space** after clicking the plot, freezes it so you can zoom and pan with the mouse or touchpad.
 **Reset view** or a double-click restores the full time window.
+
+
+## 3D Map
+
+Select **3D Map** in the panel selector. Its **Layers** menu independently toggles the field, articulated K1 robot, camera frustum/image plane, and field-mark associations. Drag with the left mouse button to orbit, drag with the right button to pan, and scroll to zoom. Layer settings and the selected pose source are saved with the layout.
+
+Robot and camera placement can use localization or visual odometry. Visual odometry has its own coordinate frame, so it is not aligned with the displayed field; field-mark associations are only drawn with localization selected. Localization uses the latest pose. Camera matrices and kinematics are matched to the displayed frame within 100 ms using payload timestamps. Associations require the current localization epoch and, when images are available, an exact image timestamp. Frame timestamps never move backward within a namespace and epoch. Without camera or association frames, the robot uses the latest kinematics.
+
+K1 meshes are compiled into Twix; no mesh files or source checkout are needed at runtime. The panel requires a WGPU-capable graphics adapter.
 
 ## Keybindings
 
