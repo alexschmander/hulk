@@ -405,7 +405,7 @@ impl Node {
         &self.clock
     }
 
-    fn endpoint_builder_context(&self) -> EndpointBuilderContext {
+    pub(crate) fn endpoint_builder_context(&self) -> EndpointBuilderContext {
         EndpointBuilderContext::new(
             self.session.clone(),
             self.graph.clone(),

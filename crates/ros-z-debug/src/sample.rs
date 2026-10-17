@@ -20,6 +20,12 @@ pub struct SampleMetadata {
 pub struct SampleRecord<V> {
     /// Decoded typed value or dynamic payload.
     pub value: V,
+    /// Observer clock at dequeue, independent of publisher timestamps.
+    pub receipt_time: Time,
+    /// Wall clock at dequeue, for freshness and cross-clock queries.
+    pub wall_receipt_time: Time,
+    /// Serialized payload bytes charged to bounded retention, or zero when accounting is disabled.
+    pub retained_bytes: usize,
     /// Source timestamp reported by the publisher.
     pub source_time: Time,
     /// Time used by selection/history, after the observation's timestamp projection.
@@ -45,6 +51,9 @@ pub(crate) fn dynamic_record_to_json_sample(
 ) -> SampleRecord<serde_json::Value> {
     SampleRecord {
         value: dynamic_record_json_value(record.as_ref(), policy),
+        receipt_time: record.receipt_time,
+        wall_receipt_time: record.wall_receipt_time,
+        retained_bytes: record.retained_bytes,
         source_time: record.source_time,
         effective_time: record.effective_time,
         transport_time: record.transport_time,

@@ -62,7 +62,7 @@ message_filter = { workspace = true }
 message_handler = { workspace = true }
 motion = { workspace = true }
 motion_inference = { workspace = true }
-mujoco-rs = { version = "5.0.0", features = ["auto-download-mujoco"] }
+mujoco-rs = { version = "5.0.0", features = ["auto-download-mujoco", "renderer"] }
 nalgebra = { workspace = true }
 player_states_receiver = { workspace = true }
 primary_state_filter = { workspace = true }
@@ -83,6 +83,19 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 types = { workspace = true }
 zenoh = { workspace = true }
+ros-z-debug = { workspace = true }
+ros-z-schema = { workspace = true }
+font8x8 = "0.3"
+base64 = "0.22"
+memmap2 = "0.9"
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-io"] }
+jsonschema = { version = "0.46", default-features = false }
+uuid = { workspace = true, features = ["v4"] }
+image = { workspace = true, features = ["png", "gif"] }
+
+[[bin]]
+name = "simulator-mcp"
+path = "src/bin/simulator_mcp.rs"
 
 [dev-dependencies]
 ros-z-schema = { workspace = true }

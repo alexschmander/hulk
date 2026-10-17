@@ -16,6 +16,8 @@ use crate::{
 const TYPE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const JSON_RENDER_POLICY: DynamicJsonRenderPolicy = DynamicJsonRenderPolicy {
+    tag_optionals: false,
+    wide_integers_as_strings: false,
     bytes: ByteRenderPolicy::FullArray,
     non_finite_float: NonFiniteFloatRenderPolicy::Null,
 };
