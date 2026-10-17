@@ -3,6 +3,7 @@ mod calls;
 mod desk;
 mod engine;
 mod physics;
+mod stuck;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transport;

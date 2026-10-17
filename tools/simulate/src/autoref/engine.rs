@@ -96,6 +96,7 @@ pub(crate) struct Engine {
     pub returns: BTreeMap<(u8, u8), Duration>,
     field: FieldConfiguration,
     referee: Autoreferee,
+    stuck: super::stuck::Stuck,
     journal: Journal,
     snapshot: Snapshot,
     pending: Vec<Effect>,
@@ -127,6 +128,7 @@ impl Engine {
         Ok(Self {
             core: GameController::new(params, Box::new(journal.clone())),
             referee: Autoreferee::new(Self::config(&field)),
+            stuck: super::stuck::Stuck::default(),
             field,
             journal,
             enabled: true,
@@ -327,7 +329,9 @@ impl Engine {
         self.observe_features(self.features(automatic), world);
     }
     fn observe_features(&mut self, features: Features, world: &World) {
-        self.referee.set_features(features);
+        // The upstream stuck timer counts ball age even without a nearby player.
+        // Keep player-specific timing in the simulator while retaining its other judgments.
+        self.referee.set_features(features - Features::GAME_STUCK);
         let commands = self.referee.update(&mut self.core, world);
         for command in commands {
             match command {
@@ -407,6 +411,7 @@ impl Engine {
                         .apply(VAction::FinishSetPlay(FinishSetPlay), ActionSource::Network);
                 }
                 self.referee = Autoreferee::new(Self::config(&self.field));
+                self.stuck = super::stuck::Stuck::default();
                 self.manual_ball_outside = true;
             }
         }
@@ -492,6 +497,14 @@ impl Engine {
                     &world,
                 );
             }
+        }
+        if let Some(action) =
+            self.stuck
+                .update(&self.core, &world, features.contains(Features::GAME_STUCK))
+        {
+            self.core.apply(action, ActionSource::Network);
+            // Let upstream supply placements for penalties and global-stuck restarts.
+            self.observe(false);
         }
         self.collect_events(Origin::Automatic);
         self.handle_penalties();
