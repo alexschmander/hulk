@@ -1,4 +1,4 @@
-use super::server::{FrozenQuery, Operation, State, Worker, id, string, wall};
+use super::server::{Operation, State, Worker, id, string, wall};
 use color_eyre::{
     Result,
     eyre::{bail, ensure, eyre},
@@ -209,10 +209,26 @@ pub(super) async fn read_tool(state: &Arc<State>, tool: &str, args: &Value) -> R
                         <= 256 * 1024 * 1024,
                 "Observation memory budget exhausted"
             );
-            let sources = args["sources"].as_array().unwrap();
+            let mut sources = args["sources"].as_array().cloned().unwrap_or_default();
+            if args["preset"] == "motion_inference" {
+                sources.extend(
+                    [
+                        "motion_inference/trace",
+                        "motion_inference/status",
+                        "motion_inference/timing",
+                    ]
+                    .map(|topic| json!({"topic":topic})),
+                );
+            }
+            sources.sort_by_key(Value::to_string);
+            sources.dedup();
+            ensure!(
+                sources.len() <= 32,
+                "Observation including preset exceeds 32 sources"
+            );
             let topics: std::collections::BTreeSet<_> = sources
                 .iter()
-                .map(|s| string(s, "topic"))
+                .map(|s| target.absolute(string(s, "topic")?))
                 .collect::<Result<_>>()?;
             let policy = RetentionPolicy::time_window_with_max_samples(
                 Duration::from_millis(duration),
@@ -226,7 +242,7 @@ pub(super) async fn read_tool(state: &Arc<State>, tool: &str, args: &Value) -> R
             });
             let mut subscriptions = HashMap::new();
             for topic in topics {
-                subscriptions.insert(topic.to_owned(), subscribe(&target, topic, policy).await?);
+                subscriptions.insert(topic.to_owned(), subscribe(&target, &topic, policy).await?);
             }
             let identifier = id();
             let retention = json!({"duration_ms":duration,"max_samples_per_topic":samples,"max_bytes":bytes,"clock":clock});
@@ -239,7 +255,7 @@ pub(super) async fn read_tool(state: &Arc<State>, tool: &str, args: &Value) -> R
                 },
             );
             Ok(
-                json!({"observation_id":identifier,"state":"ready","retention":retention,"coverage":[]}),
+                json!({"observation_id":identifier,"state":"ready","retention":retention,"coverage":[],"sources":sources,"warnings":["Subscriptions are armed locally. Subscriber-gated publishers may still need graph discovery to settle before emitting diagnostics."]}),
             )
         }
         "rosz_parameter_read" => {
@@ -247,12 +263,14 @@ pub(super) async fn read_tool(state: &Arc<State>, tool: &str, args: &Value) -> R
             if let Some(path) = args["path"].as_str() {
                 let result = client.get_value(path).await?;
                 ensure!(result.success, "{}", result.message);
+                state.remember_parameters(&target, &args["node"], &json!(result.revision), "read");
                 Ok(
                     json!({"node":args["node"],"revision":result.revision,"layers":[result.effective_source_layer],"values":serde_json::from_str::<Value>(result.value_json.as_ref())?}),
                 )
             } else {
                 let snapshot = serde_json::to_value(client.get_snapshot().await?)?;
                 ensure!(snapshot["success"] == true, "{}", snapshot["message"]);
+                state.remember_parameters(&target, &args["node"], &snapshot["revision"], "read");
                 Ok(
                     json!({"node":args["node"],"revision":snapshot["revision"],"layers":snapshot["layers"],"values":serde_json::from_str::<Value>(snapshot["value_json"].as_str().unwrap_or("null"))?}),
                 )
@@ -305,6 +323,12 @@ pub(super) async fn write_tool(
                 result["success"] == true,
                 "Parameter update rejected: {}",
                 result["message"]
+            );
+            state.remember_parameters(
+                &target,
+                &args["node"],
+                &result["committed_revision"],
+                "write",
             );
             Ok(
                 json!({"node":args["node"],"committed_revision":result["committed_revision"],"changed_paths":result["changed_paths"]}),
@@ -392,7 +416,7 @@ fn selected(payload: &DynamicPayload, source: &Value) -> Result<(Value, &'static
         Err(error) => Err(error.into()),
     }
 }
-fn sample(
+pub(super) fn sample(
     target: &Target,
     source: &Value,
     record: &ros_z_debug::SampleRecord<DynamicPayload>,
@@ -415,7 +439,7 @@ fn sample(
         json!({"topic":source["topic"],"path":source["path"].as_str().unwrap_or(""),"type_info":type_info(&record.metadata.type_info),"publication_id":format!("{}:{}",target.worker.id,record.publication_id),"source_time_ns":record.source_time.as_nanos().to_string(),"source_clock":"unknown","receipts":[{"collector":"observation","simulation_ns":simulation.to_string(),"wall_ns":record.wall_receipt_time.as_nanos().to_string()}],"selected_time_ns":time.to_string(),"value":value,"value_status":status,"provenance":["observation"]}),
     )
 }
-fn in_range(sample: &Value, range: &Value) -> Result<bool> {
+pub(super) fn in_range(sample: &Value, range: &Value) -> Result<bool> {
     let time = string(sample, "selected_time_ns")?.parse::<i64>()?;
     Ok(time >= string(range, "start_ns")?.parse::<i64>()?
         && time < string(range, "end_ns")?.parse::<i64>()?)
@@ -446,13 +470,14 @@ pub(super) async fn read_cancellable(
     let mut coverage = Vec::new();
     for source in sources {
         let topic = string(source, "topic")?;
+        let absolute = target.absolute(topic)?;
         let cached: Vec<_> = state
             .observations
             .lock()
             .await
             .values()
             .filter(|o| o.target == target.id)
-            .filter_map(|o| o.topics.get(topic).cloned())
+            .filter_map(|o| o.topics.get(&absolute).cloned())
             .collect();
         let observed = !cached.is_empty();
         let mut records = Vec::new();
@@ -500,10 +525,23 @@ pub(super) async fn read_cancellable(
         coverage.push(json!({"topic":topic,"path":source["path"].as_str().unwrap_or(""),"subscription_state":if !observed{"not_observed"}else if target.worker.stopped.load(std::sync::atomic::Ordering::Acquire){"closed"}else{"active"},"intervals":if latest{vec![]}else{vec![json!({"range":range,"status":if observed{"unknown"}else{"not_observed"}})]},"loss_status":"unknown","warnings":if observed{vec!["Retention and transport loss may leave gaps; sample timestamps do not prove complete coverage."]}else{vec![]}}));
     }
     let checkpoint = if !latest && args["allow_recording_fallback"] == true {
-        let (recorded, checkpoint) =
+        let (recorded, checkpoint, scan) =
             super::archive::read(&target, sources, range, cancellation).await?;
+        for entry in &mut coverage {
+            if let Some(status) = scan["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["topic"] == entry["topic"])
+            {
+                entry["recording_status"] = status["status"].clone();
+                if status["status"] == "topic_never_recorded" {
+                    entry["warnings"].as_array_mut().unwrap().push(json!("No publications for this topic exist in the finalized recording. Discovery alone does not enable subscriber-gated diagnostics; arm rosz_observe before advancing."));
+                }
+            }
+        }
         rows.extend(recorded);
-        Some(checkpoint)
+        Some((checkpoint, scan))
     } else {
         None
     };
@@ -546,11 +584,19 @@ pub(super) async fn read_cancellable(
         rows.len() <= 100_000 && serde_json::to_vec(&rows)?.len() <= 64 * 1024 * 1024,
         "Query exceeds snapshot budget; narrow the time range"
     );
-    let query_id = id();
-    let mut metadata = json!({"query_id":query_id,"coverage":coverage,"warnings":[]});
-    if let Some(checkpoint) = checkpoint {
+    let mut metadata = json!({"coverage":coverage,"warnings":[]});
+    if let Some((checkpoint, scan)) = checkpoint {
         metadata["checkpoint"] = checkpoint;
+        metadata["archive_scan"] = scan;
     }
+    let mut verification = super::verification::Verification::default();
+    for row in &rows {
+        verification.observe(row);
+    }
+    metadata["verification"] = verification.finish(
+        metadata.get("checkpoint"),
+        state.parameter_revisions(&target.id),
+    );
     paginate(state, args, rows, metadata, "samples")
 }
 
@@ -572,100 +618,14 @@ fn paginate(
             row["artifact"] = state.artifact(&path, "Value exceeding inline response limit")?;
         }
     }
-    let key = id();
-    let query = FrozenQuery {
-        created: Instant::now(),
-        arguments: args.clone(),
-        rows,
-        metadata,
-        collection: collection.to_owned(),
-    };
-    let result = query_page(&query, args, &key, 0)?;
-    if !result["next_cursor"].is_null() {
-        let mut queries = state.queries.lock().unwrap();
-        queries.retain(|_, q| q.created.elapsed() < Duration::from_secs(300));
-        let retained_bytes: usize = queries
-            .values()
-            .map(|q| serde_json::to_vec(&q.rows).map_or(usize::MAX, |b| b.len()))
-            .sum();
-        ensure!(
-            queries.len() < 128
-                && retained_bytes.saturating_add(serde_json::to_vec(&query.rows)?.len())
-                    <= 64 * 1024 * 1024,
-            "Cursor memory budget exhausted; narrow the query or retry after expiry"
-        );
-        queries.insert(key, query);
-    }
-    Ok(result)
+    state
+        .queries
+        .lock()
+        .unwrap()
+        .insert(args, rows, metadata, collection)
 }
 fn page(state: &State, args: &Value, cursor: &str) -> Result<Value> {
-    let (key, offset) = cursor
-        .rsplit_once(':')
-        .ok_or_else(|| eyre!("Invalid cursor"))?;
-    let queries = state.queries.lock().unwrap();
-    let query = queries
-        .get(key)
-        .filter(|q| q.created.elapsed() < Duration::from_secs(300))
-        .ok_or_else(|| eyre!("Cursor expired"))?;
-    let mut signature = args.clone();
-    signature.as_object_mut().unwrap().remove("cursor");
-    ensure!(
-        signature == query.arguments,
-        "Cursor belongs to different query arguments"
-    );
-    query_page(query, args, key, offset.parse()?)
-}
-fn query_page(query: &FrozenQuery, args: &Value, key: &str, offset: usize) -> Result<Value> {
-    ensure!(offset <= query.rows.len(), "Invalid cursor offset");
-    let limit = args["limit"]
-        .as_u64()
-        .unwrap_or(if query.collection == "samples" {
-            1000
-        } else {
-            100
-        }) as usize;
-    let budget = args["max_bytes"].as_u64().unwrap_or(262144) as usize;
-    let mut result = query.metadata.clone();
-    let mut bytes = serde_json::to_vec(&result)?.len() + key.len() + 128;
-    let mut rows = Vec::new();
-    for row in query.rows.iter().skip(offset).take(limit) {
-        let size = serde_json::to_vec(row)?.len() + 1;
-        if bytes + size > budget {
-            ensure!(
-                !rows.is_empty(),
-                "Response metadata exceeds byte budget; increase max_bytes or request fewer sources"
-            );
-            break;
-        }
-        bytes += size;
-        rows.push(row.clone());
-    }
-    let next = offset + rows.len();
-    result["next_cursor"] = if next < query.rows.len() {
-        json!(format!("{key}:{next}"))
-    } else {
-        Value::Null
-    };
-    match query.collection.as_str() {
-        "samples" => {
-            result["truncated"] = json!(next < query.rows.len());
-            result["samples"] = json!(rows);
-        }
-        "graph" => {
-            result["nodes"] = json!(
-                rows.iter()
-                    .filter_map(|r| r.get("node"))
-                    .collect::<Vec<_>>()
-            );
-            result["endpoints"] = json!(
-                rows.iter()
-                    .filter_map(|r| r.get("endpoint"))
-                    .collect::<Vec<_>>()
-            );
-        }
-        field => result[field] = json!(rows),
-    }
-    Ok(result)
+    state.queries.lock().unwrap().page(args, cursor)
 }
 
 struct WatchedPredicate {
@@ -686,13 +646,14 @@ impl ConditionWatch {
             let target = state.target(predicate).await?;
             let source = predicate["source"].clone();
             let topic = string(&source, "topic")?;
+            let absolute = target.absolute(topic)?;
             let cached = state
                 .observations
                 .lock()
                 .await
                 .values()
                 .filter(|o| o.target == target.id)
-                .find_map(|o| o.topics.get(topic).cloned());
+                .find_map(|o| o.topics.get(&absolute).cloned());
             let cache = match cached {
                 Some(cache) => cache,
                 None => subscribe(&target, topic, RetentionPolicy::LatestOnly).await?,
@@ -845,42 +806,61 @@ fn logs(state: &State, target: &Target, args: &Value) -> Result<Value> {
         "entries",
     )
 }
-pub(super) fn recorded_sample(
-    target: &Target,
-    source: &Value,
-    message: &mcap::Message<'_>,
-    receipt: &crate::telemetry::recording::Receipt,
-    range: &Value,
-) -> Result<Option<Value>> {
-    let schema: ros_z::dynamic::Schema = Arc::new(serde_json::from_slice(
-        &message
+#[derive(Default)]
+pub(super) struct RecordingDecoder {
+    schemas: HashMap<String, ros_z::dynamic::Schema>,
+}
+impl RecordingDecoder {
+    pub fn sample(
+        &mut self,
+        target: &Target,
+        source: &Value,
+        message: &mcap::Message<'_>,
+        receipt: &crate::telemetry::recording::Receipt,
+        range: &Value,
+    ) -> Result<Option<Value>> {
+        let hash = message
             .channel
-            .schema
-            .as_ref()
-            .ok_or_else(|| eyre!("Missing recorded schema"))?
-            .data,
-    )?);
-    if let Some(hash) = source["schema_hash"].as_str() {
-        ensure!(
-            message
+            .metadata
+            .get("ros_z.schema_hash")
+            .ok_or_else(|| eyre!("Missing recorded schema hash"))?;
+        if !self.schemas.contains_key(hash) {
+            ensure!(
+                self.schemas.len() < 1024,
+                "Archive decoding exceeds 1024 distinct schemas; export fewer sources"
+            );
+            let data = &message
                 .channel
-                .metadata
-                .get("ros_z.schema_hash")
-                .map(String::as_str)
-                == Some(hash),
-            "Recorded schema differs from requested schema"
-        );
+                .schema
+                .as_ref()
+                .ok_or_else(|| eyre!("Missing recorded schema"))?
+                .data;
+            self.schemas
+                .insert(hash.clone(), Arc::new(serde_json::from_slice(data)?));
+        }
+        let schema = &self.schemas[hash];
+        if let Some(hash) = source["schema_hash"].as_str() {
+            ensure!(
+                message
+                    .channel
+                    .metadata
+                    .get("ros_z.schema_hash")
+                    .map(String::as_str)
+                    == Some(hash),
+                "Recorded schema differs from requested schema"
+            );
+        }
+        let payload = ros_z::dynamic::DynamicCdrCodec::decode(&message.data, schema)?;
+        let (value, status) = selected(&payload, source)?;
+        let simulation = message.log_time as i64 - target.worker.origin;
+        let time = match range["clock"].as_str().unwrap() {
+            "source" => message.publish_time as i64,
+            "wall_receipt" => receipt.wall_time,
+            _ => simulation,
+        };
+        let sample = json!({"topic":source["topic"],"path":source["path"].as_str().unwrap_or(""),"type_info":{"name":message.channel.schema.as_ref().unwrap().name,"schema_hash":message.channel.metadata.get("ros_z.schema_hash")},"publication_id":format!("{}:{}#{}",target.worker.id,receipt.publisher,receipt.sequence),"source_time_ns":message.publish_time.to_string(),"source_clock":"unknown","receipts":[{"collector":"recording","simulation_ns":simulation.to_string(),"wall_ns":receipt.wall_time.to_string()}],"selected_time_ns":time.to_string(),"value":value,"value_status":status,"provenance":["recording"]});
+        Ok(in_range(&sample, range)?.then_some(sample))
     }
-    let payload = ros_z::dynamic::DynamicCdrCodec::decode(&message.data, &schema)?;
-    let (value, status) = selected(&payload, source)?;
-    let simulation = message.log_time as i64 - target.worker.origin;
-    let time = match range["clock"].as_str().unwrap() {
-        "source" => message.publish_time as i64,
-        "wall_receipt" => receipt.wall_time,
-        _ => simulation,
-    };
-    let sample = json!({"topic":source["topic"],"path":source["path"].as_str().unwrap_or(""),"type_info":{"name":message.channel.schema.as_ref().unwrap().name,"schema_hash":message.channel.metadata.get("ros_z.schema_hash")},"publication_id":format!("{}:{}#{}",target.worker.id,receipt.publisher,receipt.sequence),"source_time_ns":message.publish_time.to_string(),"source_clock":"unknown","receipts":[{"collector":"recording","simulation_ns":simulation.to_string(),"wall_ns":receipt.wall_time.to_string()}],"selected_time_ns":time.to_string(),"value":value,"value_status":status,"provenance":["recording"]});
-    Ok(in_range(&sample, range)?.then_some(sample))
 }
 
 #[cfg(test)]
@@ -900,22 +880,5 @@ mod tests {
             &json!({"operator":"changed"}),
             Some(&json!(1))
         ));
-    }
-    #[test]
-    fn frozen_pages_are_stable_and_bounded() {
-        let query = FrozenQuery {
-            created: Instant::now(),
-            arguments: json!({}),
-            rows: vec![json!({"value":1}), json!({"value":2}), json!({"value":3})],
-            metadata: json!({"query_id":"test","coverage":[]}),
-            collection: "samples".into(),
-        };
-        let args = json!({"limit":2,"max_bytes":1024});
-        let first = query_page(&query, &args, "query", 0).unwrap();
-        assert_eq!(first["next_cursor"], "query:2");
-        assert_eq!(query_page(&query, &args, "query", 0).unwrap(), first);
-        let last = query_page(&query, &args, "query", 2).unwrap();
-        assert_eq!(last["samples"], json!([{"value":3}]));
-        assert!(last["next_cursor"].is_null());
     }
 }

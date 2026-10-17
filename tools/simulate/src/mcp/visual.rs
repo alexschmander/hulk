@@ -35,6 +35,11 @@ pub(super) async fn execute(
         }
         "plot" => {
             let result=super::rosz::read(state,&json!({"target_id":view["target_id"],"sources":view["sources"],"query":{"kind":"history","range":view["range"]},"allow_recording_fallback":view["allow_recording_fallback"].as_bool().unwrap_or(false),"limit":10000,"max_bytes":1048576})).await?;
+            state
+                .queries
+                .lock()
+                .unwrap()
+                .release(result["query_id"].as_str().unwrap());
             ensure!(
                 result["truncated"] == false,
                 "Plot exceeds inline sample budget; narrow the interval"

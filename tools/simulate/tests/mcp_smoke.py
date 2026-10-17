@@ -2,6 +2,8 @@
 """Exercise the real stdio MCP server. Run with uv --with jsonschema (see README)."""
 import argparse
 import base64
+import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -63,7 +65,7 @@ class Client:
     def call(self, tool, **arguments):
         result = self.rpc('tools/call', {'name': tool, 'arguments': arguments})['structuredContent']
         validate(TOOLS[tool]['output_schema'], result)
-        assert 'error' not in result, result
+        assert 'error' not in result or ('operation_id' in result and result.get('state') in ('failed', 'cancelled')), result
         return result
 
     def begin(self, name, **arguments):
@@ -97,7 +99,7 @@ class Client:
 
 
 def smoke(client, directory, render):
-    assert len(client.rpc('tools/list', {})['tools']) == 22
+    assert {t['name'] for t in client.rpc('tools/list', {})['tools']} == set(TOOLS)
     info = client.call('server_info')
     assert 'active_recording_fallback' in info['capabilities']
     start_arguments = {'request_id': 'start-once', 'configuration': {
@@ -113,10 +115,26 @@ def smoke(client, directory, render):
     graph = client.call('rosz_graph', target_id=target, limit=1000)
     assert graph['endpoints']
     (directory / 'graph.json').write_text(json.dumps(graph, indent=2))
+    client.begin('query_release', query_id=graph['query_id'])
     page = client.call('rosz_graph', target_id=target, limit=1)
     assert page['next_cursor']
     next_args = {'target_id': target, 'limit': 1, 'cursor': page['next_cursor']}
     assert client.call('rosz_graph', **next_args) == client.call('rosz_graph', **next_args)
+    released = client.begin('query_release', query_id=page['query_id'])
+    assert released['freed_bytes'] > 0 and released['query_budget']['active_queries'] == 0
+    # Completing many tiny pages must reclaim snapshots, including graph snapshots.
+    for _ in range(5):
+        page = client.call('rosz_graph', target_id=target, limit=25)
+        while page['next_cursor']:
+            args = {'target_id': target, 'limit': 25, 'cursor': page['next_cursor']}
+            page = client.call('rosz_graph', **args)
+        if 'cursor' in args:
+            assert client.call('rosz_graph', **args) == page
+        assert client.call('server_info')['query_budget']['snapshot_bytes'] == 0
+        client.begin('query_release', query_id=page['query_id'])
+    diagnostic = client.begin('rosz_observe', target_id=target, preset='motion_inference',
+                              retention={'max_bytes': 8388608})
+    assert any(source['topic'] == 'motion_inference/trace' for source in diagnostic['sources'])
     source = {'topic': 'primary_state'}
     schema = client.call('rosz_schema', target_id=target, kind='topic', name=source['topic'])
     assert schema['type_info']['schema_hash']
@@ -137,7 +155,41 @@ def smoke(client, directory, render):
     assert archived['checkpoint']['recorders'][0]['tail_status'] == 'complete_to_barrier'
     assert any(set(row['provenance']) == {'observation', 'recording'} for row in archived['samples']), archived
     assert len({row['publication_id'] for row in archived['samples']}) == len(archived['samples'])
-    print('Verified exact steps, repeated live reads, and active recording deduplication', flush=True)
+    assert archived['verification']['tracking_complete']
+    assert archived['archive_scan']['linear_segments'] == 0
+    assert archived['coverage'][0]['recording_status'] == 'recorded'
+    # Explicit missing-topic status differs from an empty interval on a recorded topic.
+    missing = client.finish(client.call('rosz_read', **{**query, 'sources': [{'topic': 'never_published'}]},
+                                       allow_recording_fallback=True))
+    assert missing['coverage'][0]['recording_status'] == 'topic_never_recorded', missing
+    trace = client.finish(client.call('rosz_read', **{**query, 'sources': [{'topic': 'motion_inference/trace'}]},
+                                     allow_recording_fallback=True))
+    assert trace['samples'], trace
+    for data_source in ['observations', 'recording']:
+        exported = client.complete('rosz_export', target_id=target, sources=[source],
+                                   range=query['query']['range'], data_source=data_source)
+        rows = [json.loads(line) for line in Path(exported['artifact']['local_path']).read_text().splitlines()]
+        assert len(rows) == exported['sample_count'] and rows
+        assert all(row['provenance'] == [data_source.removesuffix('s')] for row in rows)
+        assert all(0 <= int(row['selected_time_ns']) < int(end) for row in rows)
+        metadata = json.loads(Path(exported['metadata_artifact']['local_path']).read_text())
+        assert metadata['verification'] == exported['verification']
+        uri = exported['artifact']['uri']
+        prefix = client.rpc('resources/read', {'uri': uri + '?offset=0&length=20'})['contents'][0]
+        assert base64.b64decode(prefix['blob']) == Path(exported['artifact']['local_path']).read_bytes()[:20]
+        assert client.call('server_info')['query_budget']['snapshot_bytes'] == 0
+    csv_export = client.complete('rosz_export', target_id=target, sources=[source],
+                                 range=query['query']['range'], data_source='recording', format='csv')
+    csv_rows = list(csv.DictReader(io.StringIO(Path(csv_export['artifact']['local_path']).read_text())))
+    assert len(csv_rows) == csv_export['sample_count'] and csv_rows
+    json.loads(csv_rows[0]['value'])
+    before = set((directory / 'artifacts').iterdir())
+    failed = client.terminal(client.begin('rosz_export', target_id=target, sources=[source],
+                                         range=query['query']['range'], max_bytes=1))
+    assert failed['state'] == 'failed' and 'max_bytes' in failed['error']['message'], failed
+    assert set((directory / 'artifacts').iterdir()) == before
+    client.begin('rosz_unobserve', observation_id=diagnostic['observation_id'])
+    print('Verified pagination cleanup, indexed history, diagnostic capture, exports and verification', flush=True)
     condition = {'match': 'all', 'predicates': [{'target_id': target, 'source': source, 'operator': 'exists'}]}
     assert client.complete('rosz_wait', condition=condition, wall_timeout_ms=100)['matched']
     scene = client.call('scene_read', session_id=sid)
@@ -156,6 +208,9 @@ def smoke(client, directory, render):
     client.complete('rosz_parameter_write', target_id=target, node='behavior_node', action={
         'kind': 'set', 'expected_revision': parameters['revision'],
         'writes': [{'path': name, 'value': value, 'layer': layer}]})
+    verified = client.call('rosz_read', **query)['verification']
+    assert any(revision['node'] == 'behavior_node' and revision['kind'] == 'write'
+               for revision in verified['parameter_revisions'])
     service_name = 'behavior_node/parameter/get_type_info'
     service = client.call('rosz_schema', target_id=target, kind='service', name=service_name)
     reply = client.complete('rosz_call', target_id=target, service=service_name,
