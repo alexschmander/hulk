@@ -11201,6 +11201,7 @@ dependencies = [
  "robot_logs",
  "ros-z",
  "ros-z-debug",
+ "ros-z-protocol",
  "ros-z-schema",
  "ros-z-streams",
  "ros2",

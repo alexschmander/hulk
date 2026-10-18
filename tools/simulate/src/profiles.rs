@@ -173,7 +173,7 @@ const NODE_GROUPS: [NodeGroup; 5] = [
     },
 ];
 
-/// A physical reference, always published under `ground_truth/`.
+/// A physical reference declared under `ground_truth/`, published when observed.
 pub(crate) struct ReferenceSpec {
     pub topic: &'static str,
     pub meaning: &'static str,

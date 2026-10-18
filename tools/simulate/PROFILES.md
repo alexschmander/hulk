@@ -38,7 +38,7 @@ Whistle detection is replaced by a UI-generated detection stream; the real whist
 The Rust crate names for the last two nodes are `localization-3d` and `localization-2d`; their runtime node names are `localization3d` and `localization2d`.
 The profiles are cumulative in robotics coverage. Enabling an estimator group removes the corresponding truth substitutes from its production topics. Disabled groups keep those substitutes.
 `search_suggestor` runs in every profile as part of behavior. Its hypothetical-ball subscriber is idle when `ball_filter` is disabled; no synthetic search policy or hypotheses are supplied.
-All physical reference streams remain published under `ground_truth/` in every profile, regardless of which estimators are running.
+All physical reference topics remain declared under `ground_truth/` in every profile, regardless of which estimators are running. They publish when a native subscriber is present, including raw MCAP recording. Production substitute inputs keep their original cadence independently of diagnostic demand.
 
 ### Common stack
 
@@ -65,14 +65,14 @@ This work does not claim to simulate the entire unchanged `hulk_ros_z` executabl
 
 Every functional output has one designated producer.
 Inactive substitutes must not even declare the conflicting production publisher.
-Truth for comparison always uses `ground_truth/...` topics, within the robot's existing ROS namespace and global Zenoh scope.
+Truth for comparison uses `ground_truth/...` topics, within the robot's existing ROS namespace and global Zenoh scope.
 Use that prefix directly, without an additional `simulator/` component.
 Production nodes do not subscribe to the reference namespace.
 
-Publish the same available physical reference streams in every profile, even when their real node runs or their production counterpart is unnecessary in that profile.
+Declare the same available physical reference streams in every profile, even when their real node runs or their production counterpart is unnecessary in that profile. Publish on native subscription demand and skip camera detection work only when no production estimator or truth observer needs it.
 Mirror production topic suffixes and types where meaningful, for example:
 
-| Always-published reference | Meaning |
+| Available reference | Meaning |
 | --- | --- |
 | `ground_truth/ground_to_field` | Exact planar field pose |
 | `ground_truth/robot_to_ground`, `ground_truth/ground_to_robot` | Physical body/ground geometry |
@@ -93,7 +93,7 @@ Include timestamps and define how contact truth maps to support states.
 Truth remains independent of estimated geometry and configured sensor noise.
 
 Where a profile needs an ideal production input, publish that same physical sample to its production topic too.
-Removing this second publication in a higher profile never disables its `ground_truth/` publication.
+Removing this second publication in a higher profile never removes the corresponding `ground_truth/` topic or its on-demand publication.
 The table below describes only production ownership, not whether the reference is available.
 
 | Output | Motion & behavior | Ball and obstacle filtering | Body state & odometry | Localization |
@@ -424,7 +424,7 @@ Keep responsibilities small in number:
 | Context, node lifecycle, parameter layers and supervision | Existing `robotics.rs`, refactored around profile membership |
 | Coherent physical observations and scene discontinuities | Existing `robot_io.rs` and `simulation.rs` |
 | Raw Booster sensor encoding | Tool-local sensor publisher beside existing SDK/button substitutes |
-| Ideal behavior inputs, always-published references and synthetic detections | Tool-local input modules replacing the monolithic `BehaviorInputs` ownership |
+| Ideal behavior inputs, reference streams and synthetic detections | Tool-local input modules replacing the monolithic `BehaviorInputs` ownership |
 | Camera-motion trajectory and VO messages | Tool-local VO substitute |
 | Whistle pulse scheduling | Tool-local control publisher, driven by toolbar intent |
 | Profile selection/persistence and startup errors | `tools/twix/src/panels/simulator.rs` plus existing simulator toolbar |
