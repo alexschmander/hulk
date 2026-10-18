@@ -78,6 +78,7 @@ rmcp = { version = "3.5.1", default-features = false, features = [
 robot_logs = { workspace = true }
 ros-z = { workspace = true }
 ros-z-debug = { workspace = true }
+ros-z-protocol = { workspace = true }
 ros-z-schema = { workspace = true }
 ros-z-streams = { workspace = true }
 ros2 = { workspace = true }

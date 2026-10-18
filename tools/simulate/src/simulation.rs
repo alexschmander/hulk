@@ -345,18 +345,20 @@ impl PhysicsWorker {
                                     })
                                     .collect::<Vec<_>>();
                                 let field = member.io.field_dimensions;
-                                let detections = crate::observations::detect_scene(
-                                    world.data_mut(),
-                                    observation,
-                                    &balls,
-                                    &field,
-                                    &others,
-                                    team.configuration()
-                                        .field_configuration
-                                        .as_ref()
-                                        .unwrap()
-                                        .goal_height,
-                                );
+                                let detections = member.io.needs_detections().then(|| {
+                                    crate::observations::detect_scene(
+                                        world.data_mut(),
+                                        observation,
+                                        &balls,
+                                        &field,
+                                        &others,
+                                        team.configuration()
+                                            .field_configuration
+                                            .as_ref()
+                                            .unwrap()
+                                            .goal_height,
+                                    )
+                                });
                                 Some(crate::observations::Frame {
                                     time,
                                     sequence,
@@ -539,7 +541,7 @@ impl PhysicsWorker {
                                     sample: observation.clone(),
                                     balls,
                                     robots: Vec::new(),
-                                    detections,
+                                    detections: Some(detections),
                                     field,
                                 });
                             }

@@ -12,6 +12,7 @@ use egui_material_icons::icons;
 use tokio::runtime::Handle;
 
 mod controller;
+mod demand;
 mod field;
 mod network;
 mod team;
