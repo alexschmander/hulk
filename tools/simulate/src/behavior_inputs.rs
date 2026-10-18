@@ -46,26 +46,33 @@ impl BehaviorInputs {
         let pose = ground_to_field(ground_to_world, side);
         let ball = ball
             .map(|(position, velocity)| ball_in_ground(ground_to_world, position, velocity, time));
-        let inverse = ground_to_world.inverse();
-        use types::field_dimensions::{Half, Side};
-        let mut obstacles: Vec<_> = [Half::Own, Half::Opponent]
-            .into_iter()
-            .flat_map(|half| {
-                [Side::Left, Side::Right].map(|side| {
-                    let position = field.goal_post(half, side);
-                    let p = inverse * nalgebra::point![position.x(), position.y(), 0.0];
-                    Obstacle::goal_post(point![p.x, p.y], field.goal_post_diameter / 2.0)
+        let obstacles = if self.obstacles.needed() {
+            let inverse = ground_to_world.inverse();
+            use types::field_dimensions::{Half, Side};
+            let mut obstacles: Vec<_> = [Half::Own, Half::Opponent]
+                .into_iter()
+                .flat_map(|half| {
+                    [Side::Left, Side::Right].map(|side| {
+                        let position = field.goal_post(half, side);
+                        let p = inverse * nalgebra::point![position.x(), position.y(), 0.0];
+                        Obstacle::goal_post(point![p.x, p.y], field.goal_post_diameter / 2.0)
+                    })
                 })
-            })
-            .collect();
-        obstacles.extend(robots.iter().map(|position| {
-            let p = inverse * nalgebra::Point3::from(*position);
-            Obstacle::robot(point![p.x, p.y], 0.2, 0.25)
-        }));
+                .collect();
+            obstacles.extend(robots.iter().map(|position| {
+                let p = inverse * nalgebra::Point3::from(*position);
+                Obstacle::robot(point![p.x, p.y], 0.2, 0.25)
+            }));
+            Some(obstacles)
+        } else {
+            None
+        };
         self.pose.publish(&pose, time).await?;
         self.ball.publish(&ball, time).await?;
         self.visual_ball.publish(&ball, time).await?;
-        self.obstacles.publish(&obstacles, time).await?;
+        if let Some(obstacles) = obstacles {
+            self.obstacles.publish(&obstacles, time).await?;
+        }
         self.interest
             .publish_with_source_time(
                 &self
