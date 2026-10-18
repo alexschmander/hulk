@@ -112,6 +112,7 @@ pub struct RobotStack {
     whistle: watch::Sender<Option<Time>>,
     frames: watch::Sender<Option<Frame>>,
     body: crate::reference::BodyReferences,
+    detection_demand: crate::demand::Demand,
     sensors: tokio::sync::Mutex<crate::sensors::Sensors>,
     readiness: crate::readiness::Readiness,
     pub primary: ros_z::cache::Cache<types::primary_state::PrimaryState>,
@@ -328,6 +329,7 @@ impl RobotStack {
             parameters.clone(),
         )
         .await?;
+        let detection_demand = camera_inputs.detection_demand();
         let readiness = crate::readiness::Readiness::new(&node, configuration.profile).await?;
         let game = Arc::new(
             node.subscriber::<FilteredGameControllerState>("filtered_game_controller_state")
@@ -455,6 +457,7 @@ impl RobotStack {
             whistle,
             frames,
             body,
+            detection_demand,
             sensors: tokio::sync::Mutex::new(sensors),
             readiness,
             primary,
@@ -640,6 +643,10 @@ impl RobotStack {
                 .publish(&observation.low_state, time)
                 .await
         })
+    }
+
+    pub fn needs_detections(&self) -> bool {
+        self.profile.filtering() || self.profile.localization() || self.detection_demand.active()
     }
 
     pub fn publish_frame(&self, frame: Frame) {

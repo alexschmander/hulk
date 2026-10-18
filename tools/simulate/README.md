@@ -20,7 +20,7 @@ The [profile plan](PROFILES.md) records topic ownership and validation contracts
 
 The profiles are cumulative: each adds the real nodes listed in its row to those of the preceding profiles.
 
-Behavior, `search_suggestor`, motion, protection and team/game handling run in every profile. The simulator supplies ideal outputs for disabled groups; enabled groups are their sole production publishers. Synthetic detections are supplied when either object filtering or localization is enabled, and simulated visual odometry when localization is enabled. The `ground_truth/` comparison streams always remain available.
+Behavior, `search_suggestor`, motion, protection and team/game handling run in every profile. The simulator supplies ideal outputs for disabled groups; enabled groups are their sole production publishers. Synthetic detections are supplied when either object filtering or localization is enabled, and simulated visual odometry when localization is enabled. The `ground_truth/` comparison topics remain discoverable in every profile and publish when an observer or recorder subscribes.
 
 Ideal ball/obstacle inputs are still scene-wide: the first ball is supplied regardless of visibility, and all robots and fixed goalposts become obstacles. Search runs in that mode, but visibility loss is only exercised with object filtering enabled. No hypothetical-ball messages are fabricated when the ball filter is off.
 
@@ -175,6 +175,12 @@ The parameter layers are the selected root's `base`, this tool's `parameters`, t
 Twix writes to the last layer, which is deleted when the simulator stops.
 Save an intentional tuning result separately if it should survive a restart.
 Repository robot parameters stay intact.
+
+Unobserved `ground_truth/` topics skip serialization and publication. Native subscription
+matching includes raw MCAP capture, so full recordings retain all comparison streams.
+Synthetic camera detection work is also skipped when neither a selected estimator nor
+an observer needs it. Production sensors and substitute inputs keep their existing rates.
+
 Select the ONNX model directory separately in the panel before starting.
 It defaults to the repository's `etc/neural_networks` and is resolved independently of the working directory.
 The tool calibrates safe-pose checks and the stand-up pose to its SDK preparation pose.

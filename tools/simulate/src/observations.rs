@@ -121,7 +121,7 @@ pub(crate) struct Frame {
     pub sample: Observation,
     pub balls: Vec<Ball>,
     pub robots: Vec<[f32; 3]>,
-    pub detections: Vec<Object<Label>>,
+    pub detections: Option<Vec<Object<Label>>>,
     pub field: FieldDimensions,
 }
 
@@ -418,6 +418,9 @@ impl CameraInputs {
             noise: ObservationNoise::default(),
         })
     }
+    pub fn detection_demand(&self) -> crate::demand::Demand {
+        self.detections.demand()
+    }
     pub async fn publish(&mut self, frame: &Frame) -> Result<()> {
         let time = frame.time;
         self.info
@@ -432,23 +435,26 @@ impl CameraInputs {
                 time,
             )
             .await?;
-        let observed = self.noise.apply(
-            &frame.detections,
-            &self.parameters.snapshot().typed().observations,
-        );
-        self.detections
-            .publish_observed(
-                &TimeWrapper {
+        if let Some(detections) = &frame.detections
+            && self.detections.needed()
+        {
+            let observed = self
+                .noise
+                .apply(detections, &self.parameters.snapshot().typed().observations);
+            self.detections
+                .publish_observed(
+                    &TimeWrapper {
+                        time,
+                        inner: detections.clone(),
+                    },
+                    &TimeWrapper {
+                        time,
+                        inner: observed,
+                    },
                     time,
-                    inner: frame.detections.clone(),
-                },
-                &TimeWrapper {
-                    time,
-                    inner: observed,
-                },
-                time,
-            )
-            .await?;
+                )
+                .await?;
+        }
         let (odometer, delta) =
             self.motion
                 .observe(frame.epoch, time, frame.sample.camera_to_world);
