@@ -274,8 +274,13 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .cache(1)
         .build()
         .await?;
-    let obstacles_cache = node
-        .subscriber::<Vec<Obstacle>>("obstacles")
+    let humanoid_obstacles_cache = node
+        .subscriber::<Vec<Obstacle>>("humanoid_filter/obstacles")
+        .cache(1)
+        .build()
+        .await?;
+    let goal_post_obstacles_cache = node
+        .subscriber::<Vec<Obstacle>>("goal_post_filter/obstacles")
         .cache(1)
         .build()
         .await?;
@@ -532,10 +537,11 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             .map(|positions| positions.as_ref().clone())
             .unwrap_or_default();
         blackboard.world_state.now = node.clock().now();
-        blackboard.world_state.obstacles = obstacles_cache
-            .get_latest()
-            .map(|obstacles| obstacles.as_ref().clone())
-            .unwrap_or_default();
+        blackboard.world_state.obstacles = [&humanoid_obstacles_cache, &goal_post_obstacles_cache]
+            .into_iter()
+            .filter_map(|cache| cache.get_latest())
+            .flat_map(|obstacles| obstacles.as_ref().clone())
+            .collect();
         blackboard.world_state.player_states = player_states;
         blackboard.world_state.position_of_interest = position_of_interest_cache
             .get_latest()

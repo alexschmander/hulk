@@ -116,8 +116,13 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .subscriber::<FilteredGameControllerState>("filtered_game_controller_state")
         .build()
         .await?;
-    let obstacles_cache = node
-        .subscriber::<Vec<Obstacle>>("obstacles")
+    let humanoid_obstacles_cache = node
+        .subscriber::<Vec<Obstacle>>("humanoid_filter/obstacles")
+        .cache(1)
+        .build()
+        .await?;
+    let goal_post_obstacles_cache = node
+        .subscriber::<Vec<Obstacle>>("goal_post_filter/obstacles")
         .cache(1)
         .build()
         .await?;
@@ -337,12 +342,13 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             && !ball_was_seen
             && let Some(ground_to_field) = ground_to_field
         {
-            let occluders = obstacles_cache
-                .get_latest()
-                .map(|obstacles| {
+            let occluders = [&humanoid_obstacles_cache, &goal_post_obstacles_cache]
+                .into_iter()
+                .filter_map(|cache| cache.get_latest())
+                .flat_map(|obstacles| {
                     search_occluders_from_obstacles(obstacles.as_ref(), ground_to_field)
                 })
-                .unwrap_or_default();
+                .collect::<Vec<_>>();
             let head_yaw = head_joints_command_cache
                 .get_latest()
                 .map_or(0.0, |head_joints| head_joints.yaw);
