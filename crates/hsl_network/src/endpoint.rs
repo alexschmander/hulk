@@ -211,6 +211,7 @@ mod tests {
             player_number: PlayerNumber::Two,
             pose: Default::default(),
             head_yaw: 0.0,
+            pose_age: None,
             ball_position: None,
         });
         let bytes = bincode::serialize(&teammate).unwrap();
@@ -234,6 +235,7 @@ mod tests {
                 player_number: PlayerNumber::Three,
                 pose: Default::default(),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: None,
             });
             let bytes = bincode::serialize(&outgoing).unwrap();
