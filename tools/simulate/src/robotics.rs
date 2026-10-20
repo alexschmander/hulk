@@ -419,6 +419,8 @@ impl RobotStack {
                             &frame.field,
                             side,
                             &frame.robots,
+                            &frame.robot_ids,
+                            frame.observer,
                             frame.time,
                         )
                         .await?;

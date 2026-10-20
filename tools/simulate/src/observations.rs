@@ -121,6 +121,10 @@ pub(crate) struct Frame {
     pub sample: Observation,
     pub balls: Vec<Ball>,
     pub robots: Vec<[f32; 3]>,
+    /// Identities of `robots`, in the same order.
+    pub robot_ids: Vec<crate::team::RobotId>,
+    /// Identity of the robot this frame belongs to.
+    pub observer: crate::team::RobotId,
     pub detections: Option<Vec<Object<Label>>>,
     pub field: FieldDimensions,
 }
