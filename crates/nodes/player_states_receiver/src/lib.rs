@@ -119,6 +119,7 @@ fn apply_message(
     let player_state = PlayerState {
         pose: state_message.pose,
         head_yaw: state_message.head_yaw,
+        pose_age: state_message.pose_age,
         ball_position: state_message
             .ball_position
             .map(|ball| BallPosition::from_network_ball(ball, time)),
@@ -194,6 +195,7 @@ mod tests {
                     player_number: PlayerNumber::Two,
                     pose,
                     head_yaw: 0.0,
+                    pose_age: Some(Duration::from_millis(80)),
                     ball_position: None,
                 })),
             },
@@ -203,6 +205,7 @@ mod tests {
         assert_eq!(player.time, time);
         assert_eq!(player.inner.pose, pose);
         assert_eq!(player.inner.head_yaw, 0.0);
+        assert_eq!(player.inner.pose_age, Some(Duration::from_millis(80)));
     }
 
     #[test]
@@ -214,6 +217,7 @@ mod tests {
                 player_number: PlayerNumber::Two,
                 pose: Pose2::default(),
                 head_yaw,
+                pose_age: None,
                 ball_position: None,
             })),
         };
@@ -225,12 +229,14 @@ mod tests {
                 player_number: PlayerNumber::Two,
                 pose: Pose2::new(point![f32::NAN, 0.0], 0.0),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: None,
             },
             StateMessage {
                 player_number: PlayerNumber::Two,
                 pose: Pose2::default(),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: Some(hsl_network_messages::BallPosition {
                     position: point![f32::NAN, 0.0],
                     age: Duration::ZERO,
@@ -259,6 +265,7 @@ mod tests {
             inner: PlayerState {
                 pose: Pose2::default(),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: None,
             },
         });
@@ -267,6 +274,7 @@ mod tests {
             inner: PlayerState {
                 pose: Pose2::default(),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: None,
             },
         });
@@ -305,6 +313,7 @@ mod tests {
             inner: PlayerState {
                 pose: Pose2::default(),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: None,
             },
         });
@@ -313,6 +322,7 @@ mod tests {
             inner: PlayerState {
                 pose: Pose2::default(),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: None,
             },
         });
@@ -336,6 +346,7 @@ mod tests {
             inner: PlayerState {
                 pose: Pose2::default(),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: None,
             },
         });
@@ -358,6 +369,7 @@ mod tests {
             inner: PlayerState {
                 pose: Pose2::default(),
                 head_yaw: 0.0,
+                pose_age: None,
                 ball_position: None,
             },
         });
