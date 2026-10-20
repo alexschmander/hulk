@@ -11574,6 +11574,7 @@ dependencies = [
  "egui_plot",
  "egui_tiles",
  "geometry",
+ "hsl_network_messages",
  "hulk_widgets",
  "image",
  "kinematics",
