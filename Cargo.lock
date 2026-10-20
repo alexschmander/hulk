@@ -8072,6 +8072,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "object-filter-replay"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "coordinate_systems",
+ "goal_post_filter",
+ "hsl_network_messages",
+ "humanoid_filter",
+ "json5",
+ "linear_algebra",
+ "mcap",
+ "memmap2",
+ "object_tracking",
+ "projection",
+ "ros-z",
+ "serde",
+ "serde_json",
+ "types",
+]
+
+[[package]]
 name = "object_tracking"
 version = "0.1.0"
 dependencies = [
