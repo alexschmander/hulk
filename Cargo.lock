@@ -4957,6 +4957,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "goal_post_filter"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "color-eyre",
+ "coordinate_systems",
+ "geometry",
+ "json5",
+ "linear_algebra",
+ "nalgebra 0.34.2",
+ "object_tracking",
+ "projection",
+ "ros-z",
+ "ros-z-streams",
+ "serde",
+ "tokio",
+ "types",
+]
+
+[[package]]
 name = "gpu-allocator"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5258,6 +5278,7 @@ dependencies = [
  "game_controller_filter",
  "game_controller_state_filter",
  "global_parameter_provider",
+ "goal_post_filter",
  "ground_provider",
  "hardware_interface",
  "head_motion",
