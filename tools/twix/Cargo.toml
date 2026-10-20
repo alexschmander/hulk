@@ -23,6 +23,7 @@ egui_material_icons = { workspace = true }
 egui_plot = { workspace = true }
 egui_tiles = { workspace = true }
 geometry = { workspace = true }
+hsl_network_messages = { workspace = true }
 hulk_widgets = { workspace = true }
 image = { workspace = true }
 kinematics = { workspace = true }
