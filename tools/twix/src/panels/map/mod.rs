@@ -28,6 +28,7 @@ trait GenericLayer {
     fn generic_paint(
         &mut self,
         painter: &TwixPainter<Field>,
+        plot_type: PlotType,
         ground_to_field: Isometry2<Ground, Field>,
         field_dimensions: &FieldDimensions,
     );
@@ -37,6 +38,7 @@ impl<T: Layer<Field>> GenericLayer for EnabledLayer<T, Field> {
     fn generic_paint(
         &mut self,
         painter: &TwixPainter<Field>,
+        _plot_type: PlotType,
         _ground_to_field: Isometry2<Ground, Field>,
         field_dimensions: &FieldDimensions,
     ) {
@@ -48,9 +50,16 @@ impl<T: Layer<Ground>> GenericLayer for EnabledLayer<T, Ground> {
     fn generic_paint(
         &mut self,
         painter: &TwixPainter<Field>,
+        plot_type: PlotType,
         ground_to_field: Isometry2<Ground, Field>,
         field_dimensions: &FieldDimensions,
     ) {
+        // The ground view is drawn through the latest transform, which cancels out for ground
+        // layers; only the field view needs the transform of each message's own time.
+        if plot_type == PlotType::Field && self.paint_in_field_or_disable(painter, field_dimensions)
+        {
+            return;
+        }
         self.paint_or_disable(
             &painter.transform_painter(ground_to_field.inverse()),
             field_dimensions,
@@ -76,6 +85,8 @@ pub struct MapPanel {
     ball_position: EnabledLayer<layers::BallPosition, Field>,
     ball_filter: EnabledLayer<layers::BallFilter, Ground>,
     obstacle_filter: EnabledLayer<layers::ObstacleFilter, Ground>,
+    object_tracks: EnabledLayer<layers::ObjectTracks, Ground>,
+    object_tracks_legend: EnabledLayer<layers::ObjectTracksLegend, Ground>,
     voronoi_cells: EnabledLayer<layers::VoronoiCell, Field>,
 }
 
@@ -96,6 +107,8 @@ impl Panel for MapPanel {
         let ball_position = EnabledLayer::new(context.backend.clone(), context.value, true);
         let ball_filter = EnabledLayer::new(context.backend.clone(), context.value, false);
         let obstacle_filter = EnabledLayer::new(context.backend.clone(), context.value, false);
+        let object_tracks = EnabledLayer::new(context.backend.clone(), context.value, false);
+        let object_tracks_legend = EnabledLayer::new(context.backend.clone(), context.value, false);
         let voronoi_cells = EnabledLayer::new(context.backend.clone(), context.value, false);
 
         let runtime_handle = context.backend.runtime_handle().clone();
@@ -146,6 +159,8 @@ impl Panel for MapPanel {
             ball_position,
             ball_filter,
             obstacle_filter,
+            object_tracks,
+            object_tracks_legend,
             voronoi_cells,
         }
     }
@@ -166,6 +181,8 @@ impl Panel for MapPanel {
             "ball_position": self.ball_position.save(),
             "ball_filter": self.ball_filter.save(),
             "obstacle_filter": self.obstacle_filter.save(),
+            "object_tracks": self.object_tracks.save(),
+            "object_tracks_legend": self.object_tracks_legend.save(),
             "voronoi_cells": self.voronoi_cells.save(),
         })
     }
@@ -185,6 +202,8 @@ impl Panel for MapPanel {
                 self.ball_position.checkbox(ui);
                 self.ball_filter.checkbox(ui);
                 self.obstacle_filter.checkbox(ui);
+                self.object_tracks.checkbox(ui);
+                self.object_tracks_legend.checkbox(ui);
                 self.voronoi_cells.checkbox(ui);
             });
         ComboBox::from_id_salt("plot_type_selector")
@@ -209,7 +228,8 @@ impl Panel for MapPanel {
             .latest()
             .map(|sample_record| sample_record.value)
             .unwrap_or_default();
-        let (response, mut painter) = match self.current_plot_type {
+        let plot_type = self.current_plot_type;
+        let (response, mut painter) = match plot_type {
             PlotType::Field => {
                 let width = field_dimensions.width;
                 let length = field_dimensions.length;
@@ -239,29 +259,41 @@ impl Panel for MapPanel {
 
         // draw largest layers first so they don't obscure smaller ones
         self.field
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
 
-        self.ball_search_heatmap
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+        self.ball_search_heatmap.generic_paint(
+            &painter,
+            plot_type,
+            ground_to_field,
+            &field_dimensions,
+        );
         self.path_obstacles
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.obstacles
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.path
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.robot_pose
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.odometry
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.ball_percepts
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.ball_position
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.ball_filter
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.obstacle_filter
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
+        self.object_tracks
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.voronoi_cells
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
+        self.object_tracks_legend.generic_paint(
+            &painter,
+            plot_type,
+            ground_to_field,
+            &field_dimensions,
+        );
     }
 }
