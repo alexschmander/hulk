@@ -49,8 +49,12 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .subscriber::<Vec<HypotheticalBallPosition<Ground>>>("hypothetical_ball_positions")
         .build()
         .await?;
-    let _obstacles_sub = node
-        .subscriber::<Vec<Obstacle>>("obstacles")
+    let _humanoid_obstacles_sub = node
+        .subscriber::<Vec<Obstacle>>("humanoid_filter/obstacles")
+        .build()
+        .await?;
+    let _goal_post_obstacles_sub = node
+        .subscriber::<Vec<Obstacle>>("goal_post_filter/obstacles")
         .build()
         .await?;
     let _position_of_interest_sub = node

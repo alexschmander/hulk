@@ -31,8 +31,12 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .subscriber::<BallState>("rule_ball_state")
         .build()
         .await?;
-    let _obstacles_sub = node
-        .subscriber::<Vec<Obstacle>>("obstacles")
+    let _humanoid_obstacles_sub = node
+        .subscriber::<Vec<Obstacle>>("humanoid_filter/obstacles")
+        .build()
+        .await?;
+    let _goal_post_obstacles_sub = node
+        .subscriber::<Vec<Obstacle>>("goal_post_filter/obstacles")
         .build()
         .await?;
     let _ground_to_field_sub = node
