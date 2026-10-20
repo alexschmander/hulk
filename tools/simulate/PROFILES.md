@@ -31,7 +31,7 @@ Whistle detection is replaced by a UI-generated detection stream; the real whist
 | Profile | Additional real nodes | Remaining simulated observations |
 | --- | --- | --- |
 | Motion & behavior | Common stack below | Raw joint/IMU samples; perfect ground/camera geometry, field pose, selected ball and obstacles |
-| Ball and obstacle filtering | `ball_filter`, `visual_kick_ball_selector`, `obstacle_filter` | Raw sensors; synthetic detections; perfect ground/camera geometry, planar odometry and field pose |
+| Ball and obstacle filtering | `ball_filter`, `visual_kick_ball_selector`, `obstacle_filter`, `humanoid_filter`, `stationary_object_filter` | Raw sensors; synthetic detections; perfect ground/camera geometry, planar odometry and field pose |
 | Body state & odometry | `kinematics_provider`, `support_foot_estimator`, `ground_provider`, `camera_matrix_calculator`, `odometry` | Raw sensors, camera calibration, synthetic detections and perfect field pose |
 | Localization | `field_mark_association`, `localization_3d`, `localization_2d` | Raw sensors, camera calibration, synthetic detections and camera-motion measurements substituting for stereo VO |
 
@@ -82,6 +82,8 @@ Mirror production topic suffixes and types where meaningful, for example:
 | `ground_truth/inputs/odometry` | Exact planar movement relative to the trial's odometry origin |
 | `ground_truth/ball_filter/ball_position`, `ground_truth/visual_kick/ball_position` | Ideal scalar ball reference with the documented selection policy |
 | `ground_truth/obstacles` | Physical obstacle positions |
+| `ground_truth/humanoid_filter/obstacles`, `ground_truth/stationary_object_filter/obstacles` | Physical robot and goalpost obstacles, split like the object filters' outputs |
+| `ground_truth/humanoids` | Other robots with team, player number and ground/field positions, seen from the observer |
 | `ground_truth/detected_objects` | Ideal visible observations before optional observation perturbations |
 | `ground_truth/visual_odometry/current_left_camera_to_previous_left_camera` | Exact camera-motion delta |
 | `ground_truth/visual_odometry/current_left_camera_to_visual_odometer` | Exact accumulated camera motion and epoch |
@@ -112,6 +114,7 @@ The table below describes only production ownership, not whether the reference i
 | `detected_objects` and its announcements | Not needed | Synthetic observations | Synthetic observations | Synthetic observations, including field marks |
 | `ball_filter/ball_position`, `visual_kick/ball_position` | Truth | Real filters/selector | Real filters/selector | Real filters/selector |
 | `obstacles` | Truth | Obstacle filter | Obstacle filter | Obstacle filter |
+| `humanoid_filter/obstacles`, `stationary_object_filter/obstacles` | Truth | Object filters | Object filters | Object filters |
 | Ball hypotheses | No producer | Ball filter | Ball filter | Ball filter |
 | Search suggestions | Search suggestor | Search suggestor | Search suggestor | Search suggestor |
 | `visual_odometry/current_left_camera_to_visual_odometer`, including its delta | Not needed | Not needed | Not needed | Simulated camera motion |

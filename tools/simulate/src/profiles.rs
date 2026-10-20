@@ -222,6 +222,9 @@ pub(crate) const REFERENCES: &[ReferenceSpec] = {
         "ball_filter/ball_position": Unless(Filtering), "First scene ball, whether visible or not";
         "visual_kick/ball_position": Unless(Filtering), "First scene ball, for visual kicks";
         "obstacles": Unless(Filtering), "Goal posts and every other robot";
+        "humanoid_filter/obstacles": Unless(Filtering), "Every other robot";
+        "stationary_object_filter/obstacles": Unless(Filtering), "Goal posts";
+        "humanoids": Never, "Every other robot with its team, player number and teammate relation";
         "robot_to_ground": Unless(BodyState), "Physical body/ground geometry";
         "ground_to_robot": Unless(BodyState), "Physical ground/body geometry";
         "robot_kinematics": Unless(BodyState), "MuJoCo link transforms";
@@ -323,7 +326,13 @@ pub(crate) const NETWORK: &[NodeSpec] = nodes![
     player_states_receiver,
     team_ball_filter
 ];
-const FILTERING: &[NodeSpec] = nodes![ball_filter, visual_kick_ball_selector, obstacle_filter];
+const FILTERING: &[NodeSpec] = nodes![
+    ball_filter,
+    visual_kick_ball_selector,
+    obstacle_filter,
+    humanoid_filter,
+    stationary_object_filter
+];
 const BODY_STATE: &[NodeSpec] = nodes![
     kinematics_provider,
     support_foot_estimator,
@@ -352,7 +361,7 @@ mod tests {
     #[test]
     fn presets_are_cumulative_and_keep_all_common_nodes() {
         let mut previous = HashSet::new();
-        for (profile, count) in Profile::PRESETS.into_iter().zip([24, 27, 32, 35]) {
+        for (profile, count) in Profile::PRESETS.into_iter().zip([24, 29, 34, 37]) {
             let names: HashSet<_> = profile.nodes().map(|node| node.name).collect();
             assert_eq!(names.len(), count);
             assert!(previous.is_subset(&names));
@@ -382,6 +391,8 @@ mod tests {
                         "ball_filter/ball_position",
                         "visual_kick/ball_position",
                         "obstacles",
+                        "humanoid_filter/obstacles",
+                        "stationary_object_filter/obstacles",
                     ][..],
                     !profile.filtering(),
                 ),
@@ -422,6 +433,8 @@ mod tests {
                 ("ball_filter", profile.filtering()),
                 ("visual_kick_ball_selector", profile.filtering()),
                 ("obstacle_filter", profile.filtering()),
+                ("humanoid_filter", profile.filtering()),
+                ("stationary_object_filter", profile.filtering()),
                 ("kinematics_provider", profile.body_state()),
                 ("support_foot_estimator", profile.body_state()),
                 ("ground_provider", profile.body_state()),

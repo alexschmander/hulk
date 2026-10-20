@@ -42,6 +42,7 @@ ground_provider = { workspace = true }
 hardware_interface = { workspace = true }
 head_motion = { workspace = true }
 hsl_network_messages = { workspace = true }
+humanoid_filter = { workspace = true }
 image = { workspace = true, features = ["png", "gif"] }
 json5 = { workspace = true }
 jsonschema = { version = "0.46", default-features = false }
@@ -90,6 +91,7 @@ serde_json = { workspace = true }
 serde_yaml = "0.9"
 sha2 = { workspace = true }
 socket2 = { workspace = true }
+stationary_object_filter = { workspace = true }
 support_foot_estimator = { workspace = true }
 team_ball_filter = { workspace = true }
 tempfile = { workspace = true }

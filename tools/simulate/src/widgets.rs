@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(profile, Profile::BodyStateOdometry);
         let output = click_label(&context, &mut profile, &output, icons::ICON_INFO.codepoint);
         assert!(
-            text(&output, "32 real nodes run per robot")
+            text(&output, "34 real nodes run per robot")
                 .next()
                 .is_some()
         );
@@ -650,7 +650,7 @@ mod tests {
         );
         assert_eq!(profile, Profile::Filtering);
         assert!(
-            text(&output, "27 real nodes run per robot")
+            text(&output, "29 real nodes run per robot")
                 .next()
                 .is_some()
         );
