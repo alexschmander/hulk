@@ -783,6 +783,7 @@ mod tests {
         let selected = history.at(source_time).unwrap();
         let teammate = PlayerState {
             pose: point![3.0, 5.0].into(),
+            pose_age: None,
             ball_position: None,
         };
         assert_eq!(
@@ -890,6 +891,7 @@ mod tests {
         let now = Time::from_nanos(1_000_000_000);
         let state = PlayerState {
             pose: point![1.0, 2.0].into(),
+            pose_age: None,
             ball_position: None,
         };
         let mut players = Players::new(None);
@@ -1196,6 +1198,7 @@ mod tests {
         );
         let teammate = PlayerState {
             pose: point![3.0, 1.0].into(),
+            pose_age: None,
             ball_position: None,
         };
         filter.process_network_player_state(
