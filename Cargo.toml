@@ -97,6 +97,7 @@ members = [
   "tools/localization_simulator",
   "tools/mcap-replay",
   "tools/mujoco-simulator/mujoco-rust-server",
+  "tools/object-filter-replay",
   "tools/pepsi",
   "tools/robot_logs",
   "tools/simulate",
