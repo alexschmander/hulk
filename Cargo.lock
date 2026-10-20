@@ -5768,6 +5768,7 @@ dependencies = [
  "ground_provider",
  "hardware_interface",
  "head_motion",
+ "humanoid_filter",
  "image_receiver",
  "kinematics_provider",
  "led_handler",
@@ -5812,6 +5813,27 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "nucleo-matcher",
+]
+
+[[package]]
+name = "humanoid_filter"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "color-eyre",
+ "coordinate_systems",
+ "geometry",
+ "hsl_network_messages",
+ "json5",
+ "linear_algebra",
+ "nalgebra 0.34.2",
+ "object_tracking",
+ "projection",
+ "ros-z",
+ "ros-z-streams",
+ "serde",
+ "tokio",
+ "types",
 ]
 
 [[package]]

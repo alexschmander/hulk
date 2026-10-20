@@ -40,6 +40,7 @@ members = [
   "crates/nodes/ground_provider",
   "crates/nodes/hardware_interface",
   "crates/nodes/head_motion",
+  "crates/nodes/humanoid_filter",
   "crates/nodes/image_receiver",
   "crates/nodes/kinematics_provider",
   "crates/nodes/led_handler",
@@ -185,6 +186,7 @@ head_motion = { path = "crates/nodes/head_motion" }
 hex = "0.4"
 hsl_network = { path = "crates/hsl_network" }
 hsl_network_messages = { path = "crates/hsl_network_messages" }
+humanoid_filter = { path = "crates/nodes/humanoid_filter" }
 hula_types = { path = "crates/hula_types" }
 hulk_widgets = { path = "crates/hulk_widgets" }
 humantime = "2.3.0"
