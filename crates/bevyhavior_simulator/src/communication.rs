@@ -112,6 +112,7 @@ pub fn apply_incoming_hsl_messages(
         let HulkMessage::State(state_message) = message;
         let player_state = PlayerState {
             pose: state_message.pose,
+            pose_age: state_message.pose_age,
             ball_position: state_message.ball_position.map(|ball| {
                 BallPosition::from_network_ball(
                     ball,
@@ -216,6 +217,7 @@ mod tests {
         HulkMessage::State(hsl_network_messages::StateMessage {
             player_number,
             pose: Pose2::new(point![x, y], 0.0),
+            pose_age: Some(Duration::ZERO),
             ball_position: Some(hsl_network_messages::BallPosition {
                 age: Duration::from_millis(500),
                 position: point![x + 1.0, y],

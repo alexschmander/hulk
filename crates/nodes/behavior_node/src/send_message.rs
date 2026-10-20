@@ -96,6 +96,9 @@ impl Blackboard {
                 player_number: self.world_state.robot.player_number,
                 pose,
                 head_yaw: self.head_yaw,
+                pose_age: self
+                    .localization_time
+                    .map(|localization_time| now.duration_since(localization_time)),
                 ball_position,
             });
 

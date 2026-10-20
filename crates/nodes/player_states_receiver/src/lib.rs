@@ -91,6 +91,7 @@ fn apply_message(
         time,
         inner: PlayerState {
             pose: state_message.pose,
+            pose_age: state_message.pose_age,
             ball_position: state_message
                 .ball_position
                 .map(|ball| BallPosition::from_network_ball(ball, time)),
@@ -158,6 +159,7 @@ mod tests {
                     player_number: PlayerNumber::Two,
                     pose,
                     head_yaw: 0.0,
+                    pose_age: Some(Duration::from_millis(80)),
                     ball_position: None,
                 })),
             },
@@ -166,6 +168,7 @@ mod tests {
         let player = states[PlayerNumber::Two].as_ref().unwrap();
         assert_eq!(player.time, time);
         assert_eq!(player.inner.pose, pose);
+        assert_eq!(player.inner.pose_age, Some(Duration::from_millis(80)));
     }
 
     #[test]

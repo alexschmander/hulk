@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hsl_network_messages::PlayerNumber;
 use ros_z::{Message, time::Time};
@@ -113,5 +113,7 @@ pub struct RobotState {
 #[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, Message)]
 pub struct PlayerState {
     pub pose: Pose2<Field>,
+    /// Age of the pose estimate when the teammate sent it, relative to the message's receipt.
+    pub pose_age: Option<Duration>,
     pub ball_position: Option<BallPosition<Field>>,
 }

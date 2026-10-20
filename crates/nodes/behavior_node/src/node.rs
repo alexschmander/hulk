@@ -9,10 +9,10 @@ use std::{
 use color_eyre::Result;
 use types::fall_detection::FallDetection;
 
-use coordinate_systems::{Field, Ground};
+use coordinate_systems::{Field, Ground, Robot};
 use hsl_network_messages::PlayerNumber;
 use kinematics::joints::head::HeadJoints;
-use linear_algebra::{Isometry2, Point2, Pose2, Vector2};
+use linear_algebra::{Isometry2, Isometry3, Point2, Pose2, Vector2};
 use ros_z::{
     prelude::*,
     qos::{QosDurability, QosHistory},
@@ -37,6 +37,7 @@ use types::{
     primary_state::PrimaryState,
     rule_obstacles::RuleObstacle,
     time_wrapper::TimeWrapper,
+    visual_localization::LOCALIZATION_POSE_3D_TOPIC,
     walking_velocity_limits::{WALKING_VELOCITY_LIMITS_TOPIC, WalkingVelocityLimits},
     world_state::{BallSource, BallState, PlayerState, RobotState, WorldState},
 };
@@ -80,6 +81,8 @@ pub struct Blackboard {
     pub last_motion_type: Option<MotionType>,
     pub last_sent_game_controller_return_message_time: Option<Time>,
     pub last_sent_hsl_message_time: Option<Time>,
+    /// Acquisition time of the latest localization estimate.
+    pub localization_time: Option<Time>,
     pub last_closest_to_ball: bool,
     pub closest_to_ball_entered_area_since: Option<Time>,
     pub closest_to_ball_left_area_since: Option<Time>,
@@ -233,6 +236,12 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .cache(1)
         .build()
         .await?;
+    let localization_cache = node
+        .subscriber::<TimeWrapper<Option<Isometry3<Field, Robot>>>>(LOCALIZATION_POSE_3D_TOPIC)
+        .cache(1)
+        .with_stamp(|localization: &TimeWrapper<Option<Isometry3<Field, Robot>>>| localization.time)
+        .build()
+        .await?;
     let hypothetical_ball_positions_cache = node
         .subscriber::<Vec<HypotheticalBallPosition<Ground>>>("hypothetical_ball_positions")
         .cache(1)
@@ -344,6 +353,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         last_motion_type: None,
         last_sent_game_controller_return_message_time: None,
         last_sent_hsl_message_time: None,
+        localization_time: None,
         last_closest_to_ball: false,
         closest_to_ball_entered_area_since: None,
         closest_to_ball_left_area_since: None,
@@ -441,6 +451,10 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
             blackboard.remote_control_enabled = false;
         }
 
+        blackboard.localization_time = localization_cache
+            .get_latest()
+            .filter(|localization| localization.inner.is_some())
+            .map(|localization| localization.time);
         blackboard.world_state.robot = RobotState {
             ground_to_field: ground_to_field_cache
                 .get_latest()

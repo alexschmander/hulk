@@ -255,6 +255,7 @@ mod tests {
         HulkMessage::State(hsl_network_messages::StateMessage {
             player_number,
             pose: Pose2::new(point![x, y], 0.0),
+            pose_age: Some(Duration::ZERO),
             ball_position: Some(hsl_network_messages::BallPosition {
                 age: Duration::from_millis(500),
                 position: point![x + 1.0, y],
@@ -403,6 +404,7 @@ mod tests {
                     Players {
                         three: Some(PlayerState {
                             pose: Pose2::new(point![1.0, 0.5], 0.0),
+                            pose_age: Some(Duration::ZERO),
                             ball_position: Some(BallPosition::from_network_ball(
                                 hsl_network_messages::BallPosition {
                                     age: Duration::from_millis(500),

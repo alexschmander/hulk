@@ -42,6 +42,8 @@ pub struct StateMessage {
     pub player_number: PlayerNumber,
     pub pose: Pose2<Field>,
     pub head_yaw: f32,
+    /// Age of the pose estimate when the message was sent, if known.
+    pub pose_age: Option<Duration>,
     pub ball_position: Option<BallPosition<Field>>,
 }
 
@@ -100,6 +102,7 @@ mod tests {
             player_number: PlayerNumber::Five,
             pose: Pose2::default(),
             head_yaw: 0.0,
+            pose_age: Some(Duration::MAX),
             ball_position: Some(BallPosition {
                 position: Point2::origin(),
                 age: Duration::MAX,
