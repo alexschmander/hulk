@@ -236,6 +236,7 @@ async fn spawn_all(
     join_set.spawn(game_controller_state_filter::run_boxed(ctx.clone()));
     join_set.spawn(global_parameter_provider::run_boxed(ctx.clone()));
     join_set.spawn(ground_provider::run_boxed(ctx.clone()));
+    join_set.spawn(humanoid_filter::run_boxed(ctx.clone()));
     join_set.spawn(image_receiver::run_boxed(ctx.clone()));
     join_set.spawn(kinematics_provider::run_boxed(ctx.clone()));
     join_set.spawn(led_handler::run_boxed(ctx.clone()));
