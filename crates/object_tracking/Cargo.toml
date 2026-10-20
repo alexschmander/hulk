@@ -1,0 +1,20 @@
+[package]
+name = "object_tracking"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+coordinate_systems = { workspace = true }
+linear_algebra = { workspace = true }
+nalgebra = { workspace = true }
+projection = { workspace = true }
+ros-z = { workspace = true }
+serde = { workspace = true }
+types = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+geometry = { workspace = true }

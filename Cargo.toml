@@ -21,6 +21,7 @@ members = [
   "crates/linear_sum_assignment",
   "crates/localization-fagra",
   "crates/microphones",
+  "crates/object_tracking",
   "crates/nodes/active_vision",
   "crates/nodes/ball_filter",
   "crates/nodes/ball_state_composer",
@@ -223,6 +224,7 @@ ndarray = { version = "0.16.1", features = ["serde"] }
 ndarray-conv = "0.4.1"
 nucleo-matcher = "0.3.1"
 num-traits = "0.2"
+object_tracking = { path = "crates/object_tracking" }
 obstacle_filter = { path = "crates/nodes/obstacle_filter" }
 odometer_bridge = { path = "crates/nodes/odometer_bridge" }
 odometry = { path = "crates/nodes/odometry" }
