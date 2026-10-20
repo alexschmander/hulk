@@ -5791,6 +5791,7 @@ dependencies = [
  "rule_obstacle_composer",
  "safe_pose_checker",
  "search_suggestor",
+ "stationary_object_filter",
  "stereo_visual_odometry",
  "support_foot_estimator",
  "team_ball_filter",
@@ -11440,6 +11441,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "stationary_object_filter"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "color-eyre",
+ "coordinate_systems",
+ "geometry",
+ "json5",
+ "linear_algebra",
+ "nalgebra 0.34.2",
+ "object_tracking",
+ "projection",
+ "ros-z",
+ "ros-z-streams",
+ "serde",
+ "tokio",
+ "types",
 ]
 
 [[package]]

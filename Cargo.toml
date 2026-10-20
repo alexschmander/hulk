@@ -61,6 +61,7 @@ members = [
   "crates/nodes/rule_obstacle_composer",
   "crates/nodes/safe_pose_checker",
   "crates/nodes/search_suggestor",
+  "crates/nodes/stationary_object_filter",
   "crates/nodes/stereo_visual_odometry",
   "crates/nodes/support_foot_estimator",
   "crates/nodes/team_ball_filter",
@@ -281,6 +282,7 @@ safe_pose_checker = { path = "crates/nodes/safe_pose_checker" }
 scenario = { path = "crates/scenario" }
 search_heatmap = { path = "crates/search_heatmap" }
 search_suggestor = { path = "crates/nodes/search_suggestor" }
+stationary_object_filter = { path = "crates/nodes/stationary_object_filter" }
 semver = "1.0.25"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.138"
