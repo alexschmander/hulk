@@ -34,6 +34,7 @@ pub struct VoronoiParameters {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Message)]
 pub struct BehaviorParameters {
+    pub obstacle_source: ObstacleSource,
     pub control: BehaviorControlParameters,
     pub ball: BallBehaviorParameters,
     pub walking: WalkingBehaviorParameters,
@@ -43,6 +44,16 @@ pub struct BehaviorParameters {
     pub kickoff: KickoffParameters,
     pub voronoi: VoronoiParameters,
     pub network: HslNetworkParameters,
+}
+
+/// Producer of the obstacles that behavior plans around.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ros_z::Message)]
+pub enum ObstacleSource {
+    /// The previous combined obstacle filter.
+    Legacy,
+    /// The humanoid and stationary object filters.
+    #[default]
+    ObjectFilters,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ros_z::Message)]
