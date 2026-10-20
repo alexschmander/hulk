@@ -28,6 +28,7 @@ trait GenericLayer {
     fn generic_paint(
         &mut self,
         painter: &TwixPainter<Field>,
+        plot_type: PlotType,
         ground_to_field: Isometry2<Ground, Field>,
         field_dimensions: &FieldDimensions,
     );
@@ -37,6 +38,7 @@ impl<T: Layer<Field>> GenericLayer for EnabledLayer<T, Field> {
     fn generic_paint(
         &mut self,
         painter: &TwixPainter<Field>,
+        _plot_type: PlotType,
         _ground_to_field: Isometry2<Ground, Field>,
         field_dimensions: &FieldDimensions,
     ) {
@@ -48,9 +50,16 @@ impl<T: Layer<Ground>> GenericLayer for EnabledLayer<T, Ground> {
     fn generic_paint(
         &mut self,
         painter: &TwixPainter<Field>,
+        plot_type: PlotType,
         ground_to_field: Isometry2<Ground, Field>,
         field_dimensions: &FieldDimensions,
     ) {
+        // The ground view is drawn through the latest transform, which cancels out for ground
+        // layers; only the field view needs the transform of each message's own time.
+        if plot_type == PlotType::Field && self.paint_in_field_or_disable(painter, field_dimensions)
+        {
+            return;
+        }
         self.paint_or_disable(
             &painter.transform_painter(ground_to_field.inverse()),
             field_dimensions,
@@ -67,8 +76,10 @@ pub struct MapPanel {
 
     field: EnabledLayer<layers::Field, Field>,
     ball_search_heatmap: EnabledLayer<layers::BallSearchHeatmap, Field>,
-    path_obstacles: EnabledLayer<layers::PathObstacles, Ground>,
+    humanoid_filter: EnabledLayer<layers::HumanoidFilter, Ground>,
+    goal_post_filter: EnabledLayer<layers::GoalPostFilter, Ground>,
     obstacles: EnabledLayer<layers::Obstacles, Ground>,
+    path_obstacles: EnabledLayer<layers::PathObstacles, Ground>,
     path: EnabledLayer<layers::Path, Ground>,
     robot_pose: EnabledLayer<layers::RobotPose, Ground>,
     odometry: EnabledLayer<layers::Odometry, Field>,
@@ -87,8 +98,10 @@ impl Panel for MapPanel {
     fn new(context: PanelCreationContext) -> Self {
         let field = EnabledLayer::new(context.backend.clone(), context.value, true);
         let ball_search_heatmap = EnabledLayer::new(context.backend.clone(), context.value, false);
-        let path_obstacles = EnabledLayer::new(context.backend.clone(), context.value, false);
+        let humanoid_filter = EnabledLayer::new(context.backend.clone(), context.value, false);
+        let goal_post_filter = EnabledLayer::new(context.backend.clone(), context.value, false);
         let obstacles = EnabledLayer::new(context.backend.clone(), context.value, false);
+        let path_obstacles = EnabledLayer::new(context.backend.clone(), context.value, false);
         let path = EnabledLayer::new(context.backend.clone(), context.value, false);
         let robot_pose = EnabledLayer::new(context.backend.clone(), context.value, true);
         let odometry = EnabledLayer::new(context.backend.clone(), context.value, false);
@@ -137,8 +150,10 @@ impl Panel for MapPanel {
             zoom_and_pan,
             field,
             ball_search_heatmap,
-            path_obstacles,
+            humanoid_filter,
+            goal_post_filter,
             obstacles,
+            path_obstacles,
             path,
             robot_pose,
             odometry,
@@ -157,8 +172,10 @@ impl Panel for MapPanel {
 
             "field": self.field.save(),
             "ball_search_heatmap": self.ball_search_heatmap.save(),
-            "path_obstacles": self.path_obstacles.save(),
+            "humanoid_filter": self.humanoid_filter.save(),
+            "goal_post_filter": self.goal_post_filter.save(),
             "obstacles": self.obstacles.save(),
+            "path_obstacles": self.path_obstacles.save(),
             "path": self.path.save(),
             "robot_pose": self.robot_pose.save(),
             "odometry": self.odometry.save(),
@@ -176,8 +193,10 @@ impl Panel for MapPanel {
             .show(|ui| {
                 self.field.checkbox(ui);
                 self.ball_search_heatmap.checkbox(ui);
-                self.path_obstacles.checkbox(ui);
+                self.humanoid_filter.checkbox(ui);
+                self.goal_post_filter.checkbox(ui);
                 self.obstacles.checkbox(ui);
+                self.path_obstacles.checkbox(ui);
                 self.path.checkbox(ui);
                 self.robot_pose.checkbox(ui);
                 self.odometry.checkbox(ui);
@@ -209,7 +228,8 @@ impl Panel for MapPanel {
             .latest()
             .map(|sample_record| sample_record.value)
             .unwrap_or_default();
-        let (response, mut painter) = match self.current_plot_type {
+        let plot_type = self.current_plot_type;
+        let (response, mut painter) = match plot_type {
             PlotType::Field => {
                 let width = field_dimensions.width;
                 let length = field_dimensions.length;
@@ -239,29 +259,42 @@ impl Panel for MapPanel {
 
         // draw largest layers first so they don't obscure smaller ones
         self.field
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
 
-        self.ball_search_heatmap
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+        self.ball_search_heatmap.generic_paint(
+            &painter,
+            plot_type,
+            ground_to_field,
+            &field_dimensions,
+        );
         self.path_obstacles
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
-        self.obstacles
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.path
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.robot_pose
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.odometry
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.ball_percepts
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.ball_position
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.ball_filter
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.obstacle_filter
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
+        self.goal_post_filter.generic_paint(
+            &painter,
+            plot_type,
+            ground_to_field,
+            &field_dimensions,
+        );
+        self.humanoid_filter
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
+        // Dashed outlines on top, so that robot obstacles show around the pucks of the same size.
+        self.obstacles
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.voronoi_cells
-            .generic_paint(&painter, ground_to_field, &field_dimensions);
+            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
     }
 }
