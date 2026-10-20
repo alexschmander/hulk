@@ -552,6 +552,11 @@ impl PhysicsWorker {
                                         .filter(|(id, _)| *id != member.id)
                                         .map(|(_, position)| *position)
                                         .collect::<Vec<_>>();
+                                    let other_ids = robot_positions
+                                        .iter()
+                                        .filter(|(id, _)| *id != member.id)
+                                        .map(|(id, _)| *id)
+                                        .collect::<Vec<_>>();
                                     let field = member.io.field_dimensions;
                                     let detections = member.io.needs_detections().then(|| {
                                         crate::observations::detect_scene(
@@ -574,6 +579,8 @@ impl PhysicsWorker {
                                         sample: observation.clone(),
                                         balls: balls.clone(),
                                         robots: others,
+                                        robot_ids: other_ids,
+                                        observer: member.id,
                                         detections,
                                         field,
                                     })
@@ -781,6 +788,8 @@ impl PhysicsWorker {
                                     sample: observation.clone(),
                                     balls,
                                     robots: Vec::new(),
+                                    robot_ids: Vec::new(),
+                                    observer: crate::team::RobotId::FIRST,
                                     detections: Some(detections),
                                     field,
                                 });
