@@ -495,6 +495,7 @@ mod runtime_tests {
                             },
                             pose: linear_algebra::Pose2::zero(),
                             ball_position: None,
+                            pose_age: None,
                         })))
                         .await
                         .unwrap();

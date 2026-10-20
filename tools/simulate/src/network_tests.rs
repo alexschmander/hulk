@@ -280,6 +280,7 @@ async fn real_udp_game_controller_returns_penalties_and_team_messages() {
             player_number: PlayerNumber::Two,
             pose: linear_algebra::Pose2::zero(),
             ball_position: None,
+            pose_age: None,
             head_yaw: 0.0,
         }))
         .unwrap();
