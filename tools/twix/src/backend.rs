@@ -207,13 +207,9 @@ impl RobotBackend {
         if let Some(discovery) = &self.namespace_discovery {
             return discovery.namespaces();
         }
-        self.graph()
-            .lock()
-            .nodes()
-            .filter(|node| !node.namespace.starts_with("/_"))
-            .map(|node| node.namespace.clone())
-            .collect::<std::collections::BTreeSet<_>>()
+        self.namespaces()
             .into_iter()
+            .filter(|namespace| !namespace.starts_with("/_"))
             .collect()
     }
 

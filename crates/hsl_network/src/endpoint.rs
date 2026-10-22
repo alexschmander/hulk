@@ -209,7 +209,9 @@ mod tests {
         sender.set_broadcast(true).unwrap();
         let teammate = HulkMessage::State(StateMessage {
             player_number: PlayerNumber::Two,
-            ..Default::default()
+            pose: Default::default(),
+            head_yaw: 0.0,
+            ball_position: None,
         });
         let bytes = bincode::serialize(&teammate).unwrap();
         sender
@@ -230,7 +232,9 @@ mod tests {
 
             let outgoing = HulkMessage::State(StateMessage {
                 player_number: PlayerNumber::Three,
-                ..Default::default()
+                pose: Default::default(),
+                head_yaw: 0.0,
+                ball_position: None,
             });
             let bytes = bincode::serialize(&outgoing).unwrap();
             endpoint.write(OutgoingMessage::Hsl(outgoing)).await;

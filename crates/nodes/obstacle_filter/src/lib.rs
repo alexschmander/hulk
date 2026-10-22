@@ -784,6 +784,7 @@ mod tests {
         let teammate = PlayerState {
             pose: point![3.0, 5.0].into(),
             ball_position: None,
+            head_yaw: 0.0,
         };
         assert_eq!(
             measured_player_position(&teammate, &selected),
@@ -891,6 +892,7 @@ mod tests {
         let state = PlayerState {
             pose: point![1.0, 2.0].into(),
             ball_position: None,
+            head_yaw: 0.0,
         };
         let mut players = Players::new(None);
         players.four = Some(TimeWrapper {
@@ -1197,6 +1199,7 @@ mod tests {
         let teammate = PlayerState {
             pose: point![3.0, 1.0].into(),
             ball_position: None,
+            head_yaw: 0.0,
         };
         filter.process_network_player_state(
             frame_time + Duration::from_millis(50),
