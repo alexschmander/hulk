@@ -39,6 +39,155 @@ fn game_packet(state: u8, penalized: bool) -> Vec<u8> {
     bytes
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn next_half_packets_reach_the_real_primary_state_filter() {
+    use types::{
+        buttons::{ButtonPressType, Buttons},
+        primary_state::PrimaryState,
+    };
+
+    fn game_state(game_state: FilteredGameState) -> FilteredGameControllerState {
+        FilteredGameControllerState {
+            game_state,
+            opponent_game_state: game_state,
+            half: hsl_network_messages::Half::First,
+            remaining_time_in_half: Duration::ZERO,
+            game_phase: hsl_network_messages::GamePhase::Normal,
+            kicking_team: None,
+            penalties: Players::default(),
+            remaining_number_of_messages: 0,
+            sub_state: None,
+            global_field_side: types::field_dimensions::GlobalFieldSide::Home,
+            new_own_penalties_last_cycle: Default::default(),
+            new_opponent_penalties_last_cycle: Default::default(),
+        }
+    }
+
+    let context = Arc::new(
+        ContextBuilder::default()
+            .with_namespace("/next_half_test")
+            .with_parameter_layers([
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../etc/parameters/base")
+            ])
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(["tcp/127.0.0.1:0"])
+            .build()
+            .await
+            .unwrap(),
+    );
+    let node = context.create_node("observer").build().await.unwrap();
+    let primary = node
+        .subscriber::<PrimaryState>("primary_state")
+        .build()
+        .await
+        .unwrap();
+    let game = node
+        .publisher::<FilteredGameControllerState>("filtered_game_controller_state")
+        .build()
+        .await
+        .unwrap();
+    let buttons = node
+        .publisher::<Buttons<Option<ButtonPressType>>>("buttons")
+        .build()
+        .await
+        .unwrap();
+    let safe = node
+        .publisher::<bool>("is_safe_pose")
+        .build()
+        .await
+        .unwrap();
+    let player = node
+        .publisher::<PlayerNumber>("player_number")
+        .qos(QosProfile {
+            durability: ros_z::qos::QosDurability::TransientLocal,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .unwrap();
+    let mut tasks = JoinSet::new();
+    tasks.spawn(primary_state_filter::run_boxed(context.clone()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        assert_eq!(primary.recv().await.unwrap(), PrimaryState::Damping);
+        assert!(safe.wait_for_subscribers(1, Duration::from_secs(1)).await);
+        assert!(player.wait_for_subscribers(1, Duration::from_secs(1)).await);
+        assert!(game.wait_for_subscribers(1, Duration::from_secs(1)).await);
+        assert!(
+            buttons
+                .wait_for_subscribers(1, Duration::from_secs(1))
+                .await
+        );
+        safe.publish(&true).await.unwrap();
+        player.publish(&PlayerNumber::One).await.unwrap();
+        // A response acknowledges that the real node has received player_number.
+        loop {
+            game.publish(&game_state(FilteredGameState::Initial))
+                .await
+                .unwrap();
+            if let Ok(state) = tokio::time::timeout(Duration::from_millis(20), primary.recv()).await
+            {
+                assert_eq!(state.unwrap(), PrimaryState::Damping);
+                break;
+            }
+        }
+        for expected in [PrimaryState::Damping, PrimaryState::Prepare] {
+            if expected == PrimaryState::Prepare {
+                buttons
+                    .publish(&Buttons {
+                        f1: None,
+                        stand: Some(ButtonPressType::Short),
+                        walking: None,
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(primary.recv().await.unwrap(), expected);
+            }
+            for state in [FilteredGameState::Initial, FilteredGameState::Ready] {
+                game.publish(&game_state(state)).await.unwrap();
+                assert_eq!(primary.recv().await.unwrap(), expected);
+            }
+        }
+        buttons
+            .publish(&Buttons {
+                f1: None,
+                stand: Some(ButtonPressType::Long),
+                walking: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(primary.recv().await.unwrap(), PrimaryState::Initial);
+        for penalized in [false, true] {
+            for (state, expected) in [
+                (FilteredGameState::Initial, PrimaryState::Initial),
+                (FilteredGameState::Ready, PrimaryState::Ready),
+            ] {
+                game.publish(&game_state(FilteredGameState::Finished))
+                    .await
+                    .unwrap();
+                assert_eq!(primary.recv().await.unwrap(), PrimaryState::Finished);
+                let mut next_half = game_state(state);
+                next_half.half = hsl_network_messages::Half::Second;
+                next_half.penalties[PlayerNumber::One] = penalized.then(Default::default);
+                game.publish(&next_half).await.unwrap();
+                assert_eq!(
+                    primary.recv().await.unwrap(),
+                    if penalized {
+                        PrimaryState::Penalized
+                    } else {
+                        expected
+                    }
+                );
+            }
+        }
+    })
+    .await
+    .expect("next-half packets did not reach the real primary state filter");
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    context.shutdown().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_udp_game_controller_returns_penalties_and_team_messages() {
     let gc_port = reserve_port();
@@ -129,7 +278,9 @@ async fn real_udp_game_controller_returns_penalties_and_team_messages() {
         }
         let teammate = bincode::serialize(&HulkMessage::State(StateMessage {
             player_number: PlayerNumber::Two,
-            ..Default::default()
+            pose: linear_algebra::Pose2::zero(),
+            ball_position: None,
+            head_yaw: 0.0,
         }))
         .unwrap();
         loop {

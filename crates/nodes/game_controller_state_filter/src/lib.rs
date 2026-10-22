@@ -589,6 +589,8 @@ mod tests {
             game_state: GameState::Ready,
             stopped: false,
             game_phase: GamePhase::Normal,
+            half: hsl_network_messages::Half::First,
+            secondary_time: std::time::Duration::ZERO,
             remaining_time_in_half: std::time::Duration::from_secs(600),
             kicking_team: Some(Team::Hulks),
             last_game_state_change: std::time::SystemTime::UNIX_EPOCH,

@@ -15,3 +15,6 @@ socket2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 types = { workspace = true }
+
+[dev-dependencies]
+hsl_network_messages = { workspace = true }

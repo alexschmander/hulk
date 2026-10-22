@@ -192,6 +192,7 @@ impl TwixApp {
             match self.runtime.block_on(task) {
                 Ok(Ok(backend)) => {
                     self.backend = Arc::new(backend);
+                    self._graph_repaint = ObservationRepaint::graph(&self.backend, context.clone());
                     self.layout.reconnect(&self.backend, context);
                 }
                 Ok(Err(error)) => log::error!("Switching simulator connection: {error:#}"),
