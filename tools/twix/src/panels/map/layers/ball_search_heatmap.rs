@@ -133,7 +133,7 @@ mod tests {
                     &FieldDimensions {
                         length: 2.5,
                         width: 1.5,
-                        ..Default::default()
+                        ..FieldDimensions::SPL_2025
                     },
                 )
                 .unwrap();

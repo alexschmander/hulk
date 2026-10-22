@@ -408,6 +408,7 @@ mod tests {
             ball_in_ground_velocity: vector![0.0, -1.0],
             last_seen_ball: SystemTime::UNIX_EPOCH,
             field_side: Side::Left,
+            source: types::world_state::BallSource::Own,
         });
         blackboard
             .parameters
@@ -442,6 +443,7 @@ mod tests {
             velocity: vector![0.0, 0.0],
             age: ros_z::time::Time::zero(),
             field_side: Side::Left,
+            source: types::world_state::BallSource::Own,
         });
         blackboard
             .parameters

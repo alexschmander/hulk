@@ -599,7 +599,7 @@ impl RobotStack {
         self.motion
             .get_latest()
             .map(|value| value.as_ref().clone())
-            .unwrap_or_default()
+            .unwrap_or(MotionCommand::Damping)
     }
 
     pub fn button_event(&self, button: i32, event: booster::ButtonEventType) -> Result<()> {

@@ -484,7 +484,8 @@ mod runtime_tests {
                             } else {
                                 -1.234
                             },
-                            ..Default::default()
+                            pose: linear_algebra::Pose2::zero(),
+                            ball_position: None,
                         })))
                         .await
                         .unwrap();
