@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -31,18 +32,25 @@ IMAGE_SUFFIXES = {
     ".tiff",
     ".webp",
 }
-CLASS_COLORS_BGR = (
-    (56, 140, 255),
-    (88, 214, 141),
-    (255, 112, 67),
-    (171, 71, 188),
-    (38, 198, 218),
-    (255, 202, 40),
-    (239, 83, 80),
-    (92, 107, 192),
-    (102, 187, 106),
+# Keep in sync with Twix's image overlay palette in
+# tools/twix/src/panels/image/overlays/prediction_colors.rs.
+CLASS_COLORS_RGB = (
+    (255, 140, 56),
+    (66, 190, 80),
+    (67, 112, 255),
+    (110, 40, 170),
+    (255, 225, 25),
+    (40, 202, 255),
+    (185, 35, 35),
+    (255, 100, 190),
+    (0, 109, 119),
 )
-LABEL_FONT_SCALE = 0.32
+CLASS_COLORS_BGR = tuple(
+    (blue, green, red) for red, green, blue in CLASS_COLORS_RGB
+)
+LABEL_MIN_FONT_SCALE = 0.32
+LABEL_MAX_FONT_SCALE = 0.46
+LABEL_FONT_BOX_WIDTH_RATIO = 220
 LABEL_PAD_X = 4
 LABEL_PAD_Y = 3
 LABEL_BACKGROUND_ALPHA = 0.65
@@ -57,8 +65,14 @@ OBJECT_CLASS_NAMES = (
 )
 PERSON_POSE_CLASS_NAMES = ("Person pose",)
 ROBOT_POSE_CLASS_NAMES = ("Robot pose",)
-PERSON_POSE_COLOR_INDEX = len(OBJECT_CLASS_NAMES)
-ROBOT_POSE_COLOR_INDEX = PERSON_POSE_COLOR_INDEX + 1
+MODEL_CLASS_NAMES = (
+    *OBJECT_CLASS_NAMES,
+    *PERSON_POSE_CLASS_NAMES,
+    *ROBOT_POSE_CLASS_NAMES,
+)
+CLASS_COLOR_BGR_BY_NAME = dict(
+    zip(MODEL_CLASS_NAMES, CLASS_COLORS_BGR, strict=True)
+)
 COCO_SKELETON = (
     (0, 1),
     (0, 2),
@@ -107,6 +121,7 @@ class OnnxRenderConfig:
     nms_iou_threshold: float
     keypoint_confidence_threshold: float
     num_images: int
+    output_scale: int
     draw_labels: bool
     intra_threads: int
     execution_provider: str
@@ -176,32 +191,23 @@ def model_class_color(
     head: ModelHead,
     class_index: int = 0,
 ) -> tuple[int, int, int]:
-    if head == ModelHead.OBJECT:
-        color_index = class_index
-    elif head == ModelHead.PERSON_POSE:
-        color_index = PERSON_POSE_COLOR_INDEX
-    else:
-        color_index = ROBOT_POSE_COLOR_INDEX
+    match head:
+        case ModelHead.OBJECT:
+            names = OBJECT_CLASS_NAMES
+        case ModelHead.PERSON_POSE:
+            names = PERSON_POSE_CLASS_NAMES
+        case ModelHead.ROBOT_POSE:
+            names = ROBOT_POSE_CLASS_NAMES
 
-    if not 0 <= color_index < len(CLASS_COLORS_BGR):
+    if not 0 <= class_index < len(names):
         raise ValueError(  # noqa: TRY003
             f"No unique color for {head.value} class {class_index}"
         )
-    return CLASS_COLORS_BGR[color_index]
+    return CLASS_COLOR_BGR_BY_NAME[names[class_index]]
 
 
 def model_class_colors() -> dict[str, tuple[int, int, int]]:
-    colors = {
-        name: model_class_color(ModelHead.OBJECT, class_index)
-        for class_index, name in enumerate(OBJECT_CLASS_NAMES)
-    }
-    colors[PERSON_POSE_CLASS_NAMES[0]] = model_class_color(
-        ModelHead.PERSON_POSE,
-    )
-    colors[ROBOT_POSE_CLASS_NAMES[0]] = model_class_color(
-        ModelHead.ROBOT_POSE,
-    )
-    return colors
+    return dict(CLASS_COLOR_BGR_BY_NAME)
 
 
 def bgr_to_nv12(image: np.ndarray) -> np.ndarray:
@@ -339,19 +345,46 @@ def draw_bounding_box(
     image: np.ndarray,
     box_xyxy: np.ndarray,
     color: tuple[int, int, int],
+    *,
+    output_scale: int,
 ) -> None:
     height, width = image.shape[:2]
     x1, y1, x2, y2 = clipped_box(box_xyxy, width, height)
     if x2 <= x1 or y2 <= y1:
         return
+
+    thickness = bounding_box_thickness(
+        image,
+        output_scale=output_scale,
+    )
     cv2.rectangle(
         image,
         (x1, y1),
         (x2, y2),
         color,
-        2,
+        thickness,
         lineType=cv2.LINE_AA,
     )
+
+
+def bounding_box_thickness(
+    image: np.ndarray,
+    *,
+    output_scale: int,
+) -> int:
+    height, width = image.shape[:2]
+    base_height = height / output_scale
+    base_width = width / output_scale
+    base_thickness = max(2, round(min(base_height, base_width) / 350))
+    return scaled_visual_size(base_thickness, output_scale)
+
+
+def visual_scale(output_scale: int) -> float:
+    return math.sqrt(output_scale)
+
+
+def scaled_visual_size(base_size: int, output_scale: int) -> int:
+    return max(1, round(base_size * visual_scale(output_scale)))
 
 
 def class_name(
@@ -363,6 +396,60 @@ def class_name(
     if 0 <= class_index < len(names):
         return str(names[class_index])
     return str(class_index)
+
+
+def contrast_text_color(
+    color: tuple[int, int, int],
+) -> tuple[int, int, int]:
+    blue, green, red = color
+    luminance = 0.114 * blue + 0.587 * green + 0.299 * red
+    return (0, 0, 0) if luminance > 150 else (255, 255, 255)
+
+
+def label_font_scale(box_width: int, output_scale: int) -> float:
+    base_box_width = box_width / output_scale
+    base_scale = np.clip(
+        base_box_width / LABEL_FONT_BOX_WIDTH_RATIO,
+        LABEL_MIN_FONT_SCALE,
+        LABEL_MAX_FONT_SCALE,
+    )
+    return float(base_scale * visual_scale(output_scale))
+
+
+def fit_label(
+    text: str,
+    *,
+    max_width: int,
+    preferred_scale: float,
+    minimum_scale: float,
+    thickness: int,
+) -> tuple[float, tuple[int, int], int, str]:
+    font_scale = preferred_scale
+    text_size, baseline = cv2.getTextSize(
+        text,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        thickness,
+    )
+    while text_size[0] > max_width and font_scale > minimum_scale:
+        font_scale = max(minimum_scale, font_scale - 0.05)
+        text_size, baseline = cv2.getTextSize(
+            text,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            thickness,
+        )
+
+    while text_size[0] > max_width and len(text) > 4:
+        text = f"{text[:-4]}..."
+        text_size, baseline = cv2.getTextSize(
+            text,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            thickness,
+        )
+
+    return font_scale, text_size, baseline, text
 
 
 def rectangles_overlap(
@@ -423,12 +510,74 @@ def label_bounds(
     return candidates[0]
 
 
+def outside_label_bounds(
+    *,
+    box: tuple[int, int, int, int],
+    label_size: tuple[int, int],
+    image_size: tuple[int, int],
+    stroke_outset: int,
+    occupied: Sequence[tuple[int, int, int, int]],
+) -> tuple[int, int, int, int] | None:
+    x1, y1, x2, y2 = box
+    label_width, label_height = label_size
+    image_height, image_width = image_size
+    outer_x1 = max(0, x1 - stroke_outset)
+    outer_y1 = max(0, y1 - stroke_outset)
+    outer_x2 = min(image_width, x2 + stroke_outset)
+    outer_y2 = min(image_height, y2 + stroke_outset)
+
+    x_candidates = (
+        outer_x1,
+        outer_x2 - label_width,
+        (outer_x1 + outer_x2 - label_width) // 2,
+    )
+    candidates = [
+        (candidate_x, outer_y1 - label_height + 1)
+        for candidate_x in x_candidates
+    ]
+    candidates.extend(
+        (candidate_x, outer_y2 - 1) for candidate_x in x_candidates
+    )
+    candidates.extend(
+        (
+            (outer_x2 - 1, outer_y1),
+            (outer_x1 - label_width + 1, outer_y1),
+        )
+    )
+
+    valid = []
+    for candidate_x, candidate_y in candidates:
+        candidate = (
+            candidate_x,
+            candidate_y,
+            candidate_x + label_width,
+            candidate_y + label_height,
+        )
+        if (
+            candidate_x < 0
+            or candidate_y < 0
+            or candidate[2] > image_width
+            or candidate[3] > image_height
+        ):
+            continue
+        if candidate not in valid:
+            valid.append(candidate)
+
+    for candidate in valid:
+        if not any(rectangles_overlap(candidate, other) for other in occupied):
+            return candidate
+    return valid[0] if valid else None
+
+
 def draw_prediction_label(
     image: np.ndarray,
     prediction: Prediction,
     names: Mapping[int, str] | Sequence[str],
     color: tuple[int, int, int],
     occupied_labels: list[tuple[int, int, int, int]],
+    *,
+    outside_box: bool,
+    output_scale: int,
 ) -> None:
     height, width = image.shape[:2]
     x1, y1, x2, y2 = clipped_box(prediction.box_xyxy, width, height)
@@ -436,24 +585,71 @@ def draw_prediction_label(
         return
 
     text = f"{class_name(names, prediction.cls)} {prediction.conf:.2f}"
-    text_size, baseline = cv2.getTextSize(
+    box_width = max(1, x2 - x1)
+    text_thickness = scaled_visual_size(1, output_scale)
+    pad_x = scaled_visual_size(LABEL_PAD_X, output_scale)
+    pad_y = scaled_visual_size(LABEL_PAD_Y, output_scale)
+    font_scale, text_size, baseline, text = fit_label(
         text,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        LABEL_FONT_SCALE,
-        1,
+        max_width=max(1, width - pad_x * 2),
+        preferred_scale=label_font_scale(box_width, output_scale),
+        minimum_scale=LABEL_MIN_FONT_SCALE * visual_scale(output_scale),
+        thickness=text_thickness,
     )
     text_width, text_height = text_size
-    label_width = text_width + LABEL_PAD_X * 2
-    label_height = text_height + baseline + LABEL_PAD_Y * 2
-    label_x1, label_y1, label_x2, label_y2 = label_bounds(
-        box=(x1, y1, x2, y2),
-        label_size=(label_width, label_height),
-        image_size=(height, width),
-        occupied=occupied_labels,
-    )
+    label_width = text_width + pad_x * 2
+    label_height = text_height + baseline + pad_y * 2
+    box = (x1, y1, x2, y2)
+    if outside_box:
+        thickness = bounding_box_thickness(
+            image,
+            output_scale=output_scale,
+        )
+        label = outside_label_bounds(
+            box=box,
+            label_size=(label_width, label_height),
+            image_size=(height, width),
+            stroke_outset=(thickness + 1) // 2,
+            occupied=occupied_labels,
+        )
+        if label is None:
+            return
+    else:
+        label = label_bounds(
+            box=box,
+            label_size=(label_width, label_height),
+            image_size=(height, width),
+            occupied=occupied_labels,
+        )
+    label_x1, label_y1, label_x2, label_y2 = label
     occupied_labels.append((label_x1, label_y1, label_x2, label_y2))
 
-    region = image[label_y1:label_y2, label_x1:label_x2]
+    draw_translucent_rect(
+        image,
+        label,
+        color,
+    )
+    cv2.putText(
+        image,
+        text,
+        (label_x1 + pad_x, label_y1 + pad_y + text_height),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        contrast_text_color(color),
+        text_thickness,
+        lineType=cv2.LINE_AA,
+    )
+
+
+def draw_translucent_rect(
+    image: np.ndarray,
+    rect: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+) -> None:
+    x1, y1, x2, y2 = rect
+    region = image[y1:y2, x1:x2]
+    if region.size == 0:
+        return
     overlay = np.full_like(region, color)
     cv2.addWeighted(
         overlay,
@@ -462,16 +658,6 @@ def draw_prediction_label(
         1 - LABEL_BACKGROUND_ALPHA,
         0,
         dst=region,
-    )
-    cv2.putText(
-        image,
-        text,
-        (label_x1 + LABEL_PAD_X, label_y1 + LABEL_PAD_Y + text_height),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        LABEL_FONT_SCALE,
-        (255, 255, 255),
-        1,
-        lineType=cv2.LINE_AA,
     )
 
 
@@ -482,6 +668,7 @@ def draw_pose_skeleton(
     *,
     skeleton: Sequence[tuple[int, int]],
     confidence_threshold: float,
+    output_scale: int,
 ) -> None:
     keypoints = prediction.keypoints
     if keypoints is None or len(keypoints) == 0:
@@ -499,7 +686,7 @@ def draw_pose_skeleton(
             start_point,
             end_point,
             color,
-            2,
+            scaled_visual_size(2, output_scale),
             lineType=cv2.LINE_AA,
         )
 
@@ -507,8 +694,38 @@ def draw_pose_skeleton(
         if not visible[index]:
             continue
         point = tuple(np.rint(keypoint[:2]).astype(int))
-        cv2.circle(image, point, 3, (255, 255, 255), -1, cv2.LINE_AA)
-        cv2.circle(image, point, 2, color, -1, cv2.LINE_AA)
+        cv2.circle(
+            image,
+            point,
+            scaled_visual_size(4, output_scale),
+            (255, 255, 255),
+            -1,
+            cv2.LINE_AA,
+        )
+        cv2.circle(
+            image,
+            point,
+            scaled_visual_size(3, output_scale),
+            color,
+            -1,
+            cv2.LINE_AA,
+        )
+
+
+def scale_prediction(prediction: Prediction, output_scale: int) -> Prediction:
+    if output_scale == 1:
+        return prediction
+
+    keypoints = prediction.keypoints
+    if keypoints is not None:
+        keypoints = keypoints.copy()
+        keypoints[:, :2] *= output_scale
+    return Prediction(
+        cls=prediction.cls,
+        conf=prediction.conf,
+        box_xyxy=prediction.box_xyxy * output_scale,
+        keypoints=keypoints,
+    )
 
 
 def render_onnx_predictions(
@@ -519,72 +736,138 @@ def render_onnx_predictions(
     robot_poses: list[Prediction],
     draw_labels: bool,
     keypoint_confidence_threshold: float,
+    output_scale: int = 1,
 ) -> np.ndarray:
-    rendered = image.copy()
-    occupied_labels: list[tuple[int, int, int, int]] = []
-    for prediction in sorted(objects, key=prediction_area, reverse=True):
-        color = model_class_color(ModelHead.OBJECT, prediction.cls)
-        draw_bounding_box(rendered, prediction.box_xyxy, color)
-        if draw_labels:
-            draw_prediction_label(
-                rendered,
-                prediction,
-                OBJECT_CLASS_NAMES,
-                color,
-                occupied_labels,
-            )
+    if output_scale < 1:
+        raise ValueError(  # noqa: TRY003
+            "output_scale must be a positive integer",
+        )
 
-    draw_pose_predictions(
+    height, width = image.shape[:2]
+    rendered = cv2.resize(
+        image,
+        (width * output_scale, height * output_scale),
+        interpolation=cv2.INTER_CUBIC,
+    )
+    objects = [scale_prediction(item, output_scale) for item in objects]
+    person_poses = [
+        scale_prediction(item, output_scale) for item in person_poses
+    ]
+    robot_poses = [scale_prediction(item, output_scale) for item in robot_poses]
+    objects = sorted(objects, key=prediction_area, reverse=True)
+    person_poses = sorted(person_poses, key=prediction_area, reverse=True)
+    robot_poses = sorted(robot_poses, key=prediction_area, reverse=True)
+
+    for prediction in objects:
+        color = model_class_color(ModelHead.OBJECT, prediction.cls)
+        draw_bounding_box(
+            rendered,
+            prediction.box_xyxy,
+            color,
+            output_scale=output_scale,
+        )
+
+    draw_pose_overlays(
         rendered,
         person_poses,
         head=ModelHead.PERSON_POSE,
-        names=PERSON_POSE_CLASS_NAMES,
         skeleton=COCO_SKELETON,
-        draw_labels=draw_labels,
-        occupied_labels=occupied_labels,
+        draw_boxes=True,
         keypoint_confidence_threshold=keypoint_confidence_threshold,
+        output_scale=output_scale,
     )
-    draw_pose_predictions(
+    draw_pose_overlays(
         rendered,
         robot_poses,
         head=ModelHead.ROBOT_POSE,
-        names=ROBOT_POSE_CLASS_NAMES,
         skeleton=ROBOT_SKELETON,
-        draw_labels=draw_labels,
-        occupied_labels=occupied_labels,
+        draw_boxes=False,
         keypoint_confidence_threshold=keypoint_confidence_threshold,
+        output_scale=output_scale,
     )
+
+    if draw_labels:
+        occupied_labels: list[tuple[int, int, int, int]] = []
+        draw_prediction_labels(
+            rendered,
+            objects,
+            head=ModelHead.OBJECT,
+            names=OBJECT_CLASS_NAMES,
+            occupied_labels=occupied_labels,
+            outside_box=True,
+            output_scale=output_scale,
+        )
+        draw_prediction_labels(
+            rendered,
+            person_poses,
+            head=ModelHead.PERSON_POSE,
+            names=PERSON_POSE_CLASS_NAMES,
+            occupied_labels=occupied_labels,
+            outside_box=True,
+            output_scale=output_scale,
+        )
+        draw_prediction_labels(
+            rendered,
+            robot_poses,
+            head=ModelHead.ROBOT_POSE,
+            names=ROBOT_POSE_CLASS_NAMES,
+            occupied_labels=occupied_labels,
+            outside_box=False,
+            output_scale=output_scale,
+        )
     return rendered
 
 
-def draw_pose_predictions(
+def draw_pose_overlays(
     image: np.ndarray,
     predictions: list[Prediction],
     *,
     head: ModelHead,
-    names: tuple[str, ...],
     skeleton: tuple[tuple[int, int], ...],
-    draw_labels: bool,
-    occupied_labels: list[tuple[int, int, int, int]],
+    draw_boxes: bool,
     keypoint_confidence_threshold: float,
+    output_scale: int,
 ) -> None:
     color = model_class_color(head)
-    for prediction in sorted(predictions, key=prediction_area, reverse=True):
+    for prediction in predictions:
+        if draw_boxes:
+            draw_bounding_box(
+                image,
+                prediction.box_xyxy,
+                color,
+                output_scale=output_scale,
+            )
         draw_pose_skeleton(
             image,
             prediction,
             color,
             skeleton=skeleton,
             confidence_threshold=keypoint_confidence_threshold,
+            output_scale=output_scale,
         )
-        if draw_labels:
-            draw_prediction_label(
-                image,
-                prediction,
-                names,
-                color,
-                occupied_labels,
-            )
+
+
+def draw_prediction_labels(
+    image: np.ndarray,
+    predictions: list[Prediction],
+    *,
+    head: ModelHead,
+    names: tuple[str, ...],
+    occupied_labels: list[tuple[int, int, int, int]],
+    outside_box: bool,
+    output_scale: int,
+) -> None:
+    for prediction in predictions:
+        color = model_class_color(head, prediction.cls)
+        draw_prediction_label(
+            image,
+            prediction,
+            names,
+            color,
+            occupied_labels,
+            outside_box=outside_box,
+            output_scale=output_scale,
+        )
 
 
 def extract_predictions(
@@ -751,6 +1034,13 @@ def validate_config(
     help="Uniformly sample this many images. -1 renders every image.",
 )
 @click.option(
+    "--output-scale",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Scale output width and height while redrawing overlays.",
+)
+@click.option(
     "--labels/--no-labels",
     "draw_labels",
     default=True,
@@ -793,6 +1083,7 @@ def main(
     nms_iou_threshold: float,
     keypoint_confidence_threshold: float,
     num_images: int,
+    output_scale: int,
     draw_labels: bool,
     intra_threads: int,
     provider: str,
@@ -813,6 +1104,7 @@ def main(
         nms_iou_threshold=nms_iou_threshold,
         keypoint_confidence_threshold=keypoint_confidence_threshold,
         num_images=num_images,
+        output_scale=output_scale,
         draw_labels=draw_labels,
         intra_threads=intra_threads,
         execution_provider=execution_provider,
@@ -857,6 +1149,7 @@ def main(
             robot_poses=predictions[ModelHead.ROBOT_POSE],
             draw_labels=draw_labels,
             keypoint_confidence_threshold=keypoint_confidence_threshold,
+            output_scale=output_scale,
         )
         output_path = output_dir / relative_source_image_path(
             image_path,

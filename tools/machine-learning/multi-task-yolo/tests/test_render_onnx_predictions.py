@@ -10,11 +10,36 @@ Prediction = render_onnx_predictions.Prediction
 
 
 class RenderOnnxPredictionsTest(TestCase):
-    def test_model_classes_have_unique_colors(self) -> None:
+    def test_model_colors_match_twix_overlays(self) -> None:
         colors = render_onnx_predictions.model_class_colors()
 
-        self.assertEqual(len(colors), 9)
+        self.assertEqual(
+            render_onnx_predictions.CLASS_COLORS_RGB,
+            (
+                (255, 140, 56),
+                (66, 190, 80),
+                (67, 112, 255),
+                (110, 40, 170),
+                (255, 225, 25),
+                (40, 202, 255),
+                (185, 35, 35),
+                (255, 100, 190),
+                (0, 109, 119),
+            ),
+        )
+        self.assertEqual(
+            tuple(colors),
+            render_onnx_predictions.MODEL_CLASS_NAMES,
+        )
+        self.assertEqual(
+            tuple(colors.values()),
+            render_onnx_predictions.CLASS_COLORS_BGR,
+        )
         self.assertEqual(len(set(colors.values())), len(colors))
+        self.assertNotEqual(colors["Ball"], colors["Person pose"])
+        self.assertNotEqual(colors["Ball"], colors["Robot pose"])
+        self.assertNotEqual(colors["XSpot"], colors["Person pose"])
+        self.assertNotEqual(colors["Robot pose"], colors["Person pose"])
 
     def test_bgr_to_nv12_uses_runtime_input_layout(self) -> None:
         image = np.zeros((64, 96, 3), dtype=np.uint8)
@@ -94,7 +119,7 @@ class RenderOnnxPredictionsTest(TestCase):
 
         self.assertEqual(retained, [])
 
-    def test_pose_rendering_does_not_draw_bounding_box(self) -> None:
+    def test_person_pose_rendering_draws_square_bounding_box(self) -> None:
         image = np.zeros((96, 96, 3), dtype=np.uint8)
         keypoints = np.zeros((17, 3), dtype=np.float32)
         prediction = Prediction(
@@ -109,6 +134,28 @@ class RenderOnnxPredictionsTest(TestCase):
             objects=[],
             person_poses=[prediction],
             robot_poses=[],
+            draw_labels=False,
+            keypoint_confidence_threshold=0.25,
+        )
+
+        self.assertGreater(int(rendered[10, 10].sum()), 0)
+        self.assertGreater(int(rendered[80, 10].sum()), 0)
+
+    def test_robot_pose_rendering_keeps_skeleton_only(self) -> None:
+        image = np.zeros((96, 96, 3), dtype=np.uint8)
+        keypoints = np.zeros((14, 3), dtype=np.float32)
+        prediction = Prediction(
+            cls=0,
+            conf=0.9,
+            box_xyxy=np.array([10, 10, 80, 80], dtype=np.float32),
+            keypoints=keypoints,
+        )
+
+        rendered = render_onnx_predictions.render_onnx_predictions(
+            image,
+            objects=[],
+            person_poses=[],
+            robot_poses=[prediction],
             draw_labels=False,
             keypoint_confidence_threshold=0.25,
         )
@@ -142,3 +189,120 @@ class RenderOnnxPredictionsTest(TestCase):
 
         self.assertGreater(int(without_labels.sum()), 0)
         self.assertGreater(int(with_labels.sum()), int(without_labels.sum()))
+
+    def test_object_boxes_have_square_corners(self) -> None:
+        image = np.zeros((96, 120, 3), dtype=np.uint8)
+        prediction = Prediction(
+            cls=0,
+            conf=0.9,
+            box_xyxy=np.array([20, 20, 100, 80], dtype=np.float32),
+        )
+
+        rendered = render_onnx_predictions.render_onnx_predictions(
+            image,
+            objects=[prediction],
+            person_poses=[],
+            robot_poses=[],
+            draw_labels=False,
+            keypoint_confidence_threshold=0.25,
+        )
+
+        self.assertGreater(int(rendered[20, 20].sum()), 0)
+        self.assertGreater(int(rendered[80, 20].sum()), 0)
+        self.assertGreater(int(rendered[80, 30].sum()), 0)
+
+    def test_outside_label_aligns_to_outer_box_stroke(self) -> None:
+        label = render_onnx_predictions.outside_label_bounds(
+            box=(20, 30, 100, 80),
+            label_size=(60, 16),
+            image_size=(96, 120),
+            stroke_outset=1,
+            occupied=(),
+        )
+
+        self.assertIsNotNone(label)
+        if label is None:
+            self.fail("Expected an outside label placement")
+        self.assertEqual(label[0], 19)
+        self.assertEqual(label[3], 30)
+        self.assertFalse(
+            render_onnx_predictions.rectangles_overlap(
+                label,
+                (20, 30, 100, 80),
+            )
+        )
+
+    def test_outside_label_never_falls_back_inside_box(self) -> None:
+        label = render_onnx_predictions.outside_label_bounds(
+            box=(0, 0, 80, 80),
+            label_size=(60, 16),
+            image_size=(96, 120),
+            stroke_outset=1,
+            occupied=(),
+        )
+
+        self.assertIsNotNone(label)
+        if label is None:
+            self.fail("Expected an outside label placement")
+        self.assertFalse(
+            render_onnx_predictions.rectangles_overlap(
+                label,
+                (0, 0, 80, 80),
+            )
+        )
+
+    def test_output_scale_doubles_width_and_height(self) -> None:
+        image = np.zeros((96, 120, 3), dtype=np.uint8)
+        prediction = Prediction(
+            cls=0,
+            conf=0.9,
+            box_xyxy=np.array([20, 20, 100, 80], dtype=np.float32),
+        )
+
+        rendered = render_onnx_predictions.render_onnx_predictions(
+            image,
+            objects=[prediction],
+            person_poses=[],
+            robot_poses=[],
+            draw_labels=False,
+            keypoint_confidence_threshold=0.25,
+            output_scale=2,
+        )
+
+        self.assertEqual(rendered.shape, (192, 240, 3))
+        self.assertGreater(int(rendered[40, 40].sum()), 0)
+        self.assertGreater(int(rendered[160, 40].sum()), 0)
+
+    def test_bounding_box_thickness_scales_sublinearly(self) -> None:
+        native = np.zeros((96, 120, 3), dtype=np.uint8)
+        scaled = np.zeros((384, 480, 3), dtype=np.uint8)
+
+        native_thickness = render_onnx_predictions.bounding_box_thickness(
+            native,
+            output_scale=1,
+        )
+        scaled_thickness = render_onnx_predictions.bounding_box_thickness(
+            scaled,
+            output_scale=4,
+        )
+
+        self.assertEqual(native_thickness, 2)
+        self.assertEqual(scaled_thickness, 4)
+
+    def test_visual_elements_scale_sublinearly(self) -> None:
+        self.assertEqual(
+            render_onnx_predictions.scaled_visual_size(1, 4),
+            2,
+        )
+        self.assertEqual(
+            render_onnx_predictions.scaled_visual_size(2, 4),
+            4,
+        )
+        self.assertEqual(
+            render_onnx_predictions.scaled_visual_size(4, 4),
+            8,
+        )
+        self.assertEqual(
+            render_onnx_predictions.label_font_scale(220, 4),
+            render_onnx_predictions.LABEL_MIN_FONT_SCALE * 2,
+        )

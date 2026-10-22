@@ -131,7 +131,8 @@ Validation outputs are saved under `runs/val/...` and include:
 `src/validation/render_onnx_predictions.py` renders object boxes, COCO person
 poses, and 14-keypoint robot poses onto a shared source image. It applies
 confidence filtering and non-maximum suppression independently to each head.
-Pose heads draw keypoints and skeletons without pose bounding boxes.
+Person poses include rounded bounding boxes, while robot poses use only
+keypoints and skeletons.
 
 The renderer assigns a distinct color to every object class and pose task in
 the three-head model. Labels are compact by default. Pass `--no-labels` to
@@ -142,8 +143,13 @@ uv run -m validation.render_onnx_predictions \
   path/to/model.onnx \
   path/to/source-images \
   runs/rendered-onnx \
-  --num-images 100
+  --num-images 100 \
+  --output-scale 2
 ```
+
+`--output-scale` multiplies the output width and height by an integer while
+redrawing boxes, labels, and pose overlays at the larger resolution. Model
+inference continues to use the original input resolution.
 
 The default `--provider auto` selects TensorRT, CUDA, or CPU in that order.
 Use `--provider cuda` when a batch must run on an NVIDIA GPU without silently
