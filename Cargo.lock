@@ -8957,6 +8957,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "realfft"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "538895ccf2006b473aafbe8d72770e21038961ab67aae34f3c577485fc703a7d"
+dependencies = [
+ "rustfft",
+]
+
+[[package]]
 name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11789,8 +11798,8 @@ dependencies = [
  "color-eyre",
  "filtering",
  "log",
+ "realfft",
  "ros-z",
- "rustfft",
  "tokio",
  "types",
 ]
