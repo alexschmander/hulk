@@ -42,9 +42,9 @@ impl DynamicStruct {
         buffer: &mut Vec<u8>,
     ) -> Result<(), DynamicError> {
         buffer.clear();
-        let data = self.serialize(format)?;
-        buffer.extend_from_slice(&data);
-        Ok(())
+        match format {
+            SerializationFormat::Cdr => cdr::serialize_cdr_into(self, buffer),
+        }
     }
 
     /// Serialize the message to a ZBuf (zero-copy where possible).
