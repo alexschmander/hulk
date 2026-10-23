@@ -5,6 +5,7 @@
 
 mod cdr;
 pub(crate) use cdr::deserialize_cdr_selection;
+pub(crate) use cdr::{deserialize_cdr_reader, serialize_cdr_value_into, write_cdr_value};
 
 pub use cdr::{
     deserialize_cdr, deserialize_cdr_value, serialize_cdr, serialize_cdr_to_zbuf,

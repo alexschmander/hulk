@@ -326,9 +326,21 @@ fn recorded_flip_from_mcap() {
         records::Record,
         sans_io::{LinearReadEvent, LinearReader},
     };
-    use ros_z::message::{SerdeCdrCodec, WireDecoder};
+    use ros_z::{CdrCodec, message::WireDecoder};
     use std::{collections::BTreeMap, fs::File, io::Read};
     use types::object_detection::{Object, RobocupObjectLabel};
+
+    // Historical Serde-only views are not current Message layouts.
+    fn decode_recorded<T: serde::de::DeserializeOwned>(data: &[u8]) -> ros_z::cdr::Result<T> {
+        let header = data.get(..4).ok_or(ros_z::cdr::Error::UnexpectedEof)?;
+        if header[..2] != ros_z::message::CDR_HEADER_LE[..2] {
+            return Err(ros_z::cdr::Error::Custom(
+                "expected CDR_LE encapsulation".into(),
+            ));
+        }
+        ros_z::__private::ros_z_cdr::from_bytes::<T, ros_z::cdr::LittleEndian>(&data[4..])
+            .map(|(value, _)| value)
+    }
 
     let mut recording: Recording =
         serde_json::from_str(include_str!("recovered_frames.json")).unwrap();
@@ -363,7 +375,7 @@ fn recorded_flip_from_mcap() {
                                 if time >= recording.reference.time && time <= end =>
                             {
                                 let low =
-                                    SerdeCdrCodec::<booster::LowState>::deserialize(&data).unwrap();
+                                    CdrCodec::<booster::LowState>::deserialize(&data).unwrap();
                                 if time == recording.reference.time
                                     || recording.frames.iter().any(|frame| {
                                         frame.imu.iter().any(|sample| sample.time == time)
@@ -373,9 +385,8 @@ fn recorded_flip_from_mcap() {
                                 }
                             }
                             Some("localization/estimate") if header.sequence == 6097 => {
-                                reference = Some(
-                                    SerdeCdrCodec::<RecordedEstimate>::deserialize(&data).unwrap(),
-                                );
+                                reference =
+                                    Some(decode_recorded::<RecordedEstimate>(&data).unwrap());
                             }
                             Some("field_mark_association/visual_localization_local")
                                 if recording
@@ -384,16 +395,14 @@ fn recorded_flip_from_mcap() {
                                     .any(|frame| frame.sequence == u64::from(header.sequence)) =>
                             {
                                 let frame =
-                                    SerdeCdrCodec::<TimeWrapper<RecordedVisualFrame>>::deserialize(
-                                        &data,
-                                    )
-                                    .unwrap();
+                                    decode_recorded::<TimeWrapper<RecordedVisualFrame>>(&data)
+                                        .unwrap();
                                 visuals.insert(frame.time.as_nanos(), frame.inner);
                             }
                             Some("detected_objects")
                                 if [15368, 15369, 15447].contains(&header.sequence) =>
                             {
-                                let frame = SerdeCdrCodec::<
+                                let frame = CdrCodec::<
                                     TimeWrapper<Vec<Object<RobocupObjectLabel>>>,
                                 >::deserialize(&data)
                                 .unwrap();

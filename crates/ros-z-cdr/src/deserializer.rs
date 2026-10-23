@@ -36,6 +36,10 @@ where
         Self { reader }
     }
 
+    pub fn into_reader(self) -> CdrReader<'de, BO> {
+        self.reader
+    }
+
     /// How many bytes of input stream have been consumed.
     #[inline]
     pub fn bytes_consumed(&self) -> usize {
@@ -181,7 +185,10 @@ where
         V: Visitor<'de>,
     {
         let s = self.reader.read_str()?;
-        visitor.visit_borrowed_str(s)
+        match s {
+            std::borrow::Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
+            std::borrow::Cow::Owned(s) => visitor.visit_string(s),
+        }
     }
 
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
@@ -200,7 +207,10 @@ where
         V: Visitor<'de>,
     {
         let bytes = self.reader.read_byte_sequence()?;
-        visitor.visit_borrowed_bytes(bytes)
+        match bytes {
+            std::borrow::Cow::Borrowed(bytes) => visitor.visit_borrowed_bytes(bytes),
+            std::borrow::Cow::Owned(bytes) => visitor.visit_byte_buf(bytes),
+        }
     }
 
     fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value>
@@ -208,7 +218,7 @@ where
         V: Visitor<'de>,
     {
         let bytes = self.reader.read_byte_sequence()?;
-        visitor.visit_byte_buf(bytes.to_vec())
+        visitor.visit_byte_buf(bytes.into_owned())
     }
 
     #[inline]

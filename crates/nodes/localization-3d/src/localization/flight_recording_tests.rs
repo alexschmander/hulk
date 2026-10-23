@@ -6,7 +6,7 @@ use mcap::{
     records::Record,
     sans_io::{LinearReadEvent, LinearReader},
 };
-use ros_z::message::{SerdeCdrCodec, WireDecoder};
+use ros_z::{CdrCodec, message::WireDecoder};
 use std::{collections::BTreeMap, fs::File, io::Read, time::Duration};
 use types::camera_geometry::interpolate_camera_geometry;
 
@@ -39,64 +39,64 @@ fn recorded_divergence_window_remains_bounded_without_contact() {
                 let count = file.read(reader.insert(count)).unwrap();
                 reader.notify_read(count);
             }
-            LinearReadEvent::Record { opcode, data } => match mcap::parse_record(opcode, data)
-                .unwrap()
-            {
-                Record::Channel(channel) => {
-                    topics.insert(channel.id, channel.topic);
-                }
-                Record::Message { header, data } => {
-                    let delivery = header.log_time as i64;
-                    match topics.get(&header.channel_id).map(String::as_str) {
-                        Some("localization/status") if delivery <= START => {
-                            let status =
-                                SerdeCdrCodec::<LocalizationStatus>::deserialize(&data).unwrap();
-                            reference = status.heading;
-                        }
-                        Some("localization/estimate") if delivery <= START => {
-                            initial = Some(
-                                SerdeCdrCodec::<LocalizationEstimate>::deserialize(&data).unwrap(),
-                            );
-                        }
-                        Some("inputs/low_state") if (START..=END).contains(&delivery) => {
-                            let low =
-                                SerdeCdrCodec::<booster::LowState>::deserialize(&data).unwrap();
-                            inputs.push((
-                                delivery,
-                                Input::Imu(
-                                    Time::from_nanos(header.publish_time as i64),
-                                    low.imu_state,
-                                ),
-                            ));
-                        }
-                        Some("camera_geometry")
-                            if (START - 1_000_000_000..=END).contains(&delivery) =>
-                        {
-                            let camera =
-                                SerdeCdrCodec::<TimeWrapper<CameraGeometry>>::deserialize(&data)
-                                    .unwrap();
-                            cameras.insert(camera.time, camera);
-                        }
-                        Some("visual_odometry/current_left_camera_to_visual_odometer")
-                            if (START..=END).contains(&delivery) =>
-                        {
-                            inputs.push((
-                                delivery,
-                                Input::Odometry(
-                                    SerdeCdrCodec::<VisualOdometer>::deserialize(&data).unwrap(),
-                                ),
-                            ));
-                        }
-                        Some("field_mark_association/visual_localization_local")
-                            if header.sequence == 3722 && (START..=END).contains(&delivery) =>
-                        {
-                            inputs.push((delivery, Input::Visual(SerdeCdrCodec::<TimeWrapper<VisualLocalizationFrame>>::deserialize(&data).unwrap())));
-                        }
-                        _ => {}
+            LinearReadEvent::Record { opcode, data } => {
+                match mcap::parse_record(opcode, data).unwrap() {
+                    Record::Channel(channel) => {
+                        topics.insert(channel.id, channel.topic);
                     }
+                    Record::Message { header, data } => {
+                        let delivery = header.log_time as i64;
+                        match topics.get(&header.channel_id).map(String::as_str) {
+                            Some("localization/status") if delivery <= START => {
+                                let status =
+                                    CdrCodec::<LocalizationStatus>::deserialize(&data).unwrap();
+                                reference = status.heading;
+                            }
+                            Some("localization/estimate") if delivery <= START => {
+                                initial = Some(
+                                    CdrCodec::<LocalizationEstimate>::deserialize(&data).unwrap(),
+                                );
+                            }
+                            Some("inputs/low_state") if (START..=END).contains(&delivery) => {
+                                let low =
+                                    CdrCodec::<booster::LowState>::deserialize(&data).unwrap();
+                                inputs.push((
+                                    delivery,
+                                    Input::Imu(
+                                        Time::from_nanos(header.publish_time as i64),
+                                        low.imu_state,
+                                    ),
+                                ));
+                            }
+                            Some("camera_geometry")
+                                if (START - 1_000_000_000..=END).contains(&delivery) =>
+                            {
+                                let camera =
+                                    CdrCodec::<TimeWrapper<CameraGeometry>>::deserialize(&data)
+                                        .unwrap();
+                                cameras.insert(camera.time, camera);
+                            }
+                            Some("visual_odometry/current_left_camera_to_visual_odometer")
+                                if (START..=END).contains(&delivery) =>
+                            {
+                                inputs.push((
+                                    delivery,
+                                    Input::Odometry(
+                                        CdrCodec::<VisualOdometer>::deserialize(&data).unwrap(),
+                                    ),
+                                ));
+                            }
+                            Some("field_mark_association/visual_localization_local")
+                                if header.sequence == 3722 && (START..=END).contains(&delivery) =>
+                            {
+                                inputs.push((delivery, Input::Visual(CdrCodec::<TimeWrapper<VisualLocalizationFrame>>::deserialize(&data).unwrap())));
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
         }
     }
     inputs.sort_by_key(|(delivery, _)| *delivery);

@@ -1,6 +1,6 @@
 use nalgebra::SMatrix;
 use ros_z::time::Time;
-use ros_z::{Message, MessageSchema, SchemaBuilder, SerdeCdrCodec};
+use ros_z::{CdrCodec, Message, MessageSchema, SchemaBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use coordinate_systems::{Field, Ground, ImuReference, Local, Robot};
@@ -20,7 +20,24 @@ where
     From: Message + Serialize + DeserializeOwned,
     To: Message + Serialize + DeserializeOwned,
 {
-    type Codec = SerdeCdrCodec<Self>;
+    type Codec = CdrCodec<Self>;
+
+    fn encode_cdr<B: ros_z::cdr::CdrBuffer>(
+        &self,
+        writer: &mut ros_z::cdr::CdrWriter<'_, ros_z::cdr::LittleEndian, B>,
+    ) -> ros_z::cdr::Result<()> {
+        self.pose.encode_cdr(writer)?;
+        ros_z::serde_bridge::encode_serde(&self.covariance, writer)
+    }
+
+    fn decode_cdr(
+        reader: &mut ros_z::cdr::CdrReader<'_, ros_z::cdr::LittleEndian>,
+    ) -> ros_z::cdr::Result<Self> {
+        Ok(Self {
+            pose: Message::decode_cdr(reader)?,
+            covariance: ros_z::serde_bridge::decode_serde(reader)?,
+        })
+    }
 
     fn type_name() -> String {
         format!(
@@ -148,6 +165,31 @@ mod tests {
     fn localization_output_schemas_are_valid() {
         LocalizationEstimate::schema();
         LocalizationStatus::schema();
+    }
+
+    #[test]
+    fn pose_estimate_preserves_cdr_wire_layout() {
+        use ros_z::message::{WireDecoder, WireEncoder};
+
+        let value = PoseEstimate::<Robot, Local> {
+            pose: nalgebra::Isometry3::from_parts(
+                nalgebra::Translation3::new(1.0, 2.0, 3.0),
+                nalgebra::UnitQuaternion::from_euler_angles(0.1, 0.2, 0.3),
+            )
+            .framed_transform(),
+            covariance: SMatrix::from_fn(|row, col| (row * 6 + col) as f64),
+        };
+        let bytes = CdrCodec::serialize(&value).unwrap();
+        let mut expected = ros_z::message::CDR_HEADER_LE.to_vec();
+        value
+            .serialize(&mut ros_z::__private::ros_z_cdr::SerdeCdrSerializer::<
+                ros_z::cdr::LittleEndian,
+            >::new(&mut expected))
+            .unwrap();
+        assert_eq!(bytes, expected);
+        let decoded = CdrCodec::<PoseEstimate<Robot, Local>>::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.pose, value.pose);
+        assert_eq!(decoded.covariance, value.covariance);
     }
 
     #[test]

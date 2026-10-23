@@ -78,27 +78,7 @@ pub fn serialize_cdr_to_zbuf(message: &DynamicStruct) -> Result<ZBuf, DynamicErr
 
 /// Deserialize a dynamic message from CDR bytes.
 pub fn deserialize_cdr(data: &[u8], schema: &Schema) -> Result<DynamicStruct, DynamicError> {
-    schema
-        .validate()
-        .map_err(|error| DynamicError::schema("deserializing dynamic CDR struct", error))?;
-    if data.len() < 4 {
-        return Err(DynamicError::DeserializationError(
-            "CDR data too short for header".into(),
-        ));
-    }
-    let header = &data[0..4];
-    let representation_identifier = &header[0..2];
-    if representation_identifier != [0x00, 0x01] {
-        return Err(DynamicError::DeserializationError(format!(
-            "Expected CDR_LE encapsulation ({:?}), found {:?}",
-            [0x00, 0x01],
-            representation_identifier
-        )));
-    }
-
-    let payload = &data[4..];
-    let mut reader = CdrReader::<LittleEndian>::new(payload);
-    match deserialize_shape_value(&schema.root, schema, &mut reader)? {
+    match deserialize_cdr_value(data, schema)? {
         DynamicValue::Struct(value) => Ok(*value),
         _ => Err(DynamicError::DeserializationError(
             "root schema did not deserialize to a struct".into(),
@@ -111,12 +91,17 @@ pub fn deserialize_cdr_value(data: &[u8], schema: &Schema) -> Result<DynamicValu
     schema
         .validate()
         .map_err(|error| DynamicError::schema("deserializing dynamic CDR value", error))?;
-    if data.len() < 4 {
-        return Err(DynamicError::DeserializationError(
-            "CDR data too short for header".into(),
-        ));
-    }
-    let header = &data[0..4];
+    deserialize_cdr_reader(CdrReader::new(data), schema)
+}
+
+pub(crate) fn deserialize_cdr_reader(
+    mut reader: CdrReader<LittleEndian>,
+    schema: &Schema,
+) -> Result<DynamicValue, DynamicError> {
+    let mut header = [0; 4];
+    reader
+        .read_into(&mut header)
+        .map_err(DynamicError::deserialization)?;
     let representation_identifier = &header[0..2];
     if representation_identifier != [0x00, 0x01] {
         return Err(DynamicError::DeserializationError(format!(
@@ -126,8 +111,7 @@ pub fn deserialize_cdr_value(data: &[u8], schema: &Schema) -> Result<DynamicValu
         )));
     }
 
-    let payload = &data[4..];
-    let mut reader = CdrReader::<LittleEndian>::new(payload);
+    reader.reset_origin();
     deserialize_root_value(schema, &mut reader)
 }
 
@@ -200,14 +184,10 @@ fn serialize_shape_value<B: CdrBuffer>(
         (DynamicValue::Bytes(bytes), TypeDef::Sequence { element, length })
             if matches!(element.as_ref(), TypeDef::Primitive(PrimitiveTypeDef::U8)) =>
         {
-            match length {
-                SequenceLengthDef::Dynamic => writer.write_bytes(bytes),
-                SequenceLengthDef::Fixed(_) => {
-                    for byte in bytes {
-                        writer.write_u8(*byte);
-                    }
-                }
+            if matches!(length, SequenceLengthDef::Dynamic) {
+                writer.write_sequence_length(bytes.len());
             }
+            writer.buffer_mut().append_zbuf(&ZBuf::from(bytes.clone()));
         }
         (DynamicValue::Struct(value), TypeDef::Named(name)) => match schema.definitions.get(name) {
             Some(TypeDefinition::Struct(definition)) => {
@@ -585,12 +565,12 @@ fn deserialize_shape_value(
             SequenceLengthDef::Dynamic
                 if matches!(element.as_ref(), TypeDef::Primitive(PrimitiveTypeDef::U8)) =>
             {
-                Ok(DynamicValue::Bytes(
+                Ok(DynamicValue::Bytes({
+                    let len = reader.read_u32().map_err(DynamicError::deserialization)? as usize;
                     reader
-                        .read_byte_sequence()
+                        .read_zslice(len)
                         .map_err(DynamicError::deserialization)?
-                        .to_vec(),
-                ))
+                }))
             }
             SequenceLengthDef::Dynamic => {
                 let len = reader

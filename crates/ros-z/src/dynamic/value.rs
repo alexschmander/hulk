@@ -30,8 +30,8 @@ pub enum DynamicValue {
     Float64(f64),
     String(String),
 
-    /// Optimized byte array (for uint8[] / byte[])
-    Bytes(Vec<u8>),
+    /// Shared contiguous bytes (uint8[] / byte[]); construct from a Vec with `.into()`.
+    Bytes(zenoh_buffers::ZSlice),
 
     /// Nested or root struct value.
     Struct(Box<DynamicStruct>),
