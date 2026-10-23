@@ -86,7 +86,12 @@ pub(crate) fn valid_visual_frame(
     parameters: &VisualParameters,
 ) -> bool {
     let associations = &frame.associations;
-    (parameters.min_associations..=parameters.max_associations).contains(&associations.len())
+    let minimum = if frame.source == types::visual_localization::VisualAssociationSource::Tracking {
+        1
+    } else {
+        parameters.min_associations
+    };
+    (minimum..=parameters.max_associations).contains(&associations.len())
         && frame.camera_intrinsic.is_valid()
         && frame
             .robot_to_camera
@@ -209,6 +214,29 @@ mod tests {
     use linear_algebra::point;
 
     #[test]
+    fn sparse_tracking_updates_do_not_lower_the_global_initialization_requirement() {
+        use types::visual_localization::VisualAssociationSource;
+        let mut frame = VisualLocalizationFrame {
+            epoch: 0,
+            generation: 0,
+            source: VisualAssociationSource::Tracking,
+            robot_to_camera: Isometry3::identity(),
+            camera_intrinsic: Intrinsic::default(),
+            associations: vec![FieldMarkAssociation {
+                detection: point![10.0, 20.0],
+                field_point: point![1.0, 0.0, 0.0],
+            }],
+        };
+        let parameters = VisualParameters::default();
+        assert!(valid_visual_frame(&frame, &parameters));
+        frame.source = VisualAssociationSource::Global;
+        assert!(!valid_visual_frame(&frame, &parameters));
+        frame.source = VisualAssociationSource::Tracking;
+        frame.associations.clear();
+        assert!(!valid_visual_frame(&frame, &parameters));
+    }
+
+    #[test]
     fn recorded_ground_fit_is_refined_before_recovery_pixel_validation() {
         let frame: serde_json::Value = serde_json::from_str(include_str!(
             "../../field_mark_association/src/global_association/recorded_frame.json"
@@ -265,7 +293,7 @@ mod tests {
         let frame = VisualLocalizationFrame {
             epoch: 0,
             generation: 0,
-            source: types::visual_localization::VisualAssociationSource::Tracking,
+            source: types::visual_localization::VisualAssociationSource::Global,
             robot_to_camera: Isometry3::identity(),
             camera_intrinsic: Intrinsic::default(),
             associations: vec![

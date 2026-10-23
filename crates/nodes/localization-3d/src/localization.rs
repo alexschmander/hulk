@@ -173,6 +173,7 @@ impl Localization {
         let time = frame.time;
         if frame.inner.epoch != self.status.epoch
             || frame.inner.generation != self.status.generation
+            || self.latest_visual.is_some_and(|accepted| time <= accepted)
         {
             return Ok(false);
         }
@@ -183,27 +184,17 @@ impl Localization {
         if self.status.state == LocalizationState::Startup
             || frame.inner.source == VisualAssociationSource::Global
         {
-            match self.status.state {
-                // A result can arrive after the LostTrack snapshot used by association.
-                LocalizationState::Tracking => return Ok(false),
-                LocalizationState::LostTrack | LocalizationState::Startup => {
-                    if (self.status.state == LocalizationState::LostTrack
-                        && self.heading_reference.is_none())
-                        || !crate::alignment::valid_visual_frame(
-                            &frame.inner,
-                            &self.parameters.visual,
-                        )
-                        || self
-                            .pending_bootstrap
-                            .as_ref()
-                            .is_some_and(|old| old.time >= time)
-                    {
-                        return Ok(false);
-                    }
-                    self.pending_bootstrap = Some(frame);
-                    return Ok(true);
-                }
+            if (self.status.state != LocalizationState::Startup && self.heading_reference.is_none())
+                || !crate::alignment::valid_visual_frame(&frame.inner, &self.parameters.visual)
+                || self
+                    .pending_bootstrap
+                    .as_ref()
+                    .is_some_and(|old| old.time >= time)
+            {
+                return Ok(false);
             }
+            self.pending_bootstrap = Some(frame);
+            return Ok(true);
         }
         let inserted = self.estimator.ingest_visual(frame)?;
         if inserted && self.latest_visual.is_none_or(|old| time > old) {
@@ -223,11 +214,8 @@ impl Localization {
         if solved.visual_rejected {
             self.pending_visual = None;
         }
-        let solved = if solved.motion_invalid {
-            self.rebuild_local_motion(now).unwrap_or(solved)
-        } else {
-            solved
-        };
+        // Retain the motion-conditioned posterior through visual loss.
+        // Global matches are observations, not permission to replace that history.
         let solved = self.try_bootstrap(now).unwrap_or(solved);
         if solved.estimate.is_none() {
             self.pending_visual = None;
@@ -297,8 +285,11 @@ impl Localization {
 
     fn try_bootstrap(&mut self, now: Time) -> Option<crate::estimator::SolveResult> {
         let frame = self.pending_bootstrap.as_ref()?;
-        if self.status.state == LocalizationState::Tracking
-            || (self.status.state == LocalizationState::LostTrack && frame.time <= self.status.time)
+        if (self.status.state == LocalizationState::LostTrack && frame.time <= self.status.time)
+            || self
+                .pending_visual
+                .or(self.latest_visual)
+                .is_some_and(|time| frame.time <= time)
             || frame.time > now
             || frame
                 .time
@@ -313,6 +304,23 @@ impl Localization {
         self.estimator.attitude_at(frame.time)?;
         let frame = self.pending_bootstrap.take()?;
         let time = frame.time;
+        if self.status.state != LocalizationState::Startup
+            && let Some(heading) = self.heading_reference.as_ref()
+        {
+            if !self
+                .estimator
+                .ingest_recovery(frame, heading)
+                .inspect_err(|error| tracing::warn!(%error, "discarding recovery observations"))
+                .ok()?
+            {
+                return None;
+            }
+            let solved = self.estimator.solve_with_heading(Some(heading));
+            if !solved.visual_rejected && solved.converged {
+                self.pending_visual = Some(time);
+            }
+            return Some(solved);
+        }
         let candidate = self
             .estimator
             .bootstrap_candidate(frame, self.heading_reference.as_ref());
@@ -331,6 +339,7 @@ impl Localization {
                 &self.parameters.visual,
             )
         {
+            tracing::debug!(time = ?time, converged = solved.converged, failure = ?solved.diagnostics.failure, termination = %solved.diagnostics.termination, rms = ?candidate.accepted_visual_rms(), "discarding unsolved recovery");
             return None;
         }
         if let Some(prediction) = predicted_height {
@@ -348,31 +357,6 @@ impl Localization {
         self.status.generation = candidate.generation();
         self.estimator = candidate;
         self.pending_visual = Some(time);
-        Some(solved)
-    }
-
-    fn rebuild_local_motion(&mut self, now: Time) -> Option<crate::estimator::SolveResult> {
-        let mut candidate = self
-            .estimator
-            .motion_candidate()
-            .inspect_err(|error| tracing::warn!(%error, "motion reconstruction failed"))
-            .ok()??;
-        let mut solved = candidate.solve_with_heading(None);
-        solved.estimate.as_ref()?;
-        self.estimator = candidate;
-        self.pending_visual = None;
-        self.latest_visual = None;
-        if self.status.state == LocalizationState::Tracking {
-            self.status = LocalizationStatus {
-                time: now,
-                state: LocalizationState::LostTrack,
-                ..self.status
-            };
-        }
-        if let Some(reference) = self.heading_reference.as_mut() {
-            reference.interrupt_tracking();
-        }
-        solved.diagnostics.motion_rebuilt = true;
         Some(solved)
     }
 }

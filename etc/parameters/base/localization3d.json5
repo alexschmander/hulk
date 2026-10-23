@@ -5,7 +5,7 @@
   timing: {
     // All durations use {secs, nanos}. Bias spacing must be a multiple of trajectory
     // spacing, trajectory spacing a multiple of preintegration_interval; window >= 2 knots.
-    trajectory_spacing: { secs: 0, nanos: 200000000 },
+    trajectory_spacing: { secs: 0, nanos: 100000000 },
     bias_spacing: { secs: 5, nanos: 0 },
     preintegration_interval: { secs: 0, nanos: 100000000 },
     optimization_window: { secs: 2, nanos: 0 },
@@ -31,13 +31,13 @@
   },
   solver: {
     max_trials: 8,
-    max_iterations: 10,
+    max_iterations: 20, // Allow recovery candidates to converge; normal solves stop early.
     gradient_tolerance: 0.001,
     step_tolerance: 0.00001,
     cost_tolerance: 0.00000001,
   },
   visual: {
-    min_associations: 3, // >= 3; max must be >= min
+    min_associations: 3, // Global initialization; tracking can fuse a single unambiguous feature.
     max_associations: 32,
     min_reprojection_depth: 0.01, // m
     min_detection_separation_px: 1.0,

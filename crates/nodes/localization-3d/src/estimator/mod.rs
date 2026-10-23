@@ -76,7 +76,6 @@ pub(crate) struct SolveResult {
     pub estimate: Option<LocalizationEstimate>,
     pub diagnostics: SolveDiagnostics,
     pub converged: bool,
-    pub motion_invalid: bool,
     pub visual_rejected: bool,
 }
 
@@ -98,7 +97,7 @@ pub(crate) struct Estimator {
     intrinsics: StateKey<CameraIntrinsics<f64>>,
     latest_time: Time,
     last_converged_time: Option<Time>,
-    motion_checkpoint: Option<recovery::MotionCheckpoint>,
+    recovery_seed: Option<(Time, nalgebra::Isometry3<f64>)>,
     latest_vo_epoch: Option<u64>,
     latest_kinematic_time: Option<Time>,
     measurements: BTreeMap<i64, usize>,
@@ -199,7 +198,7 @@ impl Estimator {
             intrinsics,
             latest_time: origin,
             last_converged_time: None,
-            motion_checkpoint: None,
+            recovery_seed: None,
             latest_vo_epoch: None,
             latest_kinematic_time: None,
             measurements: BTreeMap::new(),
@@ -335,18 +334,6 @@ impl Estimator {
             if let Some(key) = self.current_yaw.take() {
                 self.graph.remove_factor(key)?;
             }
-            if result.is_ok() {
-                let (segment, tau) = self.segment_and_tau(self.latest_time)?;
-                if let Some(attitude) = self.attitude_at(self.latest_time) {
-                    self.motion_checkpoint = Some(recovery::MotionCheckpoint {
-                        time: self.latest_time,
-                        state: self
-                            .spline(control_keys(&self.controls, segment)?)?
-                            .state(tau)?,
-                        attitude,
-                    });
-                }
-            }
             // Retire the restored graph after rejection too; continuous motion
             // must not grow an unbounded graph while field updates are withheld.
             self.retire_old_segments()?;
@@ -365,7 +352,6 @@ impl Estimator {
         if estimate.is_none() {
             diagnostics.imu_bias = None;
         }
-        let motion_invalid = estimate.is_none() && self.alignment.is_some();
         diagnostics.duration = start.elapsed();
         diagnostics.state_count =
             self.controls.len() + self.biases.len() + 1 + usize::from(self.alignment.is_some());
@@ -374,7 +360,6 @@ impl Estimator {
             estimate,
             diagnostics,
             converged,
-            motion_invalid,
             visual_rejected,
         }
     }
@@ -405,6 +390,12 @@ impl Estimator {
             .map(|key| Ok((*key, self.graph.get(*key)?.clone())))
             .collect::<Result<Vec<_>>>()?;
         let blocks = self.estimate_covariance_blocks(controls)?;
+        if let Err(error) = self.apply_recovery_seed() {
+            for (key, value) in controls_before {
+                self.graph.set(key, value)?;
+            }
+            return Err(error);
+        }
         // LM's final gradient check already built the undamped model. Extract the
         // joint marginal from that model instead of visiting every factor again.
         let result = self
@@ -467,6 +458,7 @@ impl Estimator {
             };
             if let Some(heading) = heading
                 && self.alignment.is_some()
+                && !self.pending_visuals.is_empty()
             {
                 self.validate_heading(heading)?;
             }
@@ -490,11 +482,18 @@ impl Estimator {
                     })
                 }
             };
-            self.estimate_from_covariance(controls, tau, &covariance, diagnostics)
+            let mut estimate =
+                self.estimate_from_covariance(controls, tau, &covariance, diagnostics)?;
+            if heading.is_some_and(|heading| self.validate_heading(heading).is_err()) {
+                // Field inconsistency cannot erase motion evidence or stop local odometry.
+                estimate.robot_to_field = None;
+            }
+            Ok(estimate)
         })();
         let estimate = match checked {
             Ok(result) => result,
             Err(error) => {
+                tracing::debug!(time = ?self.latest_time, %error, visual_frames = self.pending_visuals.len(), final_cost = ?diagnostics.final_cost, "rolling back inconsistent trajectory update");
                 for (key, value) in controls_before {
                     self.graph.set(key, value)?;
                 }
@@ -1589,11 +1588,6 @@ mod tests {
             .unwrap()
             .unwrap();
         candidate.solve().estimate.unwrap();
-        let saved_biases = candidate
-            .biases
-            .values()
-            .map(|key| (*key, candidate.graph.get(*key).unwrap().clone()))
-            .collect::<Vec<_>>();
         let wrong_heading = HeadingReference::new(
             candidate.latest_time,
             linear_algebra::Orientation2::new(-2.0),
@@ -1614,28 +1608,19 @@ mod tests {
                 )
                 .unwrap();
             let rejected = candidate.solve_with_heading(Some(&wrong_heading));
-            assert!(rejected.estimate.is_none());
-            assert!(rejected.motion_invalid);
+            assert!(rejected.estimate.unwrap().robot_to_field.is_none());
+            assert!(
+                candidate.alignment.is_some(),
+                "field history must survive rejection"
+            );
             assert_eq!(rejected.visual_rejected, index == 1);
-            if index == 1 {
-                for (key, bias) in &saved_biases {
-                    let restored = candidate.graph.get(*key).unwrap();
-                    assert_eq!(restored.accelerometer, bias.accelerometer);
-                    assert_eq!(restored.gyroscope, bias.gyroscope);
-                }
-            }
             assert!(
                 candidate.controls.len() < 20,
                 "rejection must still retire the restored graph"
             );
         }
-        assert!(candidate.motion_checkpoint.as_ref().unwrap().time < candidate.history_start);
-        let mut motion = candidate.motion_candidate().unwrap().unwrap();
-        assert!(motion.controls.len() < 20);
-        let recovered = motion.solve();
-        let estimate = recovered
-            .estimate
-            .expect("expired checkpoint remains usable");
+        let recovered = candidate.solve_with_heading(Some(&wrong_heading));
+        let estimate = recovered.estimate.expect("retained motion remains usable");
         assert!(estimate.robot_to_field.is_none());
         assert!((estimate.robot_to_local.pose.inner.translation.z - 0.55).abs() < 0.01);
     }

@@ -13,13 +13,6 @@ use crate::{
     heading::HeadingReference,
 };
 
-/// Owned state survives rejected solves and spline marginalization.
-pub(super) struct MotionCheckpoint {
-    pub time: Time,
-    pub state: TrajectoryState,
-    pub attitude: linear_algebra::Orientation3<coordinate_systems::ImuReference, f64>,
-}
-
 /// Accepted, normalized observations. Replay bypasses stream admission, not factor construction.
 #[derive(Clone)]
 pub(super) enum MotionRecord {
@@ -97,6 +90,76 @@ impl MotionRecord {
 }
 
 impl Estimator {
+    /// Resolve the global match's half-turn convention, then update the retained graph.
+    /// Its marginalized history, alignment and motion factors must explain recovery.
+    pub(crate) fn ingest_recovery(
+        &mut self,
+        mut frame: TimeWrapper<VisualLocalizationFrame>,
+        heading: &HeadingReference,
+    ) -> Result<bool> {
+        let Some(attitude) = self.attitude_at(frame.time) else {
+            return Ok(false);
+        };
+        let (roll, pitch, _) = attitude.euler_angles();
+        let Some((pose, alignment)) = seed_recovery_alignment(
+            &mut frame.inner,
+            linear_algebra::Rotation3::from_euler_angles(roll as f32, pitch as f32, 0.0),
+            types::localization::HeadingConstraint {
+                expected: heading.expected(attitude),
+                max_error: self.parameters.max_heading_error,
+            },
+            &self.parameters.visual,
+        ) else {
+            return Ok(false);
+        };
+        let time = frame.time;
+        let inserted = self.ingest_visual(frame)?;
+        if inserted {
+            self.recovery_seed = Some((time, (alignment.to_3d() * pose).inner.cast()));
+        }
+        Ok(inserted)
+    }
+
+    pub(super) fn apply_recovery_seed(&mut self) -> Result<()> {
+        let Some((time, field_pose)) = self.recovery_seed.take() else {
+            return Ok(());
+        };
+        let Some(alignment) = self.alignment else {
+            return Ok(());
+        };
+        let (segment, tau) = self.segment_and_tau(time)?;
+        let old = self
+            .spline(control_keys(&self.controls, segment)?)?
+            .pose(tau)?
+            .inner;
+        let local_pose = self
+            .graph
+            .get(alignment)?
+            .local_to_field
+            .to_3d()
+            .inner
+            .inverse()
+            * field_pose;
+        let correction = local_pose * old.inverse();
+        let first = *self.controls.first_key_value().unwrap().0;
+        // This only seeds optimization; every prior and motion factor remains in force.
+        for (&index, &key) in &self.controls {
+            let weight = ((index - first) as f64 / (segment + 1 - first) as f64).clamp(0.0, 1.0);
+            let mut control = self.graph.get(key)?.clone();
+            let target = correction * control.pose.inner;
+            control.pose.inner.translation.vector = control
+                .pose
+                .inner
+                .translation
+                .vector
+                .lerp(&target.translation.vector, weight);
+            control.pose.inner.rotation =
+                control.pose.inner.rotation.slerp(&target.rotation, weight);
+            self.graph.set(key, control)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn accept_motion(&mut self, record: MotionRecord) -> Result<bool> {
         record.clone().insert(self)?;
         self.commit_time(record.end());
@@ -189,40 +252,6 @@ impl Estimator {
             return Ok(None);
         }
         Ok(Some(candidate))
-    }
-
-    /// Recover local motion without conditioning it on a rejected field solution.
-    /// Keep the Local XY/yaw convention; only global bootstrap changes generation.
-    pub(crate) fn motion_candidate(&self) -> Result<Option<Self>> {
-        let Some(checkpoint) = &self.motion_checkpoint else {
-            return Ok(None);
-        };
-        let Some(frame) = &self.latest_visual_frame else {
-            return Ok(None);
-        };
-        let time = checkpoint.time.max(self.history_start);
-        let elapsed = (time.as_nanos() - checkpoint.time.as_nanos()) as f64 * 1e-9;
-        let mut anchor = checkpoint.state.clone();
-        // ponytail: coast across discarded history; replay retained observations
-        // with growing uncertainty rather than inventing contact or a fixed height.
-        anchor.pose.inner.translation.vector += anchor.velocity.inner * elapsed;
-        let attitude = self.attitude_at(time).unwrap_or(checkpoint.attitude);
-        let yaw_offset = checkpoint.state.pose.inner.rotation.euler_angles().2
-            - checkpoint.attitude.euler_angles().2;
-        let (roll, pitch, yaw) = attitude.euler_angles();
-        anchor.pose.inner.rotation =
-            UnitQuaternion::from_euler_angles(roll, pitch, yaw + yaw_offset);
-        let height_sigma = (self.parameters.initial_height_sigma.powi(2)
-            + self.parameters.initial_velocity_sigma.powi(2) * elapsed.powi(2)
-            + self.parameters.accelerometer_process_noise_variance * elapsed.powi(3) / 3.0)
-            .sqrt();
-        self.rebuild_motion(
-            time,
-            anchor,
-            &frame.inner.camera_intrinsic,
-            Some(height_sigma),
-        )
-        .map(Some)
     }
 
     fn rebuild_motion(

@@ -124,6 +124,54 @@ fn stationary_three() -> [(VisualFeatureClass, Point2<Field>); 3] {
     ]
 }
 
+#[test]
+fn lost_tracking_reuses_the_motion_posterior_without_global_reinitialization() {
+    use types::localization::{LocalizationState, LocalizationStatus};
+    let geometry = geometry();
+    let features = project(stationary_three(), &geometry);
+    let parameters = calibrated_parameters();
+    let mut status = LocalizationStatus {
+        time: Time::from_nanos(900_000_000),
+        epoch: 0,
+        generation: 0,
+        state: LocalizationState::LostTrack,
+        heading: None,
+    };
+    let associate = |status: &LocalizationStatus| {
+        crate::associate_visual_features(
+            crate::AssociationInput {
+                status,
+                attitude: None,
+                tracking: Some(&geometry),
+                visual_features: &features,
+                robot_to_camera: robot_to_camera(),
+                camera_intrinsic: intrinsic(),
+                field_dimensions: &FieldDimensions::SPL_2025,
+                time: Time::from_nanos(1_000_000_000),
+            },
+            &parameters,
+        )
+    };
+    let result = associate(&status);
+    assert_eq!(
+        result.source,
+        types::visual_localization::VisualAssociationSource::Tracking
+    );
+    assert_eq!(result.associations.len(), 3);
+    for count in 1..=2 {
+        let sparse = project(stationary_three().into_iter().take(count), &geometry);
+        let result = associate_tracking_visual_features(input(&sparse, &geometry), &parameters);
+        assert_eq!(result.associations.len(), count);
+    }
+    status.generation += 1;
+    assert!(associate(&status).associations.is_empty());
+    status.generation = 0;
+    status.time = Time::from_nanos(1_000_000_000);
+    assert!(associate(&status).associations.is_empty());
+    status.state = LocalizationState::Startup;
+    assert!(associate(&status).associations.is_empty());
+}
+
 fn key(result: &AssociationResult) -> Vec<([f32; 2], [f32; 2])> {
     result
         .associations
@@ -249,6 +297,13 @@ fn lifecycle_dispatch_uses_exposure_attitude_and_matches_generations() {
     );
     status.state = LocalizationState::Tracking;
     status.generation = 1;
+    let fallback = call(&status, Some(&wrong));
+    assert_eq!(
+        fallback.source,
+        types::visual_localization::VisualAssociationSource::Global
+    );
+    assert_eq!(fallback.associations.len(), 3);
+    status.heading = None;
     assert!(call(&status, Some(&wrong)).associations.is_empty());
 }
 

@@ -12,7 +12,7 @@ pub enum VisualAssociationSource {
     Global,
 }
 
-/// Tracking-only association input assembled from a coherent estimate and status.
+/// Pose prediction assembled from a coherent tracking or coasting estimate and status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssociationGeometry {
     pub epoch: u64,
@@ -29,7 +29,7 @@ impl AssociationGeometry {
         status: &crate::localization::LocalizationStatus,
     ) -> Option<Self> {
         use crate::localization::LocalizationState;
-        if status.state != LocalizationState::Tracking
+        if status.state == LocalizationState::Startup
             || estimate.epoch != status.epoch
             || estimate.generation != status.generation
         {
@@ -101,7 +101,7 @@ mod tests {
             state: LocalizationState::LostTrack,
             heading: None,
         };
-        assert!(AssociationGeometry::from_estimate(&estimate, &status).is_none());
+        assert!(AssociationGeometry::from_estimate(&estimate, &status).is_some());
         status.state = LocalizationState::Startup;
         assert!(AssociationGeometry::from_estimate(&estimate, &status).is_none());
         status.state = LocalizationState::Tracking;

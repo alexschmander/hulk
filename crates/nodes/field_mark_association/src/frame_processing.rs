@@ -17,7 +17,7 @@ use ros_z::{
 use types::{
     camera_geometry::{CameraGeometry, camera_geometry_at},
     field_dimensions::FieldDimensions,
-    localization::{LocalizationEstimate, LocalizationState, LocalizationStatus},
+    localization::{LocalizationEstimate, LocalizationStatus},
     object_detection::{Object, RobocupObjectLabel},
     time_wrapper::TimeWrapper,
     visual_localization::{
@@ -171,14 +171,8 @@ fn prepare_detection_frame(
     )?;
     let field_dimensions = ctx.field_dimensions_cache.get_latest()?;
     let status = ctx.status.get_latest()?;
-    let (attitude, tracking) = if status.state == LocalizationState::Tracking {
-        (
-            None,
-            tracking_geometry(image_time, ctx, &status, parameters.max_pose_hint_age),
-        )
-    } else {
-        (ctx.attitude_at(image_time, parameters.max_imu_gap), None)
-    };
+    let tracking = tracking_geometry(image_time, ctx, &status, parameters.max_pose_hint_age);
+    let attitude = ctx.attitude_at(image_time, parameters.max_imu_gap);
     if attitude.is_none() && tracking.is_none() {
         return None;
     }
@@ -343,7 +337,7 @@ fn same_lifecycle(geometry: &AssociationGeometry, latest: &AssociationGeometry) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::localization::PoseEstimate;
+    use types::localization::{LocalizationState, PoseEstimate};
 
     #[test]
     fn snapshot_selection_uses_preceding_pose_from_the_same_generation() {
@@ -532,7 +526,10 @@ mod tests {
             status.state = state;
             let unavailable = AssociationGeometry::from_estimate(&estimate, &status)
                 .map(|inner| TimeWrapper { time, inner });
-            assert!(!valid(unavailable.as_ref(), time));
+            assert_eq!(
+                valid(unavailable.as_ref(), time),
+                state == LocalizationState::LostTrack
+            );
         }
         let expired = age + Duration::from_nanos(1);
         assert!(valid(Some(&latest), time + age));

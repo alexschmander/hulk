@@ -69,33 +69,37 @@ pub fn associate_visual_features(
     if parameters.validate().is_err() {
         return AssociationResult::default();
     }
-    if input.status.state == LocalizationState::Tracking {
-        let Some(geometry) = input.tracking.filter(|geometry| {
+    if input.status.state == LocalizationState::LostTrack && input.time <= input.status.time {
+        return AssociationResult::default();
+    }
+    if input.status.state != LocalizationState::Startup {
+        let geometry = input.tracking.filter(|geometry| {
             geometry.epoch == input.status.epoch && geometry.generation == input.status.generation
-        }) else {
-            return AssociationResult::default();
-        };
-        return tracking::associate(
-            TrackingAssociationInput {
-                geometry,
-                visual_features: input.visual_features,
-                robot_to_camera: input.robot_to_camera,
-                camera_intrinsic: input.camera_intrinsic,
-                field_dimensions: input.field_dimensions,
-                time: input.time,
-            },
-            parameters,
-        )
-        .unwrap_or_default();
+        });
+        // Retain the motion posterior through a visual dropout. Its covariance
+        // supplies the expanding search region; global recovery is the fallback.
+        let local = geometry.and_then(|geometry| {
+            tracking::associate(
+                TrackingAssociationInput {
+                    geometry,
+                    visual_features: input.visual_features,
+                    robot_to_camera: input.robot_to_camera,
+                    camera_intrinsic: input.camera_intrinsic,
+                    field_dimensions: input.field_dimensions,
+                    time: input.time,
+                },
+                parameters,
+            )
+        });
+        if let Some(local) = local {
+            return local;
+        }
     }
     let Some(attitude) = input.attitude else {
         return AssociationResult::default();
     };
     let (roll, pitch, yaw) = attitude.euler_angles();
-    let heading = if input.status.state == LocalizationState::LostTrack {
-        if input.time <= input.status.time {
-            return AssociationResult::default();
-        }
+    let heading = if input.status.state != LocalizationState::Startup {
         let Some(heading) = input
             .status
             .heading

@@ -45,7 +45,7 @@ pub(crate) fn associate(
         .into_iter()
         .map(|(_, class, feature)| (class, feature))
         .collect::<Vec<_>>();
-    if detections.len() < config.min_inliers {
+    if detections.is_empty() {
         return None;
     }
     let estimate = input.geometry.estimate;
@@ -163,6 +163,8 @@ fn match_predictions(
         parameters.global_localizer.mahalanobis_gate,
     )?;
     let pairs = match detections.len() {
+        1 => joint_assignment::<2>(detections, predictions, &log_likelihoods, noise, parameters),
+        2 => joint_assignment::<4>(detections, predictions, &log_likelihoods, noise, parameters),
         3 => joint_assignment::<6>(detections, predictions, &log_likelihoods, noise, parameters),
         4 => joint_assignment::<8>(detections, predictions, &log_likelihoods, noise, parameters),
         5 => joint_assignment::<10>(detections, predictions, &log_likelihoods, noise, parameters),
@@ -401,7 +403,7 @@ fn certify(
 ) -> Option<AssociationResult> {
     let config = parameters.global_localizer;
     let tracking = parameters.tracking;
-    if pairs.len() < config.min_inliers
+    if pairs.len() < config.min_inliers.min(detections.len())
         || pairs.iter().any(|&(row, column)| {
             predictions[column].is_none_or(|prediction| {
                 (prediction.pixel - detections[row].1.pixel)

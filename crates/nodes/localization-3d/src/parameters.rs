@@ -114,7 +114,7 @@ impl Default for SolverParameters {
     fn default() -> Self {
         Self {
             max_trials: 8,
-            max_iterations: 10,
+            max_iterations: 20,
             gradient_tolerance: 1e-3,
             step_tolerance: 1e-5,
             cost_tolerance: 1e-8,
@@ -560,7 +560,14 @@ mod tests {
             .unwrap()
             .remove("reference_duration");
         let legacy: Localization3dParameters = serde_json::from_value(legacy).unwrap();
-        assert_eq!(legacy, configured);
+        let mut expected_legacy = configured.clone();
+        expected_legacy.timing = TimingParameters::default();
+        assert_eq!(legacy, expected_legacy);
+        assert_eq!(legacy.timing.trajectory_spacing, Duration::from_millis(200));
+        assert_eq!(
+            configured.timing.trajectory_spacing,
+            Duration::from_millis(100)
+        );
         for (trajectory, bias, interval, window) in [
             (0, 5000, 100, 2000),
             (200, 5100, 100, 2000),

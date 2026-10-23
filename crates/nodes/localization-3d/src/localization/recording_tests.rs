@@ -259,7 +259,9 @@ fn verify_recording(recording: Recording) {
                 pose,
             )
             .unwrap();
-            localization.status.state = LocalizationState::LostTrack;
+            // This two-sample fixture has no prior field trajectory to recover.
+            // Initialize with its recorded heading; continuity is tested with full motion history.
+            localization.status.state = LocalizationState::Startup;
             localization.status.time = Time::from_nanos(recording.reference.time);
             localization.heading_reference = Some(reference);
             for sample in &recorded.imu {

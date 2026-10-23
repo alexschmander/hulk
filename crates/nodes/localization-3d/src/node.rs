@@ -268,10 +268,11 @@ mod tests {
                 .is_some()
         );
         let status = active.status();
+        let incompatible_spacing = original.typed().timing.trajectory_spacing * 2;
         for (path, value) in [
             (
                 "timing.trajectory_spacing",
-                serde_json::json!({"secs":0,"nanos":100000000}),
+                serde_json::to_value(incompatible_spacing)?,
             ),
             ("model.foot_sigma", serde_json::json!(0.02)),
             ("inputs.imu_queue", serde_json::json!(1000)),
@@ -287,7 +288,7 @@ mod tests {
             assert!(!updates.has_changed()?);
         }
         let mut incompatible = original.typed().clone();
-        incompatible.timing.trajectory_spacing = Duration::from_millis(100);
+        incompatible.timing.trajectory_spacing = incompatible_spacing;
         assert!(active.set_parameters(&incompatible).is_err());
         assert_eq!(active.status(), status);
         parameters.set_json(
