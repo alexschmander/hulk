@@ -3,6 +3,7 @@ use crate::{
     panel::{Panel, PanelCreationContext, PanelUiContext},
     repaint::{ObservationContext, ObservationRepaint, RepaintOnUpdates},
 };
+use chrono::{DateTime, Utc};
 use color_eyre::{Report, eyre::bail};
 use coordinate_systems::Pixel;
 use eframe::egui::{ColorImage, Context, TextureHandle, TextureOptions, Ui};
@@ -10,7 +11,7 @@ use hulk_widgets::CompletionEdit;
 use image::RgbImage;
 use image_overlay::ImageOverlays;
 use linear_algebra::{point, vector};
-use ros_z::{Message, message::WireDecoder};
+use ros_z::{Message, message::WireDecoder, time::Time};
 use ros_z_debug::{
     TargetIdentity, TopicReference,
     query::{
@@ -205,30 +206,46 @@ impl Panel for ImagePanel {
     }
 
     fn header_ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
-        self.overlays.ui(ui);
-        ui.label("Topic");
-        let namespace = context.backend.namespace();
-        let completions = {
-            let topics = context.backend.topics().snapshot();
-            TopicCompletionQuery::new(&namespace, &self.topic_editor)
-                .type_name(RosImage::type_name())
-                .complete_topics(&topics.topics)
-        };
-        let response = ui.add(
-            CompletionEdit::new(
-                ui.id().with("image_topic"),
-                &completions,
-                &mut self.topic_editor,
-            )
-            .request_focus(std::mem::take(&mut self.focus_topic_requested)),
-        );
-        if response.changed() {
-            self.topic = self.topic_editor.trim().to_string();
-        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Topic");
+            let namespace = context.backend.namespace();
+            let completions = {
+                let topics = context.backend.topics().snapshot();
+                TopicCompletionQuery::new(&namespace, &self.topic_editor)
+                    .type_name(RosImage::type_name())
+                    .complete_topics(&topics.topics)
+            };
+            let response = ui.add(
+                CompletionEdit::new(
+                    ui.id().with("image_topic"),
+                    &completions,
+                    &mut self.topic_editor,
+                )
+                .request_focus(std::mem::take(&mut self.focus_topic_requested)),
+            );
+            if response.changed() {
+                self.topic = self.topic_editor.trim().to_string();
+            }
+            self.overlays.ui(ui);
+            self.refresh(&context);
+            if let Ok(Some(observed)) = &self.observation
+                && let Some(timestamp) = &observed.render_cache.timestamp
+            {
+                ui.label(timestamp)
+                    .on_hover_text("Timestamp from the displayed image's header");
+            }
+            ui.label(RosImage::type_name())
+                .on_hover_text("Subscribed image type");
+            if let Ok(Some(observed)) = &self.observation
+                && let State::Failed(error) = observed.observation.snapshot().state
+            {
+                ui.colored_label(ui.visuals().warn_fg_color, "Subscription error")
+                    .on_hover_text(error);
+            }
+        });
     }
 
-    fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
-        self.refresh(&context);
+    fn ui(&mut self, ui: &mut Ui, _context: PanelUiContext<'_>) {
         if self.topic.is_empty() {
             ui.label("Enter an image topic.");
             return;
@@ -248,7 +265,7 @@ impl Panel for ImagePanel {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
         let Some(texture) = &observed.render_cache.texture else {
-            ui.label("no data yet");
+            ui.label("Waiting for first sample.");
             return;
         };
         let [width, height] = texture.size();
@@ -267,7 +284,12 @@ impl Panel for ImagePanel {
             },
         );
         if let Some(sample) = &observed.render_cache.sample {
-            self.overlays.paint(&painter, sample.time);
+            let image_rect = eframe::egui::Rect::from_min_max(
+                painter.transform_world_to_pixel(point![0.0, 0.0]),
+                painter.transform_world_to_pixel(point![width as f32, height as f32]),
+            );
+            self.overlays
+                .paint(&painter.with_clip_rect(image_rect), sample.time);
         }
         if let Some(position) = response.hover_pos() {
             let pixel = painter.transform_pixel_to_world(position);
@@ -309,6 +331,7 @@ fn decode_color_image(sample: &Sample) -> Result<ColorImage, Report> {
 struct RenderedImageCache {
     sample: Option<SampleIdentity<'static>>,
     failed: Option<SampleIdentity<'static>>,
+    timestamp: Option<String>,
     texture: Option<TextureHandle>,
     error: Option<String>,
     texture_name: String,
@@ -318,6 +341,7 @@ impl RenderedImageCache {
     fn clear(&mut self) {
         self.sample = None;
         self.failed = None;
+        self.timestamp = None;
         self.texture = None;
         self.error = None;
     }
@@ -326,6 +350,7 @@ impl RenderedImageCache {
         Self {
             sample: None,
             failed: None,
+            timestamp: None,
             texture: None,
             error: None,
             texture_name: format!("twix-image-{}", Uuid::new_v4().simple()),
@@ -343,6 +368,7 @@ impl RenderedImageCache {
         }
         match decode_color_image(sample) {
             Ok(image) => {
+                self.timestamp = Some(format_image_time(sample.record.time));
                 self.sample = Some(identity.into_owned());
                 self.failed = None;
                 self.error = None;
@@ -356,6 +382,20 @@ impl RenderedImageCache {
                 false
             }
         }
+    }
+}
+
+fn format_image_time(time: Time) -> String {
+    let nanos = time.as_nanos();
+    // ROS image stamps can use a simulation timeline. Do not turn small values
+    // into misleading dates in 1970. Calendar timestamps use an explicit timezone.
+    const UNIX_2000_NANOS: i64 = 946_684_800_000_000_000;
+    if nanos >= UNIX_2000_NANOS {
+        DateTime::<Utc>::from_timestamp_nanos(nanos)
+            .format("%Y-%m-%d %H:%M:%S%.3f UTC")
+            .to_string()
+    } else {
+        format!("{}.{:09} s", nanos / 1_000_000_000, nanos % 1_000_000_000)
     }
 }
 

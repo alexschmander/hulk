@@ -69,11 +69,11 @@ Choose a panel from the **+** picker.
 | Panel | Purpose |
 | --- | --- |
 | Text | Display a topic's latest payload or a selected field as JSON. |
-| Image | Display the latest raw camera frame from a `TimeWrapper<ros2::sensor_msgs::image::Image>` topic, defaulting to `inputs/left_image`. |
+| Image | Display the latest raw camera frame from a `ros2::sensor_msgs::image::Image` topic, defaulting to `inputs/left_image`. |
 | Map | Display field or ground views with selectable layers for robot pose, balls, obstacles, and paths. |
 | Parameter | Discover nodes with remote parameter services, display snapshots or selected paths as JSON, and write selected paths to active layers with revision checks. |
 | Audio | Display microphone spectra and a waterfall for the selected channel, defaulting to `audio_spectrums`. |
-| [Plot](#plot-panel) | Compare numeric topics or fields over time. |
+| [Plot](#plot-panel) | Compare numeric topics or fields over time, with enum and boolean states in the background and parameters as threshold lines. |
 | [Timeline](#mcap-timeline) | Seek and play back an MCAP recording. |
 
 ## Topic and field selection
@@ -120,10 +120,33 @@ For topic names containing dots, the longest matching discovered topic takes pre
 Enter a numeric topic or field in the **Topic** input, for example `detected_objects.inner[2].bounding_box.confidence`.
 Use **Add item** to compare several sources on the same axes, and hover over a line to see its values.
 Each item's style button switches between a line and individual samples, and its info button shows the item's status and any selection problem.
+An icon at the start of each row shows the item type: a line chart for numeric topic lines, a timeline for topic states, and a threshold icon for parameter thresholds.
 Gaps in a line mean the value was unavailable, for example an absent optional or a missing array element.
+
+Select an enum or boolean field, for example `primary_state`, to show its states as labeled, colored intervals behind the numeric lines.
+This helps correlate state changes, such as transitions between motion states, with numeric data.
+Each state item gets its own horizontal lane, so several enums can be compared at once; hiding an item through its checkbox gives its lane to the others.
+Faint interval colors identify the variants and stay the same for a given enum, keeping the lines in the foreground.
+Because variants have their own colors, the color picker is disabled for state items; the chosen color is kept for switching back to a numeric field.
+Labels that do not fit an interval are shortened; hover over an interval away from the lines to see the item, state, and its time range.
+States narrower than a pixel merge into one neutral band, so fast-changing values stay cheap to draw; zoom in while paused to tell them apart.
+A state lasts until a sample with another variant arrives, and the current state extends to the newest displayed time.
+Unavailable values, such as absent optionals or inactive parent variants, end the current state and count as gaps.
+States follow the same time axis, history window, and pause/zoom behavior as the lines, and do not affect the Y axis range.
+
+Use **Add threshold** to draw a parameter as a dashed horizontal line, for example while tuning a threshold that guards an output.
+Enter the parameter **Node**, relative to the robot namespace or absolute, and a dot-separated **Path**, for example node `obstacle_filter` and path `robot_confidence_threshold`.
+Like topics, both inputs apply when you press Enter or choose a completion.
+Nodes complete from discovered parameter services, and paths complete from the node's parameter snapshot.
+A number draws one line, and an array of numbers, such as `[0.05, 0.1]`, draws one line per element.
+Thresholds follow the node's parameter events, so a line moves when the parameter changes, including writes from the Parameter panel.
+Thresholds have the same color, visibility, info, and remove controls as topic items.
+They are drawn without topic data and are included in the Y axis range.
+If the node is unavailable, the info button shows the error, the last known value stays visible, and Twix keeps retrying.
 
 The X axis shows the seconds before the newest sample, and **History** sets the time window.
 **Pause**, or **Space** after clicking the plot, freezes it so you can zoom and pan with the mouse or touchpad.
+Pausing also freezes threshold values until the plot resumes.
 **Reset view** or a double-click restores the full time window.
 
 ## MCAP Timeline
@@ -169,6 +192,8 @@ Image-topic, namespace, backend, or overlay-selection changes rebuild the plan o
 The Horizon overlay interpolates compatible camera matrices over brackets spanning at most 100 ms.
 
 Live ingestion is independent of the UI frame rate. Shared histories are bounded by sample count and bytes; observations report when retention limits their coverage. Replay uses server-side indexes instead of accumulating panel histories. Image and overlay timestamp projections are developer-owned query declarations; legacy saved projection overrides are ignored. The Text panel always uses source time, as do other observations unless explicitly configured by code.
+
+The Image panel's Overlays menu offers confidence controls for object and pose detections. Bounding boxes default to `0.5` confidence and pose keypoints to `0.8`. Values range from `0` to `1` and reset to their defaults when the overlay is recreated, including after toggling it off and on or reopening Twix. These controls only filter the visualization; they do not change the detector or its published results.
 
 ### Adding an image overlay
 

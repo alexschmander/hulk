@@ -1,6 +1,7 @@
 mod horizon;
 mod object_detection;
 mod pose_detection;
+mod prediction_colors;
 
 pub(super) use horizon::HorizonOverlay;
 pub(super) use object_detection::ObjectDetectionOverlay;
