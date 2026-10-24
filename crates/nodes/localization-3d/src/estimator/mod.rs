@@ -113,6 +113,16 @@ pub(crate) struct Estimator {
 }
 
 impl Estimator {
+    fn trace_factor_costs(&self, stage: &str, total: Option<f64>) {
+        if self.pending_visuals.is_empty() || !tracing::enabled!(tracing::Level::TRACE) {
+            return;
+        }
+        tracing::trace!(time = ?self.latest_time, stage, ?total,
+            imu_costs = ?self.imu_factor_costs(),
+            pending_visual_cost = ?self.pending_visual_cost(),
+            "localization factor costs");
+    }
+
     pub(crate) fn new(
         origin: Time,
         epoch: u64,
@@ -390,12 +400,14 @@ impl Estimator {
             .map(|key| Ok((*key, self.graph.get(*key)?.clone())))
             .collect::<Result<Vec<_>>>()?;
         let blocks = self.estimate_covariance_blocks(controls)?;
+        self.trace_factor_costs("before_seed", None);
         if let Err(error) = self.apply_recovery_seed() {
             for (key, value) in controls_before {
                 self.graph.set(key, value)?;
             }
             return Err(error);
         }
+        self.trace_factor_costs("seed", None);
         // LM's final gradient check already built the undamped model. Extract the
         // joint marginal from that model instead of visiting every factor again.
         let result = self
@@ -423,6 +435,7 @@ impl Estimator {
         let converged = result.is_ok();
         diagnostics.iterations = statistics.cost.map(|_| statistics.accepted_steps);
         diagnostics.final_cost = statistics.cost;
+        self.trace_factor_costs("trial", statistics.cost);
         // This fagra version returns the initial cost only in a successful report.
         // On failure after accepted steps it is unknown, not a reason to rebuild H.
         diagnostics.initial_cost = result
@@ -444,6 +457,7 @@ impl Estimator {
             }
             Err(_) => "failed".into(),
         };
+        self.trace_visual_audit("trial");
         let checked = (|| -> Result<_> {
             let covariance = match result {
                 Ok((_, covariance)) => Some(covariance),

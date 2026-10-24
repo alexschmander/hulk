@@ -24,6 +24,46 @@ pub(super) struct PendingVisual {
 }
 
 impl Estimator {
+    pub(super) fn pending_visual_cost(&self) -> Result<f64> {
+        let mut cost = 0.0;
+        for pending in &self.pending_visuals {
+            for &key in &pending.factors {
+                cost += self.graph.factor_cost(key)?;
+            }
+        }
+        Ok(cost)
+    }
+
+    pub(super) fn trace_visual_audit(&self, stage: &str) {
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        for pending in &self.pending_visuals {
+            let time = pending.frame.time;
+            let pose = (|| {
+                let (segment, tau) = self.segment_and_tau(time).ok()?;
+                Some(
+                    self.graph
+                        .get(self.alignment?)
+                        .ok()?
+                        .local_to_field
+                        .to_3d()
+                        .inner
+                        * self
+                            .spline(control_keys(&self.controls, segment).ok()?)
+                            .ok()?
+                            .pose(tau)
+                            .ok()?
+                            .inner,
+                )
+            })();
+            tracing::debug!(?time, stage, source = ?pending.frame.inner.source,
+                features = pending.frame.inner.associations.len(),
+                rms_px = ?self.frame_rms(&pending.frame), ?pose,
+                "visual correction audit");
+        }
+    }
+
     pub(crate) fn field_heading_at(&self, time: Time) -> Option<Orientation2<Field, f64>> {
         let (segment, tau) = self.segment_and_tau(time).ok()?;
         let pose = self
@@ -120,6 +160,7 @@ impl Estimator {
     }
 
     pub(super) fn accept_visuals(&mut self) {
+        self.trace_visual_audit("accepted");
         for pending in self.pending_visuals.drain(..) {
             self.reprojection_batches
                 .push((pending.segment, pending.batch));
@@ -165,6 +206,13 @@ impl Estimator {
         let controls = self.ensure_segment(segment)?;
         let pose = self.spline(controls)?.pose(tau)?;
         let alignment = self.graph.get(alignment_key)?;
+        tracing::debug!(
+            ?time,
+            source = ?frame.source,
+            predicted_field_pose = ?(alignment.local_to_field.to_3d().inner * pose.inner),
+            associations = ?frame.associations,
+            "admitting visual observations"
+        );
         let field_to_camera = frame.robot_to_camera.inner.cast::<f64>()
             * pose.inner.inverse()
             * alignment.local_to_field.to_3d().inner.inverse();
@@ -209,6 +257,7 @@ impl Estimator {
             factors,
             frame: TimeWrapper { time, inner: frame },
         });
+        self.trace_visual_audit("before");
         self.commit_time(time);
         Ok(true)
     }

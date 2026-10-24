@@ -105,6 +105,23 @@ impl ImuIntervals {
 }
 
 impl Estimator {
+    pub(super) fn imu_factor_costs(&self) -> Result<(f64, f64)> {
+        let mut integrated = 0.0;
+        let mut boundary = 0.0;
+        for interval in self.preintegration.intervals.values() {
+            for &key in &interval.factors {
+                integrated += self.graph.factor_cost(key)?;
+            }
+            for &key in &interval.boundaries {
+                boundary += self.graph.factor_cost(key)?;
+            }
+        }
+        if let Some((_, key)) = self.preintegration.terminal {
+            boundary += self.graph.factor_cost(key)?;
+        }
+        Ok((integrated, boundary))
+    }
+
     pub(super) fn prepare_preintegration(&mut self) -> Result<()> {
         let p = &self.parameters.imu_preintegration;
         for (&index, interval) in &mut self.preintegration.intervals {
@@ -445,6 +462,27 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn cost_diagnostic_observes_control_changes_without_mutating_the_graph() {
+        let mut estimator = super::super::tests::estimator();
+        estimator.parameters.accelerometer = Some(Default::default());
+        for millis in (0..=200).step_by(10) {
+            ingest(&mut estimator, millis, 9.81);
+        }
+        estimator.prepare_preintegration().unwrap();
+        let before = estimator.imu_factor_costs().unwrap();
+        assert_eq!(before, estimator.imu_factor_costs().unwrap());
+        let key = *estimator.controls.get(&1).unwrap();
+        let original = estimator.graph.get(key).unwrap().clone();
+        let mut changed = original.clone();
+        changed.pose.inner.translation.x += 1.0;
+        estimator.graph.set(key, changed).unwrap();
+        let after = estimator.imu_factor_costs().unwrap();
+        assert!(after.0 > before.0);
+        estimator.graph.set(key, original).unwrap();
+        assert_eq!(before, estimator.imu_factor_costs().unwrap());
     }
 
     #[test]
