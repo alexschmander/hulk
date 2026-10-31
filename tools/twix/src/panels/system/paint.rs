@@ -190,7 +190,12 @@ pub(super) fn system(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrasta
     // Both charts share the height the text rows leave, so a tall pane fills without scrolling.
     let text_rows = meters.len() + stats.power.len() + 6;
     let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-    let chart_height = ((ui.available_height() - text_rows as f32 * row) / 2.0).max(100.0);
+    let charts = if stats.temperatures.is_empty() {
+        1.0
+    } else {
+        2.0
+    };
+    let chart_height = ((ui.available_height() - text_rows as f32 * row) / charts).max(100.0);
 
     // Values sit beside, not on, the fill; the last column stretches the gauges to the edge.
     let right = ui.max_rect().right();
@@ -291,6 +296,16 @@ pub(super) trait Device {
     fn details(&self, warn: Color32) -> Vec<RichText>;
 }
 
+fn network_faults(device: &NetworkIo) -> [f64; 4] {
+    let rates = &device.rates;
+    [
+        rates.receive_errors_per_second,
+        rates.transmit_errors_per_second,
+        rates.receive_drops_per_second,
+        rates.transmit_drops_per_second,
+    ]
+}
+
 impl Device for NetworkIo {
     const SERIES: [(&str, Color32); 2] = [("RX", BLUE), ("TX", AMBER)];
 
@@ -302,32 +317,24 @@ impl Device for NetworkIo {
     }
 
     fn active(&self) -> bool {
-        let r = &self.rates;
-        self.rates().iter().sum::<f64>() > 0.0
-            || r.receive_errors_per_second
-                + r.transmit_errors_per_second
-                + r.receive_drops_per_second
-                + r.transmit_drops_per_second
-                > 0.0
+        self.rates()
+            .into_iter()
+            .chain(network_faults(self))
+            .any(|rate| rate > 0.0)
     }
 
     /// Errors and drops, only when there are any.
     fn details(&self, warn: Color32) -> Vec<RichText> {
-        let rates = &self.rates;
+        let faults = network_faults(self);
+        if faults.iter().all(|rate| *rate == 0.0) {
+            return Vec::new();
+        }
         let [
             receive_errors,
             transmit_errors,
             receive_drops,
             transmit_drops,
-        ] = [
-            rates.receive_errors_per_second,
-            rates.transmit_errors_per_second,
-            rates.receive_drops_per_second,
-            rates.transmit_drops_per_second,
-        ];
-        if receive_errors + transmit_errors + receive_drops + transmit_drops <= 0.0 {
-            return Vec::new();
-        }
+        ] = faults;
         [
             format!("Errors/s RX {receive_errors:.1} TX {transmit_errors:.1}"),
             format!("Drops/s RX {receive_drops:.1} TX {transmit_drops:.1}"),
@@ -401,22 +408,24 @@ pub(super) fn devices<T: Device>(
     let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
     let height = ui.available_height() / shown.len().max(1) as f32 - 2.0 * row;
     for (name, device) in shown {
+        let header = |ui: &mut Ui| {
+            let rates = T::SERIES.iter().zip(device.rates());
+            let rates = rates.map(|((label, color), rate)| {
+                RichText::new(format!("{label} {:>12}", byte_rate(rate))).color(*color)
+            });
+            tokens(
+                ui,
+                std::iter::once(format!("{name:<width$}").into()).chain(rates),
+            );
+        };
+        if !active(name) {
+            ui.indent(name, header);
+            continue;
+        }
         let (toggle, ..) =
             CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(name), true)
-                .show_header(ui, |ui| {
-                    let rates = T::SERIES.iter().zip(device.rates());
-                    let rates = rates.map(|((label, color), rate)| {
-                        RichText::new(format!("{label} {:>12}", byte_rate(rate))).color(*color)
-                    });
-                    tokens(
-                        ui,
-                        std::iter::once(format!("{name:<width$}").into()).chain(rates),
-                    );
-                })
+                .show_header(ui, header)
                 .body(|ui| {
-                    if !active(name) {
-                        return;
-                    }
                     let max = records
                         .iter()
                         .filter_map(|record| Some(record.value.get(name)?.rates()))
