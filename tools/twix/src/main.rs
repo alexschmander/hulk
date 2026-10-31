@@ -1,6 +1,6 @@
 use std::{env::current_dir, path::PathBuf, str::FromStr, sync::Arc};
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use color_eyre::{
     Result,
     eyre::{Context as _, ContextCompat as _},
@@ -71,6 +71,10 @@ struct Arguments {
     #[arg(long)]
     zenoh_namespace: Option<String>,
 
+    /// Use the simulator's isolated transport instead of connecting to live robots.
+    #[arg(long, conflicts_with = "zenoh_namespace")]
+    simulator: bool,
+
     /// Alternative repository root for local Twix version checks.
     #[arg(long)]
     repository_root: Option<PathBuf>,
@@ -78,6 +82,21 @@ struct Arguments {
     /// Start with one blank workspace, ignoring the saved session.
     #[arg(long)]
     clear: bool,
+}
+
+impl Arguments {
+    fn transport_scope(&self) -> Result<Option<String>> {
+        if self.simulator {
+            #[cfg(feature = "simulator")]
+            return Ok(Some(simulate::ZENOH_NAMESPACE.to_owned()));
+            #[cfg(not(feature = "simulator"))]
+            color_eyre::eyre::bail!(
+                "This Twix build has no simulator. Install it with \
+                 `pepsi install twix --features simulator`."
+            );
+        }
+        Ok(self.zenoh_namespace.clone())
+    }
 }
 
 struct TwixApp {
@@ -357,9 +376,14 @@ fn setup_logger() -> Result<()> {
 }
 
 fn main() -> eframe::Result<()> {
+    let arguments = Arguments::parse();
+    let transport_scope = arguments.transport_scope().unwrap_or_else(|error| {
+        Arguments::command()
+            .error(clap::error::ErrorKind::InvalidValue, error.to_string())
+            .exit()
+    });
     color_eyre::install().expect("failed to install color-eyre");
     setup_logger().expect("failed to setup logger");
-    let arguments = Arguments::parse();
     let repository = arguments
         .repository_root
         .clone()
@@ -429,7 +453,7 @@ fn main() -> eframe::Result<()> {
                 runtime_handle.clone(),
                 arguments.router.clone(),
                 namespace,
-                arguments.zenoh_namespace.clone(),
+                transport_scope.clone(),
             ))?;
             Ok(Box::new(TwixApp::create(
                 creation_context,
@@ -445,4 +469,63 @@ fn main() -> eframe::Result<()> {
         log::error!("{error}");
     }
     result
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    #[test]
+    fn live_and_custom_transport_selection_are_preserved() {
+        let live = Arguments::try_parse_from(["twix", "/42"]).unwrap();
+        assert_eq!(live.namespace.as_deref(), Some("/42"));
+        assert_eq!(live.transport_scope().unwrap(), None);
+
+        let custom =
+            Arguments::try_parse_from(["twix", "--zenoh-namespace", "custom", "/42"]).unwrap();
+        assert_eq!(custom.transport_scope().unwrap().as_deref(), Some("custom"));
+    }
+
+    #[test]
+    fn simulator_rejects_an_explicit_transport_override() {
+        let error = Arguments::try_parse_from(["twix", "--simulator", "--zenoh-namespace", "live"])
+            .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(feature = "simulator")]
+    #[test]
+    fn simulator_is_a_binary_option_in_any_argument_position() {
+        for args in [
+            vec!["twix", "--simulator", "/hulks/1", "--clear"],
+            vec!["twix", "/hulks/1", "--clear", "--simulator"],
+            vec![
+                "twix",
+                "--router",
+                "tcp/127.0.0.1:7447",
+                "--simulator",
+                "/hulks/1",
+            ],
+        ] {
+            let arguments = Arguments::try_parse_from(args).unwrap();
+            assert_eq!(arguments.namespace.as_deref(), Some("/hulks/1"));
+            assert_eq!(
+                arguments.transport_scope().unwrap().as_deref(),
+                Some(simulate::ZENOH_NAMESPACE)
+            );
+        }
+    }
+
+    #[cfg(not(feature = "simulator"))]
+    #[test]
+    fn simulator_option_explains_how_to_install_support() {
+        let arguments = Arguments::try_parse_from(["twix", "--simulator"]).unwrap();
+        assert!(
+            arguments
+                .transport_scope()
+                .unwrap_err()
+                .to_string()
+                .contains("pepsi install twix --features simulator")
+        );
+    }
 }

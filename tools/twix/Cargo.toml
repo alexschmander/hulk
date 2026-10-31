@@ -53,5 +53,8 @@ zenoh = { workspace = true }
 [features]
 simulator = ["dep:simulate"]
 
+[build-dependencies]
+pkg-config = "0.3"
+
 [dev-dependencies]
 tempfile = { workspace = true }
