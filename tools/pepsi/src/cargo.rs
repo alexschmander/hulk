@@ -160,6 +160,8 @@ pub async fn construct_cargo_command<CargoArguments: Args + CargoCommand>(
     let environment = arguments
         .resolve_environment(manifest_path.as_deref(), repository)
         .await?;
+    let is_local_native = !arguments.environment.remote
+        && matches!(environment, repository::cargo::Environment::Native);
     let mut cargo = if arguments.environment.remote {
         Cargo::remote(environment)
     } else {
@@ -189,9 +191,18 @@ pub async fn construct_cargo_command<CargoArguments: Args + CargoCommand>(
         }
     }
     arguments.cargo.apply(&mut cargo);
-    let cargo_command = cargo
+    let mut cargo_command = cargo
         .command(repository, compiler_artifacts)
         .wrap_err("failed to create cargo command")?;
+
+    // mujoco-rs needs this before it builds dependencies. Use the same cache as
+    // ./twix, including for installed binaries, without requiring a shell export.
+    if is_local_native
+        && std::env::var_os("MUJOCO_DOWNLOAD_DIR").is_none()
+        && let Some(cache_directory) = dirs::cache_dir()
+    {
+        cargo_command.env("MUJOCO_DOWNLOAD_DIR", cache_directory.join("mujoco-rs"));
+    }
 
     Ok(cargo_command)
 }
