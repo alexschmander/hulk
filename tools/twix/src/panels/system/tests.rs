@@ -1,10 +1,10 @@
-use eframe::egui::{CentralPanel, Context, RawInput, Rect, Vec2};
+use eframe::egui::{CentralPanel, Context, RawInput, Rect, Shape, Vec2};
 use types::system_info::{CpuInfo, MemoryUsage};
 
 use super::*;
 
 #[test]
-fn missing_metrics_remain_unavailable_and_offline_cores_do_not_lower_average() {
+fn helpers_keep_missing_metrics_unavailable_and_scale_readably() {
     let mut stats = Tegrastats::default();
     assert_eq!(paint::cpu_mean(&stats), None);
     stats.cpus = vec![
@@ -18,6 +18,7 @@ fn missing_metrics_remain_unavailable_and_offline_cores_do_not_lower_average() {
             frequency_mhz: Some(1900),
         },
     ];
+    // Offline cores do not lower the average.
     assert_eq!(paint::cpu_mean(&stats), Some(50.0));
     assert_eq!(paint::memory_percent(None), None);
     assert_eq!(
@@ -37,165 +38,74 @@ fn missing_metrics_remain_unavailable_and_offline_cores_do_not_lower_average() {
     assert_eq!(paint::byte_rate(2048.0), "2.0 KiB/s");
     assert_eq!(paint::byte_rate(0.0), "0.0 B/s");
     assert_eq!(paint::byte_rate(f64::NAN), "unavailable");
-}
-
-fn backend(
-    router: Option<String>,
-    namespace: &str,
-) -> (tokio::runtime::Runtime, Arc<crate::backend::RobotBackend>) {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let backend = Arc::new(
-        runtime
-            .block_on(crate::backend::RobotBackend::new(
-                runtime.handle().clone(),
-                router,
-                namespace.into(),
-            ))
-            .unwrap(),
+    assert_eq!(
+        paint::byte_unit(195.0 * 1024.0 * 1024.0),
+        (1024.0 * 1024.0, "MiB/s")
     );
-    (runtime, backend)
+    assert_eq!(paint::nice_step(3.0), 5.0);
+    assert_eq!(paint::nice_step(11.7), 20.0);
+    assert_eq!(paint::nice_step(50.3), 100.0);
+    assert_eq!(paint::nice_step(0.0), f64::INFINITY);
+    // Views saved before the tegrastats views were merged open the merged view.
+    let legacy: Settings = serde_json::from_str(r#"{"view":"Thermals"}"#).unwrap();
+    assert!(legacy.view == View::System);
 }
 
+/// Renders the panel and returns all painted text.
 fn render(
     panel: &mut SystemPanel,
     backend: &Arc<crate::backend::RobotBackend>,
     context: &Context,
     width: f32,
-) {
-    let _ = context.run_ui(
+) -> String {
+    let output = context.run_ui(
         RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Default::default(),
-                Vec2::new(width, 360.0),
+                Vec2::new(width, 600.0),
             )),
             ..Default::default()
         },
         |root| {
             let ctx = root.ctx().clone();
             CentralPanel::default().show(root, |ui| {
-                panel.header_ui(
-                    ui,
-                    PanelUiContext {
-                        backend,
-                        egui_context: &ctx,
-                    },
-                );
-                panel.ui(
-                    ui,
-                    PanelUiContext {
-                        backend,
-                        egui_context: &ctx,
-                    },
-                );
+                let context = || PanelUiContext {
+                    backend,
+                    egui_context: &ctx,
+                };
+                panel.header_ui(ui, context());
+                panel.ui(ui, context());
             });
         },
     );
+    output
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            Shape::Text(text) => Some(text.galley.text()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-#[test]
-fn views_restore_render_without_data_and_follow_namespace_changes() {
-    let (_runtime, backend) = backend(None, "/");
-    let context = Context::default();
-    for view in View::ALL {
-        let saved = serde_json::to_value(Settings {
-            view,
-            ..Default::default()
-        })
-        .unwrap();
-        let mut panel = SystemPanel::new(PanelCreationContext {
-            backend: backend.clone(),
-            value: Some(&saved),
-            egui_context: context.clone(),
-        });
-        assert_eq!(panel.save(), saved);
-        render(&mut panel, &backend, &context, 320.0);
-        backend.set_namespace("/other".into()).unwrap();
-        render(&mut panel, &backend, &context, 1280.0);
-        assert_eq!(panel.namespace, "/other");
-        backend.set_namespace("/".into()).unwrap();
-    }
-}
-
-// Explicit opt-in, read-only smoke test against the robot. No robot is needed by the normal suite.
-#[test]
-#[ignore = "requires robot 42 at tcp/10.1.24.42:7447"]
-fn live_robot_system_topics_decode_and_render() {
-    let (runtime, backend) = backend(Some("tcp/10.1.24.42:7447".into()), "/42");
-    let context = Context::default();
-    let mut panels: Vec<_> = View::ALL
-        .into_iter()
-        .map(|view| {
-            let saved = serde_json::to_value(Settings {
-                view,
-                ..Default::default()
-            })
-            .unwrap();
-            SystemPanel::new(PanelCreationContext {
-                backend: backend.clone(),
-                value: Some(&saved),
-                egui_context: context.clone(),
-            })
-        })
-        .collect();
-    runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let ready = panels
-                    .iter()
-                    .all(|panel| match panel.source.as_ref().unwrap() {
-                        Source::Stats(source) => source.observation.latest().is_some(),
-                        Source::Network(source) => source.observation.latest().is_some(),
-                        Source::Disks(source) => source.observation.latest().is_some(),
-                    });
-                if ready {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("all three system topics must provide typed data");
+fn panel(
+    backend: &Arc<crate::backend::RobotBackend>,
+    context: &Context,
+    view: View,
+) -> SystemPanel {
+    let saved = serde_json::to_value(Settings {
+        view,
+        ..Default::default()
+    })
+    .unwrap();
+    let panel = SystemPanel::new(PanelCreationContext {
+        backend: backend.clone(),
+        value: Some(&saved),
+        egui_context: context.clone(),
     });
-    for panel in &mut panels {
-        render(panel, &backend, &context, 500.0);
-        render(panel, &backend, &context, 1200.0);
-        match panel.source.as_ref().unwrap() {
-            Source::Stats(source) => {
-                let record = source.observation.latest().unwrap();
-                assert!(!record.value.cpus.is_empty());
-                assert!(record.value.ram.is_some());
-                println!(
-                    "tegrastats: {} cores, GPU {:?}%",
-                    record.value.cpus.len(),
-                    record.value.gpu_utilization_percent
-                );
-            }
-            Source::Network(source) => println!(
-                "network: {:?}",
-                source
-                    .observation
-                    .latest()
-                    .unwrap()
-                    .value
-                    .keys()
-                    .collect::<Vec<_>>()
-            ),
-            Source::Disks(source) => println!(
-                "disks: {:?}",
-                source
-                    .observation
-                    .latest()
-                    .unwrap()
-                    .value
-                    .keys()
-                    .collect::<Vec<_>>()
-            ),
-        }
-    }
+    assert_eq!(panel.save(), saved);
+    panel
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -223,6 +133,13 @@ async fn system_preset_renders_typed_metrics_and_discards_them_on_namespace_chan
     );
     let context = Context::default();
     egui_material_icons::initialize(&context);
+    let mut panels: Vec<_> = VIEWS
+        .into_iter()
+        .map(|view| panel(&backend, &context, view))
+        .collect();
+    for panel in &mut panels {
+        assert!(render(panel, &backend, &context, 320.0).contains("Waiting for system/"));
+    }
     let stats = backend
         .node()
         .publisher::<Tegrastats>("/system_test/system/tegrastats")
@@ -247,22 +164,7 @@ async fn system_preset_renders_typed_metrics_and_discards_them_on_namespace_chan
         &context,
     )
     .unwrap();
-    // Individual views also allow us to check their decoded values and invalidation.
-    let mut panels: Vec<_> = View::ALL
-        .into_iter()
-        .map(|view| {
-            let saved = serde_json::to_value(Settings {
-                view,
-                ..Default::default()
-            })
-            .unwrap();
-            SystemPanel::new(PanelCreationContext {
-                backend: backend.clone(),
-                value: Some(&saved),
-                egui_context: context.clone(),
-            })
-        })
-        .collect();
+    // GPU, swap and power are missing and one core is offline.
     let sample = Tegrastats {
         cpus: vec![
             CpuInfo {
@@ -271,7 +173,7 @@ async fn system_preset_renders_typed_metrics_and_discards_them_on_namespace_chan
             },
             CpuInfo::default(),
         ],
-        gpu_utilization_percent: Some(45),
+        gpu_utilization_percent: None,
         ram: Some(MemoryUsage {
             used_mib: 4096,
             total_mib: 8192,
@@ -281,11 +183,7 @@ async fn system_preset_renders_typed_metrics_and_discards_them_on_namespace_chan
             name: "cpu".into(),
             celsius: 65.5,
         }],
-        power: vec![Power {
-            name: "VDD_IN".into(),
-            current_milliwatts: 12500,
-            average_milliwatts: 12000,
-        }],
+        power: Vec::<Power>::new(),
     };
     let network_sample = BTreeMap::from([(
         "test0".into(),
@@ -314,65 +212,92 @@ async fn system_preset_renders_typed_metrics_and_discards_them_on_namespace_chan
             },
         },
     )]);
+    let count = |panel: &SystemPanel| match panel.source.as_ref().unwrap() {
+        Source::Stats(source) => source.observation.get_all().len(),
+        Source::Network(source) => source.observation.get_all().len(),
+        Source::Disks(source) => source.observation.get_all().len(),
+    };
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
+        while !panels.iter().all(|panel| count(panel) >= 3) {
             stats.publish(&sample).await.unwrap();
             network.publish(&network_sample).await.unwrap();
             disks.publish(&disk_sample).await.unwrap();
-            let ready = panels
-                .iter()
-                .all(|panel| match panel.source.as_ref().unwrap() {
-                    Source::Stats(source) => source.observation.get_all().len() >= 3,
-                    Source::Network(source) => source.observation.get_all().len() >= 3,
-                    Source::Disks(source) => source.observation.get_all().len() >= 3,
-                });
-            if ready {
-                break;
-            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .unwrap();
-    for width in [500.0, 1280.0] {
-        for _ in 0..3 {
-            let _ = context.run_ui(
-                RawInput {
-                    screen_rect: Some(Rect::from_min_size(
-                        Default::default(),
-                        Vec2::new(width, 800.0),
-                    )),
-                    ..Default::default()
-                },
-                |ui| {
-                    CentralPanel::default().show(ui, |ui| layout.ui(ui, &backend));
-                },
-            );
-        }
-        for panel in &mut panels {
-            render(panel, &backend, &context, width);
+    for _ in 0..3 {
+        let _ = context.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    Default::default(),
+                    Vec2::new(1280.0, 720.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                CentralPanel::default().show(ui, |ui| layout.ui(ui, &backend));
+            },
+        );
+    }
+    let expected = [
+        [
+            "unavailable",
+            "offline",
+            "65.5 °C",
+            "Power readings unavailable",
+        ],
+        [
+            "RX    2.0 KiB/s",
+            "TX    1.0 KiB/s",
+            "Errors/s RX 1.0 TX 0.0",
+            "Drops/s RX 0.0 TX 2.0",
+        ],
+        [
+            "Read    4.0 KiB/s",
+            "IOPS R/W 4.0 / 2.0",
+            "In flight 3",
+            "Latency R/W 1.50 ms / n/a",
+        ],
+    ];
+    for width in [320.0, 500.0, 900.0] {
+        for (panel, expected) in panels.iter_mut().zip(expected) {
+            let text = render(panel, &backend, &context, width);
+            for expected in expected {
+                assert!(
+                    text.contains(expected),
+                    "{expected:?} missing at {width} px:\n{text}"
+                );
+            }
+            assert!(!text.contains("Stale"));
         }
     }
-    for panel in &panels {
-        match panel.source.as_ref().unwrap() {
-            Source::Stats(source) => assert_eq!(source.observation.latest().unwrap().value, sample),
-            Source::Network(source) => {
-                assert_eq!(source.observation.latest().unwrap().value, network_sample)
-            }
-            Source::Disks(source) => {
-                assert_eq!(source.observation.latest().unwrap().value, disk_sample)
-            }
+    let Ok(Source::Stats(source)) = &mut panels[0].source else {
+        panic!("the system view observes tegrastats");
+    };
+    source.last_update -= Duration::from_secs(3);
+    assert!(
+        render(&mut panels[0], &backend, &context, 500.0).contains("Stale: no new sample for 3 s")
+    );
+    let before = count(&panels[0]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while count(&panels[0]) == before {
+            stats.publish(&sample).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }
+    })
+    .await
+    .unwrap();
+    assert!(!render(&mut panels[0], &backend, &context, 500.0).contains("Stale"));
     backend.set_namespace("/empty_robot".into()).unwrap();
     for panel in &mut panels {
-        render(panel, &backend, &context, 500.0);
-        let empty = match panel.source.as_ref().unwrap() {
-            Source::Stats(source) => source.observation.latest().is_none(),
-            Source::Network(source) => source.observation.latest().is_none(),
-            Source::Disks(source) => source.observation.latest().is_none(),
-        };
-        assert!(empty, "previous robot's metrics must disappear immediately");
+        let text = render(panel, &backend, &context, 500.0);
+        assert!(
+            text.contains("Waiting for system/"),
+            "previous robot's metrics must disappear immediately"
+        );
+        assert_eq!(panel.built_for.as_ref().unwrap().0, "/empty_robot");
     }
     router.shutdown().unwrap();
 }

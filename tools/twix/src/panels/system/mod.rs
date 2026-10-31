@@ -27,43 +27,17 @@ const HISTORY: Duration = Duration::from_secs(60);
 const STALE_AFTER: Duration = Duration::from_secs(2);
 type Records<T> = Vec<Arc<SampleRecord<T>>>;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum View {
+    // Earlier versions split the tegrastats topic into three views.
     #[default]
-    Compute,
-    Memory,
-    Thermals,
+    #[serde(alias = "Compute", alias = "Memory", alias = "Thermals")]
+    System,
     Network,
     Disks,
 }
 
-impl View {
-    const ALL: [Self; 5] = [
-        Self::Compute,
-        Self::Memory,
-        Self::Thermals,
-        Self::Network,
-        Self::Disks,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Compute => "CPU & GPU",
-            Self::Memory => "Memory",
-            Self::Thermals => "Temperatures & power",
-            Self::Network => "Network I/O",
-            Self::Disks => "Disk I/O",
-        }
-    }
-
-    fn topic(self) -> &'static str {
-        match self {
-            Self::Compute | Self::Memory | Self::Thermals => "system/tegrastats",
-            Self::Network => "system/network_io",
-            Self::Disks => "system/disk_io",
-        }
-    }
-}
+const VIEWS: [View; 3] = [View::System, View::Network, View::Disks];
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -75,8 +49,8 @@ struct Settings {
 pub struct SystemPanel {
     settings: Settings,
     source: Result<Source, String>,
-    namespace: String,
-    presentation: (u64, u64),
+    /// Namespace, backend presentation and view that `source` observes.
+    built_for: Option<(String, (u64, u64), View)>,
 }
 
 enum Source {
@@ -86,6 +60,7 @@ enum Source {
 }
 
 struct Observed<T> {
+    topic: &'static str,
     observation: TopicObservation<T>,
     _repaint: ObservationRepaint,
     last_publication: Option<PublicationId>,
@@ -96,16 +71,17 @@ impl<T: Message + Send + Sync + 'static> Observed<T>
 where
     T::Codec: Send + Sync,
 {
-    fn new(context: &impl ObservationContext, topic: &str) -> ros_z_debug::Result<Self> {
+    fn new(context: &impl ObservationContext, topic: &'static str) -> Result<Self, String> {
         let _runtime = context.backend().runtime_handle().enter();
-        let observation = context
-            .backend()
-            .observer()
-            .observe_typed(topic)?
-            .policy(ObservationPolicy::time_window(HISTORY)?)
-            .spawn();
+        let observation = ObservationPolicy::time_window(HISTORY)
+            .and_then(|policy| {
+                let observer = context.backend().observer();
+                Ok(observer.observe_typed(topic)?.policy(policy).spawn())
+            })
+            .map_err(|error| format!("{topic}: {error:#}"))?;
         let repaint = observation.repaint_on_updates(context);
         Ok(Self {
+            topic,
             observation,
             _repaint: repaint,
             last_publication: None,
@@ -113,7 +89,8 @@ where
         })
     }
 
-    fn records(&mut self, ui: &mut Ui, live: bool) -> Records<T> {
+    /// Shows the observation state, then paints the latest sample with its retained history.
+    fn show(&mut self, ui: &mut Ui, live: bool, paint: impl FnOnce(&mut Ui, &T, &Records<T>)) {
         let records = self
             .observation
             .window(Time::zero(), Time::from_nanos(i64::MAX));
@@ -131,7 +108,7 @@ where
             );
         }
         if records.is_empty() {
-            ui.label("Waiting for system metrics...");
+            ui.label(format!("Waiting for {}…", self.topic));
         } else if live {
             // Use receipt progress, not clock synchronization with the robot.
             let age = self.last_update.elapsed();
@@ -143,7 +120,9 @@ where
             }
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
-        records
+        if let Some(latest) = records.last() {
+            paint(ui, &latest.value, &records);
+        }
     }
 }
 
@@ -153,84 +132,59 @@ impl Panel for SystemPanel {
     const ICON: &'static str = egui_material_icons::icons::ICON_MONITOR_HEART.codepoint;
 
     fn new(context: PanelCreationContext<'_>) -> Self {
-        let settings = context
-            .value
-            .and_then(|value| Settings::deserialize(value).ok())
-            .unwrap_or_default();
-        let source = Source::new(&context, settings.view);
         Self {
-            settings,
-            source,
-            namespace: context.backend.namespace(),
-            presentation: context.backend.presentation_identity(),
+            settings: context
+                .value
+                .and_then(|value| Settings::deserialize(value).ok())
+                .unwrap_or_default(),
+            source: Err("Not observing yet".into()),
+            built_for: None,
         }
     }
 
-    fn header_ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
+    fn header_ui(&mut self, ui: &mut Ui, _context: PanelUiContext<'_>) {
         ui.horizontal_wrapped(|ui| {
-            let previous = self.settings.view;
             ComboBox::from_id_salt("system-view")
-                .selected_text(self.settings.view.label())
+                .selected_text(format!("{:?}", self.settings.view))
                 .show_ui(ui, |ui| {
-                    for view in View::ALL {
-                        ui.selectable_value(&mut self.settings.view, view, view.label());
+                    for view in VIEWS {
+                        ui.selectable_value(&mut self.settings.view, view, format!("{view:?}"));
                     }
                 });
-            if matches!(self.settings.view, View::Network | View::Disks) {
-                ui.checkbox(&mut self.settings.show_idle_devices, "Show idle devices");
-            }
-            ui.weak("60 s history")
-                .on_hover_text(self.settings.view.topic());
-            if previous != self.settings.view || ui.button("Reconnect").clicked() {
-                self.source = Source::new(&context, self.settings.view);
+            if self.settings.view != View::System {
+                ui.checkbox(&mut self.settings.show_idle_devices, "Show idle devices")
+                    .on_hover_text("Devices active in the last 60 s are always shown");
             }
         });
     }
 
     fn ui(&mut self, ui: &mut Ui, context: PanelUiContext<'_>) {
-        // Rebuild synchronously before painting a different namespace, backend or seek.
-        let namespace = context.backend.namespace();
-        let presentation = context.backend.presentation_identity();
-        if namespace != self.namespace || presentation != self.presentation {
+        // Rebuild synchronously before painting a different view, namespace, backend or seek.
+        let backend = context.backend;
+        let key = (
+            backend.namespace(),
+            backend.presentation_identity(),
+            self.settings.view,
+        );
+        if self.built_for.as_ref() != Some(&key) {
             self.source = Source::new(&context, self.settings.view);
-            self.namespace = namespace;
-            self.presentation = presentation;
+            self.built_for = Some(key);
         }
         let live = context.backend.query_connection().cursor.position().cursor == Cursor::Live;
+        let show_idle = self.settings.show_idle_devices;
         ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| match &mut self.source {
                 Err(error) => {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
-                Ok(Source::Stats(source)) => {
-                    let records = source.records(ui, live);
-                    if let Some(latest) = records.last() {
-                        match self.settings.view {
-                            View::Compute => paint::compute(ui, &latest.value, &records),
-                            View::Memory => paint::memory(ui, &latest.value, &records),
-                            View::Thermals => paint::thermals(ui, &latest.value, &records),
-                            _ => unreachable!("view and source are created together"),
-                        }
-                    }
-                }
-                Ok(Source::Network(source)) => {
-                    let records = source.records(ui, live);
-                    if let Some(latest) = records.last() {
-                        paint::network(
-                            ui,
-                            &latest.value,
-                            &records,
-                            self.settings.show_idle_devices,
-                        );
-                    }
-                }
-                Ok(Source::Disks(source)) => {
-                    let records = source.records(ui, live);
-                    if let Some(latest) = records.last() {
-                        paint::disks(ui, &latest.value, &records, self.settings.show_idle_devices);
-                    }
-                }
+                Ok(Source::Stats(source)) => source.show(ui, live, paint::system),
+                Ok(Source::Network(source)) => source.show(ui, live, |ui, latest, records| {
+                    paint::devices(ui, latest, records, show_idle);
+                }),
+                Ok(Source::Disks(source)) => source.show(ui, live, |ui, latest, records| {
+                    paint::devices(ui, latest, records, show_idle);
+                }),
             });
     }
 
@@ -241,14 +195,10 @@ impl Panel for SystemPanel {
 
 impl Source {
     fn new(context: &impl ObservationContext, view: View) -> Result<Self, String> {
-        let topic = view.topic();
         match view {
-            View::Compute | View::Memory | View::Thermals => {
-                Observed::new(context, topic).map(Self::Stats)
-            }
-            View::Network => Observed::new(context, topic).map(Self::Network),
-            View::Disks => Observed::new(context, topic).map(Self::Disks),
+            View::System => Observed::new(context, "system/tegrastats").map(Self::Stats),
+            View::Network => Observed::new(context, "system/network_io").map(Self::Network),
+            View::Disks => Observed::new(context, "system/disk_io").map(Self::Disks),
         }
-        .map_err(|error| format!("{topic}: {error:#}"))
     }
 }

@@ -79,20 +79,20 @@ Choose a panel from the **+** picker.
 
 ## System monitor
 
-Open **+ → System** under the bundled layouts for a btop-style dashboard.
-It contains CPU/GPU, memory, temperatures/power, network, and disk views.
+Open **+ → System** under the bundled layouts for a btop-style dashboard with one view per topic:
+**System** (`system/tegrastats`), **Network** (`system/network_io`), and **Disks** (`system/disk_io`).
 Under panel types, **System** opens an individual monitor; its view selector chooses what to display.
 All sources use the selected namespace, so the preset works across robots without editing topic names.
 For robot 42 on Ethernet, run `./twix /42 --router tcp/10.1.24.42:7447`.
 
-The monitor reads `system/tegrastats`, `system/network_io`, and `system/disk_io`.
-It shows per-core utilization and frequency, online CPU average, GPU utilization, RAM/swap usage, sensor temperatures, and current/average power per rail.
+The System view shows the online-core CPU average, per-core utilization and frequency, GPU utilization, RAM/swap usage, sensor temperatures, and current/average power per rail.
+Its charts plot utilization and the hottest sensor; meter colours identify the lines.
 Graphs retain 60 seconds of history; missing values and sample gaps break the lines.
 Unavailable readings and offline cores are labeled, and live views warn after two seconds without a new sample.
 
-Network views show receive/transmit rates, errors, and drops for each interface.
+Network views show receive/transmit rates for each interface, plus errors and drops when there are any.
 Disk views show read/write rates, IOPS, outstanding requests, and average completed-operation latency.
-Expand a device to see its graph and details.
+Rate charts use the unit of their largest value; the coloured rates in each device header identify the lines.
 Devices active during the retained history appear automatically; **Show idle devices** includes the rest.
 Disk and partition rates are shown separately and are never added together.
 These topics do not provide process lists or filesystem capacity.

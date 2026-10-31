@@ -1,191 +1,148 @@
 use std::collections::BTreeMap;
 
-use eframe::egui::{Color32, Grid, ProgressBar, Ui};
-use egui_plot::{Legend, Line, Plot, Points};
+use eframe::egui::{
+    Color32, Grid, Label, ProgressBar, Rect, RichText, StrokeKind, Ui,
+    collapsing_header::CollapsingState, vec2,
+};
+use egui_plot::{AxisHints, HoverPosition, Line, Plot, Points, uniform_grid_spacer};
 use types::system_info::{DiskIo, MemoryUsage, NetworkIo, Tegrastats};
 
 use super::{HISTORY, Records};
 
-const CPU: Color32 = Color32::from_rgb(80, 190, 160);
-const GPU: Color32 = Color32::from_rgb(190, 140, 240);
-const RECEIVE: Color32 = Color32::from_rgb(90, 180, 240);
-const TRANSMIT: Color32 = Color32::from_rgb(240, 180, 80);
+const TEAL: Color32 = Color32::from_rgb(80, 190, 160);
+const PURPLE: Color32 = Color32::from_rgb(190, 140, 240);
+const BLUE: Color32 = Color32::from_rgb(90, 180, 240);
+const AMBER: Color32 = Color32::from_rgb(240, 180, 80);
 
-struct Trace {
-    name: String,
-    color: Color32,
-    segments: Vec<Vec<[f64; 2]>>,
-}
+/// Name, colour and line segments split at missing samples.
+type Trace = (&'static str, Color32, Vec<Vec<[f64; 2]>>);
+/// Name, percentage, detail (shown alone when the percentage is missing) and colour.
+type Meter = (String, Option<f64>, String, Color32);
 
 fn trace<T>(
     records: &Records<T>,
-    name: impl Into<String>,
+    name: &'static str,
     color: Color32,
     value: impl Fn(&T) -> Option<f64>,
 ) -> Trace {
-    let mut trace = Trace {
-        name: name.into(),
-        color,
-        segments: Vec::new(),
-    };
-    let Some(end) = records.last().map(|record| record.effective_time) else {
-        return trace;
-    };
-    let mut segment = Vec::new();
+    let mut segments: Vec<Vec<[f64; 2]>> = Vec::new();
     let mut previous = None;
     for record in records {
         let time = record.effective_time;
-        let value = value(&record.value).filter(|value| value.is_finite());
-        // The producer samples at 5 Hz. Leave a gap across a missed second.
-        if (value.is_none()
-            || previous.is_some_and(|previous| time.duration_since(previous).as_secs_f64() > 1.0))
-            && !segment.is_empty()
-        {
-            trace.segments.push(std::mem::take(&mut segment));
-        }
-        if let Some(value) = value {
-            segment.push([-end.duration_since(time).as_secs_f64(), value]);
+        let Some(value) = value(&record.value).filter(|value| value.is_finite()) else {
+            previous = None;
+            continue;
+        };
+        // The producer samples at 5 Hz. Break the line at a missing value or a missed second.
+        if previous.is_none_or(|previous| time.duration_since(previous).as_secs_f64() > 1.0) {
+            segments.push(Vec::new());
         }
         previous = Some(time);
+        let age = records[records.len() - 1]
+            .effective_time
+            .duration_since(time);
+        segments
+            .last_mut()
+            .expect("a segment was started above")
+            .push([-age.as_secs_f64(), value]);
     }
-    if !segment.is_empty() {
-        trace.segments.push(segment);
-    }
-    trace
+    (name, color, segments)
 }
 
-fn chart(ui: &mut Ui, id: &str, traces: Vec<Trace>, unit: &str, percent: bool, height: f32) {
-    Plot::new(ui.id().with(id))
+/// Smallest 1-2-5 step of at least `min_step`; infinite (no ticks) for a degenerate axis.
+pub(super) fn nice_step(min_step: f64) -> f64 {
+    let magnitude = 10_f64.powf(min_step.log10().floor());
+    [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|factor| factor * magnitude)
+        .find(|step| *step > 0.0 && *step >= min_step)
+        .unwrap_or(f64::INFINITY)
+}
+
+fn chart(ui: &mut Ui, id: &str, traces: Vec<Trace>, unit: &str, top: f64, height: f32) {
+    // Grid and crosshair only guide reading, as in the Plot panel.
+    let guide = ui.visuals().text_color().gamma_multiply(0.3);
+    let plot = Plot::new(ui.id().with(id))
         .height(height)
         .include_y(0.0)
-        .legend(Legend::default())
+        .include_y(top)
         .allow_drag(false)
         .allow_zoom(false)
         .allow_scroll(false)
         .allow_boxed_zoom(false)
         .allow_axis_zoom_drag(false)
         .allow_double_click_reset(false)
-        .y_axis_label(unit)
+        .grid_color(guide)
+        .cursor_color(guide)
+        // Steps of at least 24 px give short charts two or more fully visible tick labels.
+        .custom_y_axes(vec![
+            AxisHints::new_y()
+                .label(unit)
+                .label_spacing(16.0..=20.0)
+                // Enough decimals for the step: 0.5 steps need one, which egui_plot rounds away.
+                .formatter(|mark, _| {
+                    let decimals = (-mark.step_size.log10() - 1e-6).ceil().max(0.0) as usize;
+                    format!("{:.decimals$}", mark.value)
+                }),
+        ])
+        .y_grid_spacer(uniform_grid_spacer(|input| {
+            [nice_step(3.0 * input.base_step_size); 3]
+        }))
         .x_axis_formatter(|mark, _| format!("{:.0}s", mark.value))
-        .show(ui, |plot| {
-            plot.set_auto_bounds([false, !percent]);
+        .label_formatter(|hover| match hover {
+            HoverPosition::NearDataPoint {
+                plot_name,
+                position,
+                ..
+            } => Some(format!(
+                "{plot_name}: {:.1} {unit} at {:.1}s",
+                position.y, position.x
+            )),
+            HoverPosition::Elsewhere { .. } => None,
+        });
+    // Charts only display data. Unless the pointer reads values, keep the plot and its axes out of
+    // the Tab order, without the dimming of disabled widgets.
+    let rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), height));
+    ui.scope(|ui| {
+        ui.visuals_mut().disabled_alpha = 1.0;
+        if !ui.rect_contains_pointer(rect) {
+            ui.disable();
+        }
+        plot.show(ui, |plot| {
+            plot.set_auto_bounds([false, true]);
             plot.set_plot_bounds_x(-HISTORY.as_secs_f64()..=0.0);
-            if percent {
-                plot.set_plot_bounds_y(0.0..=100.0);
-            }
-            for trace in traces {
-                for segment in trace.segments {
+            for (name, color, segments) in traces {
+                for segment in segments {
                     if segment.len() == 1 {
-                        plot.points(
-                            Points::new(&trace.name, segment)
-                                .color(trace.color)
-                                .radius(2.0),
-                        );
+                        plot.points(Points::new(name, segment).color(color).radius(2.0));
                     } else {
-                        plot.line(Line::new(&trace.name, segment).color(trace.color));
+                        plot.line(Line::new(name, segment).color(color));
                     }
                 }
             }
         });
-}
-
-pub(super) fn cpu_mean(stats: &Tegrastats) -> Option<f64> {
-    let (sum, count) = stats
-        .cpus
-        .iter()
-        .filter_map(|cpu| cpu.utilization_percent)
-        .fold((0_u64, 0_u64), |(sum, count), value| {
-            (sum + u64::from(value), count + 1)
-        });
-    (count > 0).then(|| sum as f64 / count as f64)
-}
-
-fn meter(ui: &mut Ui, label: &str, percent: Option<f64>, detail: String, color: Color32) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        let text = match percent {
-            Some(percent) => format!("{percent:.0}%  {detail}"),
-            None => detail,
-        };
-        ui.add(
-            ProgressBar::new((percent.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0) as f32)
-                .desired_width(ui.available_width().max(40.0))
-                .fill(color)
-                .text(text),
-        );
     });
 }
 
-pub(super) fn compute(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrastats>) {
-    let average = cpu_mean(stats);
-    meter(
-        ui,
-        "CPU",
-        average,
-        if average.is_some() {
-            "online core average"
-        } else {
-            "unavailable"
+/// Monospace tokens that wrap between, never inside, values.
+fn tokens(ui: &mut Ui, tokens: impl IntoIterator<Item = RichText>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 16.0;
+        for token in tokens {
+            ui.add(Label::new(token.monospace()).extend());
         }
-        .into(),
-        CPU,
-    );
-    meter(
-        ui,
-        "GPU",
-        stats.gpu_utilization_percent.map(f64::from),
-        if stats.gpu_utilization_percent.is_none() {
-            "unavailable"
-        } else {
-            ""
-        }
-        .into(),
-        GPU,
-    );
-    chart(
-        ui,
-        "utilization",
-        vec![
-            trace(records, "CPU average", CPU, cpu_mean),
-            trace(records, "GPU", GPU, |stats| {
-                stats.gpu_utilization_percent.map(f64::from)
-            }),
-        ],
-        "%",
-        true,
-        (ui.available_height() - 110.0).clamp(90.0, 180.0),
-    );
-    let columns = if ui.available_width() >= 550.0 { 2 } else { 1 };
-    let core_width =
-        ((ui.available_width() - 16.0 * (columns - 1) as f32) / columns as f32).max(120.0);
-    Grid::new("cpu-cores")
-        .num_columns(columns)
-        .spacing([16.0, 5.0])
-        .show(ui, |ui| {
-            for (index, cpu) in stats.cpus.iter().enumerate() {
-                ui.vertical(|ui| {
-                    ui.set_width(core_width);
-                    let frequency = cpu
-                        .frequency_mhz
-                        .map(|mhz| format!("{mhz} MHz"))
-                        .unwrap_or_default();
-                    meter(
-                        ui,
-                        &format!("CPU {index}"),
-                        cpu.utilization_percent.map(f64::from),
-                        if cpu.utilization_percent.is_none() {
-                            "offline / unavailable".into()
-                        } else {
-                            frequency
-                        },
-                        CPU,
-                    );
-                });
-                if (index + 1) % columns == 0 {
-                    ui.end_row();
-                }
-            }
-        });
+    });
+}
+
+/// Average over online cores only.
+pub(super) fn cpu_mean(stats: &Tegrastats) -> Option<f64> {
+    let online: Vec<_> = stats
+        .cpus
+        .iter()
+        .filter_map(|cpu| cpu.utilization_percent)
+        .collect();
+    (!online.is_empty())
+        .then(|| online.iter().map(|&value| f64::from(value)).sum::<f64>() / online.len() as f64)
 }
 
 pub(super) fn memory_percent(memory: Option<&MemoryUsage>) -> Option<f64> {
@@ -193,244 +150,276 @@ pub(super) fn memory_percent(memory: Option<&MemoryUsage>) -> Option<f64> {
     (memory.total_mib > 0).then(|| 100.0 * memory.used_mib as f64 / memory.total_mib as f64)
 }
 
-fn memory_meter(ui: &mut Ui, name: &str, memory: Option<&MemoryUsage>, color: Color32) {
-    let detail = memory
-        .map(|memory| {
-            format!(
-                "{:.2} / {:.2} GiB",
-                memory.used_mib as f64 / 1024.0,
-                memory.total_mib as f64 / 1024.0
-            )
-        })
-        .unwrap_or_else(|| "unavailable".into());
-    meter(ui, name, memory_percent(memory), detail, color);
+fn hottest(stats: &Tegrastats) -> Option<f64> {
+    stats
+        .temperatures
+        .iter()
+        .map(|sensor| f64::from(sensor.celsius))
+        .filter(|value| value.is_finite())
+        .reduce(f64::max)
 }
 
-pub(super) fn memory(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrastats>) {
-    memory_meter(ui, "RAM", stats.ram.as_ref(), RECEIVE);
-    memory_meter(ui, "Swap", stats.swap.as_ref(), TRANSMIT);
-    chart(
-        ui,
-        "memory",
-        vec![
-            trace(records, "RAM", RECEIVE, |stats| {
-                memory_percent(stats.ram.as_ref())
-            }),
-            trace(records, "Swap", TRANSMIT, |stats| {
-                memory_percent(stats.swap.as_ref())
-            }),
-        ],
-        "%",
-        true,
-        ui.available_height().clamp(90.0, 180.0),
-    );
-}
-
-pub(super) fn thermals(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrastats>) {
-    if stats.temperatures.is_empty() {
-        ui.label("Temperature readings unavailable");
-    } else {
-        chart(
-            ui,
-            "temperature",
-            vec![trace(records, "Hottest sensor", TRANSMIT, |stats| {
-                stats
-                    .temperatures
-                    .iter()
-                    .map(|sensor| f64::from(sensor.celsius))
-                    .filter(|value| value.is_finite())
-                    .reduce(f64::max)
-            })],
-            "°C",
-            false,
-            100.0,
-        );
-        ui.horizontal_wrapped(|ui| {
-            for sensor in &stats.temperatures {
-                ui.monospace(format!("{} {:.1} °C", sensor.name, sensor.celsius));
-            }
+pub(super) fn system(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrastats>) {
+    let memory = |name: &str, memory: Option<&MemoryUsage>, color| -> Meter {
+        let detail = memory.map_or_else(String::new, |memory| {
+            let [used, total] = [memory.used_mib, memory.total_mib].map(|mib| mib as f64 / 1024.0);
+            format!("{used:.2} / {total:.2} GiB")
         });
+        (name.into(), memory_percent(memory), detail, color)
+    };
+    let mut meters = vec![("CPU".into(), cpu_mean(stats), String::new(), TEAL)];
+    meters.extend(stats.cpus.iter().enumerate().map(|(index, cpu)| {
+        let detail = match (cpu.utilization_percent, cpu.frequency_mhz) {
+            (None, _) => "offline".into(),
+            (Some(_), mhz) => mhz.map_or_else(String::new, |mhz| format!("{mhz:>4} MHz")),
+        };
+        let percent = cpu.utilization_percent.map(f64::from);
+        (format!("CPU {index}"), percent, detail, TEAL)
+    }));
+    let gpu = stats.gpu_utilization_percent.map(f64::from);
+    meters.extend([
+        ("GPU".into(), gpu, String::new(), PURPLE),
+        memory("RAM", stats.ram.as_ref(), BLUE),
+        memory("Swap", stats.swap.as_ref(), AMBER),
+    ]);
+    // Both charts share the height the text rows leave, so a tall pane fills without scrolling.
+    let text_rows = meters.len() + stats.power.len() + 6;
+    let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let chart_height = ((ui.available_height() - text_rows as f32 * row) / 2.0).max(100.0);
+
+    // Values sit beside, not on, the fill; the last column stretches the gauges to the edge.
+    Grid::new("meters").num_columns(3).show(ui, |ui| {
+        for (name, percent, detail, color) in meters {
+            ui.label(name);
+            ui.monospace(match percent {
+                Some(percent) => format!("{percent:>3.0}% {detail}"),
+                None if detail.is_empty() => "unavailable".into(),
+                None => detail,
+            });
+            let fraction = (percent.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0) as f32;
+            ui.add(
+                ProgressBar::new(fraction)
+                    .desired_height(6.0)
+                    .corner_radius(0)
+                    .fill(color),
+            );
+            ui.end_row();
+        }
+    });
+    let traces = vec![
+        trace(records, "CPU (online cores)", TEAL, cpu_mean),
+        trace(records, "GPU", PURPLE, |stats| {
+            stats.gpu_utilization_percent.map(f64::from)
+        }),
+        trace(records, "RAM", BLUE, |stats| {
+            memory_percent(stats.ram.as_ref())
+        }),
+        trace(records, "Swap", AMBER, |stats| {
+            memory_percent(stats.swap.as_ref())
+        }),
+    ];
+    chart(ui, "utilization", traces, "%", 100.0, chart_height);
+
+    ui.separator();
+    let [text_color, hottest_color] = [ui.visuals().text_color(), ui.visuals().strong_text_color()];
+    let width = stats.temperatures.iter().map(|sensor| sensor.name.len());
+    let width = width.max().unwrap_or(0);
+    tokens(
+        ui,
+        stats.temperatures.iter().map(|sensor| {
+            let text = format!("{:<width$} {:>5.1} °C", sensor.name, sensor.celsius);
+            // The plotted hottest sensor shares the line's colour.
+            let hottest = Some(f64::from(sensor.celsius)) == hottest(stats);
+            RichText::new(text).color(if hottest { hottest_color } else { text_color })
+        }),
+    );
+    if stats.temperatures.is_empty() {
+        ui.label("Temperatures unavailable");
+    } else {
+        let traces = vec![trace(records, "Hottest sensor", hottest_color, hottest)];
+        chart(ui, "temperature", traces, "°C", 100.0, chart_height);
     }
+
     ui.separator();
     if stats.power.is_empty() {
         ui.label("Power readings unavailable");
-    } else {
-        Grid::new("power-rails").striped(true).show(ui, |ui| {
-            ui.strong("Power rail");
-            ui.strong("Current");
-            ui.strong("Average");
-            ui.end_row();
-            for rail in &stats.power {
-                ui.label(&rail.name);
-                ui.monospace(format!(
-                    "{:.2} W",
-                    f64::from(rail.current_milliwatts) / 1000.0
-                ));
-                ui.monospace(format!(
-                    "{:.2} W",
-                    f64::from(rail.average_milliwatts) / 1000.0
-                ));
-                ui.end_row();
-            }
-        });
     }
+    let width = stats.power.iter().map(|rail| rail.name.len()).max();
+    for rail in &stats.power {
+        let [now, average] = [rail.current_milliwatts, rail.average_milliwatts]
+            .map(|milliwatts| f64::from(milliwatts) / 1000.0);
+        let name = format!("{:<1$} {now:>6.2} W", rail.name, width.unwrap_or(0));
+        tokens(
+            ui,
+            [name, format!("average {average:>6.2} W")].map(RichText::new),
+        );
+    }
+}
+
+pub(super) fn byte_unit(value: f64) -> (f64, &'static str) {
+    [(1 << 30, "GiB/s"), (1 << 20, "MiB/s"), (1 << 10, "KiB/s")]
+        .into_iter()
+        .map(|(scale, unit)| (f64::from(scale), unit))
+        .find(|(scale, _)| value >= *scale)
+        .unwrap_or((1.0, "B/s"))
 }
 
 pub(super) fn byte_rate(value: f64) -> String {
     if !value.is_finite() || value < 0.0 {
         return "unavailable".into();
     }
-    let (value, unit) = if value >= 1024.0 * 1024.0 * 1024.0 {
-        (value / (1024.0 * 1024.0 * 1024.0), "GiB/s")
-    } else if value >= 1024.0 * 1024.0 {
-        (value / (1024.0 * 1024.0), "MiB/s")
-    } else if value >= 1024.0 {
-        (value / 1024.0, "KiB/s")
-    } else {
-        (value, "B/s")
+    let (scale, unit) = byte_unit(value);
+    format!("{:.1} {unit}", value / scale)
+}
+
+/// A network interface or disk.
+pub(super) trait Device {
+    /// Labels and colours of the two byte rates.
+    const SERIES: [(&str, Color32); 2];
+    fn rates(&self) -> [f64; 2];
+    fn active(&self) -> bool;
+    /// Values shown below the chart.
+    fn details(&self, warn: Color32) -> Vec<RichText>;
+}
+
+impl Device for NetworkIo {
+    const SERIES: [(&str, Color32); 2] = [("RX", BLUE), ("TX", AMBER)];
+
+    fn rates(&self) -> [f64; 2] {
+        [
+            self.rates.receive_bytes_per_second,
+            self.rates.transmit_bytes_per_second,
+        ]
+    }
+
+    fn active(&self) -> bool {
+        self.rates().iter().sum::<f64>() > 0.0 || !self.details(AMBER).is_empty()
+    }
+
+    /// Errors and drops, only when there are any.
+    fn details(&self, warn: Color32) -> Vec<RichText> {
+        let rates = &self.rates;
+        let [
+            receive_errors,
+            transmit_errors,
+            receive_drops,
+            transmit_drops,
+        ] = [
+            rates.receive_errors_per_second,
+            rates.transmit_errors_per_second,
+            rates.receive_drops_per_second,
+            rates.transmit_drops_per_second,
+        ];
+        if receive_errors + transmit_errors + receive_drops + transmit_drops <= 0.0 {
+            return Vec::new();
+        }
+        [
+            format!("Errors/s RX {receive_errors:.1} TX {transmit_errors:.1}"),
+            format!("Drops/s RX {receive_drops:.1} TX {transmit_drops:.1}"),
+        ]
+        .map(|text| RichText::new(text).color(warn))
+        .into()
+    }
+}
+
+impl Device for DiskIo {
+    const SERIES: [(&str, Color32); 2] = [("Read", BLUE), ("Write", AMBER)];
+
+    fn rates(&self) -> [f64; 2] {
+        [
+            self.rates.read_bytes_per_second,
+            self.rates.write_bytes_per_second,
+        ]
+    }
+
+    fn active(&self) -> bool {
+        let rates = &self.rates;
+        rates.read_operations_per_second + rates.write_operations_per_second > 0.0
+            || self.outstanding_requests > 0
+    }
+
+    fn details(&self, _warn: Color32) -> Vec<RichText> {
+        let rates = &self.rates;
+        let latency =
+            |latency: Option<f64>| latency.map_or("n/a".into(), |ms| format!("{ms:.2} ms"));
+        [
+            format!(
+                "IOPS R/W {:.1} / {:.1}",
+                rates.read_operations_per_second, rates.write_operations_per_second
+            ),
+            format!("In flight {}", self.outstanding_requests),
+            format!(
+                "Latency R/W {} / {}",
+                latency(rates.average_read_latency_ms),
+                latency(rates.average_write_latency_ms)
+            ),
+        ]
+        .map(RichText::new)
+        .into()
+    }
+}
+
+/// Devices active in the retained history (or all), each with its rates, chart and details.
+pub(super) fn devices<T: Device>(
+    ui: &mut Ui,
+    devices: &BTreeMap<String, T>,
+    records: &Records<BTreeMap<String, T>>,
+    show_idle: bool,
+) {
+    let active = |name: &String| {
+        records
+            .iter()
+            .any(|record| record.value.get(name).is_some_and(T::active))
     };
-    format!("{value:.1} {unit}")
-}
-
-pub(super) fn network(
-    ui: &mut Ui,
-    devices: &BTreeMap<String, NetworkIo>,
-    records: &Records<BTreeMap<String, NetworkIo>>,
-    show_idle: bool,
-) {
-    if devices.is_empty() {
-        ui.label("No network interfaces in this sample");
+    let shown: Vec<_> = devices
+        .iter()
+        .filter(|(name, _)| show_idle || active(name))
+        .collect();
+    if shown.is_empty() {
+        ui.label(if devices.is_empty() {
+            "No devices in this sample"
+        } else {
+            "No device was active in the last 60 s"
+        });
     }
-    if !show_idle {
-        ui.weak("Idle devices hidden until active. Enable Show idle devices to see all.");
-    }
-    for (name, device) in devices {
-        if !show_idle
-            && !records.iter().any(|record| {
-                record.value.get(name).is_some_and(|device| {
-                    let rates = &device.rates;
-                    rates.receive_bytes_per_second > 0.0
-                        || rates.transmit_bytes_per_second > 0.0
-                        || rates.receive_errors_per_second > 0.0
-                        || rates.transmit_errors_per_second > 0.0
-                        || rates.receive_drops_per_second > 0.0
-                        || rates.transmit_drops_per_second > 0.0
+    let width = devices.keys().map(String::len).max().unwrap_or(0);
+    let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let height = ui.available_height() / shown.len().max(1) as f32 - 2.0 * row;
+    for (name, device) in shown {
+        let (toggle, ..) =
+            CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(name), true)
+                .show_header(ui, |ui| {
+                    let rates = T::SERIES.iter().zip(device.rates());
+                    let rates = rates.map(|((label, color), rate)| {
+                        RichText::new(format!("{label} {:>12}", byte_rate(rate))).color(*color)
+                    });
+                    tokens(
+                        ui,
+                        std::iter::once(format!("{name:<width$}").into()).chain(rates),
+                    );
                 })
-            })
-        {
-            continue;
+                .body(|ui| {
+                    let max = records
+                        .iter()
+                        .filter_map(|record| Some(record.value.get(name)?.rates()))
+                        .flatten()
+                        .fold(0.0, f64::max);
+                    let (scale, unit) = byte_unit(max);
+                    let traces = (0..2).map(|index| {
+                        let (label, color) = T::SERIES[index];
+                        trace(records, label, color, |devices| {
+                            Some(devices.get(name)?.rates()[index] / scale)
+                        })
+                    });
+                    let height = height.clamp(80.0, 180.0);
+                    chart(ui, name, traces.collect(), unit, 1.0, height);
+                    tokens(ui, device.details(ui.visuals().warn_fg_color));
+                });
+        // The arrow is the focusable toggle; show keyboard focus like other widgets do.
+        if toggle.has_focus() {
+            let stroke = ui.visuals().widgets.active.bg_stroke;
+            ui.painter()
+                .rect_stroke(toggle.rect, 2.0, stroke, StrokeKind::Outside);
         }
-        let rates = &device.rates;
-        let title = format!(
-            "{name}   RX {}   TX {}",
-            byte_rate(rates.receive_bytes_per_second),
-            byte_rate(rates.transmit_bytes_per_second)
-        );
-        eframe::egui::CollapsingHeader::new(title)
-            .id_salt(name)
-            .default_open(
-                rates.receive_bytes_per_second > 0.0 || rates.transmit_bytes_per_second > 0.0,
-            )
-            .show(ui, |ui| {
-                chart(
-                    ui,
-                    name,
-                    vec![
-                        trace(records, "Receive", RECEIVE, |devices| {
-                            Some(devices.get(name)?.rates.receive_bytes_per_second / 1024.0)
-                        }),
-                        trace(records, "Transmit", TRANSMIT, |devices| {
-                            Some(devices.get(name)?.rates.transmit_bytes_per_second / 1024.0)
-                        }),
-                    ],
-                    "KiB/s",
-                    false,
-                    90.0,
-                );
-                let errors = rates.receive_errors_per_second + rates.transmit_errors_per_second;
-                let drops = rates.receive_drops_per_second + rates.transmit_drops_per_second;
-                let text = format!(
-                    "Errors RX/TX {:.1}/{:.1} /s   Drops RX/TX {:.1}/{:.1} /s",
-                    rates.receive_errors_per_second,
-                    rates.transmit_errors_per_second,
-                    rates.receive_drops_per_second,
-                    rates.transmit_drops_per_second
-                );
-                if errors > 0.0 || drops > 0.0 {
-                    ui.colored_label(ui.visuals().warn_fg_color, text);
-                } else {
-                    ui.weak(text);
-                }
-            });
-    }
-}
-
-pub(super) fn disks(
-    ui: &mut Ui,
-    devices: &BTreeMap<String, DiskIo>,
-    records: &Records<BTreeMap<String, DiskIo>>,
-    show_idle: bool,
-) {
-    if devices.is_empty() {
-        ui.label("No disk devices in this sample");
-    }
-    ui.weak("Devices and partitions are shown separately; rates are not summed.");
-    if !show_idle {
-        ui.weak("Idle devices hidden until active. Enable Show idle devices to see all.");
-    }
-    for (name, device) in devices {
-        if !show_idle
-            && !records.iter().any(|record| {
-                record.value.get(name).is_some_and(|device| {
-                    device.rates.read_operations_per_second > 0.0
-                        || device.rates.write_operations_per_second > 0.0
-                        || device.outstanding_requests > 0
-                })
-            })
-        {
-            continue;
-        }
-        let rates = &device.rates;
-        let title = format!(
-            "{name}   R {}   W {}",
-            byte_rate(rates.read_bytes_per_second),
-            byte_rate(rates.write_bytes_per_second)
-        );
-        eframe::egui::CollapsingHeader::new(title)
-            .id_salt(name)
-            .default_open(rates.read_bytes_per_second > 0.0 || rates.write_bytes_per_second > 0.0)
-            .show(ui, |ui| {
-                chart(
-                    ui,
-                    name,
-                    vec![
-                        trace(records, "Read", RECEIVE, |devices| {
-                            Some(devices.get(name)?.rates.read_bytes_per_second / 1024.0)
-                        }),
-                        trace(records, "Write", TRANSMIT, |devices| {
-                            Some(devices.get(name)?.rates.write_bytes_per_second / 1024.0)
-                        }),
-                    ],
-                    "KiB/s",
-                    false,
-                    90.0,
-                );
-                ui.label(format!(
-                    "IOPS R/W {:.1}/{:.1}   In flight {}",
-                    rates.read_operations_per_second,
-                    rates.write_operations_per_second,
-                    device.outstanding_requests
-                ));
-                let latency = |latency: Option<f64>| {
-                    latency
-                        .map(|ms| format!("{ms:.2} ms"))
-                        .unwrap_or_else(|| "n/a".into())
-                };
-                ui.weak(format!(
-                    "Latency R {}   W {}",
-                    latency(rates.average_read_latency_ms),
-                    latency(rates.average_write_latency_ms)
-                ));
-            });
     }
 }
