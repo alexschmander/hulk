@@ -322,7 +322,7 @@ pub(super) fn network(
         }
         let rates = &device.rates;
         let title = format!(
-            "{name}   ↓ {}   ↑ {}",
+            "{name}   RX {}   TX {}",
             byte_rate(rates.receive_bytes_per_second),
             byte_rate(rates.transmit_bytes_per_second)
         );

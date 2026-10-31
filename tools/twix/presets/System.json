@@ -136,7 +136,7 @@
               ],
               "dir": "Vertical",
               "shares": {
-                "shares": {}
+                "shares": {"11": 0.4, "12": 0.6}
               }
             }
           }
