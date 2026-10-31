@@ -45,12 +45,13 @@ Twix itself parses `--simulator` and selects the isolated transport, regardless 
 To install the same executable through Pepsi:
 
 ```sh
-export MUJOCO_DOWNLOAD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mujoco-rs"
 pepsi install twix --features simulator
 twix --simulator /hulks/1
 ```
 
-`MUJOCO_DOWNLOAD_DIR` selects the build-time cache when MuJoCo is not installed through pkg-config.
+Pepsi's native local builds and the repository launcher choose the MuJoCo download cache automatically.
+On Linux it defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/mujoco-rs`.
+Set `MUJOCO_DOWNLOAD_DIR` only to override that location.
 Keep that cache after installation. On Linux, Twix records the selected MuJoCo library directory in its runtime search path, so the installed executable does not need the shell launcher or `LD_LIBRARY_PATH`.
 The ONNX Runtime library, robot assets, parameters, and models are still required as described above and in **Parameter and model paths**.
 Robot N uses global Zenoh prefix `hulk_simulator/hulks/N` and ROS namespace `/hulks/N`, including raw Booster topics, discovery, parameters and RPCs.
