@@ -81,7 +81,8 @@ Choose a panel from the **+** picker.
 
 Open **+ → System** under the bundled layouts for a btop-style dashboard with one view per topic:
 **System** (`system/tegrastats`), **Network** (`system/network_io`), and **Disks** (`system/disk_io`).
-Under panel types, **System** opens an individual monitor; its view selector chooses what to display.
+Choose **System** marked **Preset** from the outer tab bar's **+** picker to open the complete layout in a new group.
+Under panel types, **System metrics** opens an individual monitor; its view selector chooses what to display.
 All sources use the selected namespace, so the preset works across robots without editing topic names.
 For robot 42 on Ethernet, run `./twix /42 --router tcp/10.1.24.42:7447`.
 

@@ -60,14 +60,14 @@ impl PresetUi {
             choices.push(("Blank workspace".into(), Source::Blank));
         }
         choices.extend(
-            PanelKind::registered()
-                .iter()
-                .map(|&kind| (kind.display_name().to_owned(), Source::Panel(kind))),
-        );
-        choices.extend(
             presets::PROVIDED
                 .iter()
                 .map(|&(title, saved)| (title.to_owned(), Source::Provided(saved))),
+        );
+        choices.extend(
+            PanelKind::registered()
+                .iter()
+                .map(|&kind| (kind.display_name().to_owned(), Source::Panel(kind))),
         );
         if reset {
             self.user_presets = None;
@@ -263,7 +263,7 @@ fn show_choices(
                 let (label, icon) = match source {
                     Source::Blank => ("", icons::ICON_DASHBOARD_2.codepoint),
                     Source::Panel(kind) => ("Panel", kind.icon()),
-                    Source::Provided(_) => ("Provided", icons::ICON_DASHBOARD_2.codepoint),
+                    Source::Provided(_) => ("Preset", icons::ICON_DASHBOARD_2.codepoint),
                     Source::User(_) => ("Yours", icons::ICON_DASHBOARD_2.codepoint),
                 };
                 let (_, row) = ui.allocate_space(vec2(ui.available_width(), 28.0));
@@ -357,6 +357,68 @@ mod tests {
             },
             show,
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn selecting_system_preset_opens_a_fresh_group_with_all_views() {
+        use std::sync::Arc;
+
+        use egui_tiles::{Container, Tile};
+
+        use crate::{backend::RobotBackend, layout::TwixLayout};
+
+        let backend = Arc::new(
+            RobotBackend::new(tokio::runtime::Handle::current(), None, "/".into())
+                .await
+                .unwrap(),
+        );
+        let context = context();
+        let mut layout = TwixLayout::new_session(&context, &backend);
+        let tabs = layout.tree.root.unwrap();
+        let Some(Tile::Container(Container::Tabs(groups))) = layout.tree.tiles.get(tabs) else {
+            panic!("new session has an outer tab group");
+        };
+        let original_group = groups.children[0];
+        let original = layout.snapshot_subtree(original_group).unwrap();
+        let mut picker = PresetUi::default();
+        let id = Id::new("system-preset-picker");
+        for count in 2..=3 {
+            for (events, reset) in [
+                (vec![], true),
+                (vec![egui::Event::Text("System".into())], false),
+            ] {
+                frame(&context, events, |ui| {
+                    assert!(picker.picker(ui, id, tabs, true, reset).is_none());
+                });
+            }
+            let mut selected = None;
+            frame(&context, vec![key(Key::Enter)], |ui| {
+                selected = picker.picker(ui, id, tabs, true, false);
+            });
+            let request = selected.expect("System search selects the bundled preset");
+            assert!(matches!(&request, LayoutRequest::Import { title, .. } if title == "System"));
+            layout.apply_request(request, &backend, &context);
+            let Some(Tile::Container(Container::Tabs(groups))) = layout.tree.tiles.get(tabs) else {
+                panic!("the outer tab group must remain intact");
+            };
+            assert_eq!(groups.children.len(), count);
+            let group = groups.active.unwrap();
+            assert_eq!(layout.title(group), "System");
+            let saved = layout.snapshot_subtree(group).unwrap();
+            let mut views: Vec<_> = saved["tree"]["tiles"]["tiles"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter_map(|tile| tile.get("Pane"))
+                .map(|pane| {
+                    assert_eq!(pane["kind"], "system");
+                    pane["state"]["view"].as_str().unwrap()
+                })
+                .collect();
+            views.sort();
+            assert_eq!(views, ["Disks", "Network", "System"]);
+        }
+        assert_eq!(layout.snapshot_subtree(original_group).unwrap(), original);
     }
 
     #[test]

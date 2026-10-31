@@ -126,7 +126,7 @@ where
 
 impl Panel for SystemPanel {
     const STORAGE_ID: &'static str = "system";
-    const DISPLAY_NAME: &'static str = "System";
+    const DISPLAY_NAME: &'static str = "System metrics";
     const ICON: &'static str = egui_material_icons::icons::ICON_MONITOR_HEART.codepoint;
 
     fn new(context: PanelCreationContext<'_>) -> Self {
