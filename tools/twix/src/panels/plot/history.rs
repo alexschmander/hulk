@@ -11,7 +11,7 @@ use ros_z_debug::{
 
 use crate::repaint::{ObservationContext, ObservationRepaint, RepaintOnUpdates};
 
-use super::status::format_topic_observation_status;
+use super::super::observation_status::format_topic_observation_status;
 
 type Records = Arc<[Arc<SampleRecord<DynamicPayload>>]>;
 

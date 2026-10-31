@@ -2,8 +2,10 @@ mod audio;
 mod behavior_tree;
 mod image;
 mod map;
+mod observation_status;
 mod parameter;
 mod plot;
+mod system;
 mod text;
 mod timeline;
 
@@ -13,5 +15,6 @@ pub use image::ImagePanel;
 pub use map::MapPanel;
 pub use parameter::ParameterPanel;
 pub use plot::PlotPanel;
+pub use system::SystemPanel;
 pub use text::TextPanel;
 pub use timeline::TimelinePanel;

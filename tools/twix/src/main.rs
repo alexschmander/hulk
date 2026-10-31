@@ -20,8 +20,8 @@ use hulk_widgets::CompletionEdit;
 use layout::{FocusDirection, TwixLayout};
 use log::{error, warn};
 use panels::{
-    AudioPanel, BehaviorTreePanel, ImagePanel, MapPanel, ParameterPanel, PlotPanel, TextPanel,
-    TimelinePanel,
+    AudioPanel, BehaviorTreePanel, ImagePanel, MapPanel, ParameterPanel, PlotPanel, SystemPanel,
+    TextPanel, TimelinePanel,
 };
 use repository::{Repository, inspect_version::check_for_update};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -50,6 +50,7 @@ impl_selectable_panel!(
     AudioPanel,
     BehaviorTreePanel,
     PlotPanel,
+    SystemPanel,
     TimelinePanel
 );
 

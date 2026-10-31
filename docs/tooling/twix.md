@@ -39,7 +39,7 @@ Click a tab to switch, or right-click its title to rename it.
 The close icon or middle-click closes a panel or an entire group immediately, discarding its current state.
 Closing the final panel leaves a fresh Text panel.
 
-The **+** picker contains bundled layouts (**Overview**, **Vision**, **Parameters**) and your saved layouts.
+The **+** picker contains bundled layouts (**Overview**, **Vision**, **Parameters**, **System**) and your saved layouts.
 Opening a preset inserts a fresh copy into the chosen tab group, leaving existing panels intact.
 Changes affect only that working copy.
 Right-click any panel or group and choose **Save as preset…** to save that subtree; an existing name changes the action to **Overwrite**.
@@ -74,7 +74,28 @@ Choose a panel from the **+** picker.
 | Parameter | Discover nodes with remote parameter services, display snapshots or selected paths as JSON, and write selected paths to active layers with revision checks. |
 | Audio | Display microphone spectra and a waterfall for the selected channel, defaulting to `audio_spectrums`. |
 | [Plot](#plot-panel) | Compare numeric topics or fields over time. |
+| [System](#system-monitor) | Monitor CPU, GPU, memory, temperatures, power, disk I/O, and network I/O from the robot's `system/` topics. |
 | [Timeline](#mcap-timeline) | Seek and play back an MCAP recording. |
+
+## System monitor
+
+Open **+ → System** under the bundled layouts for a btop-style dashboard.
+It contains CPU/GPU, memory, temperatures/power, network, and disk views.
+Under panel types, **System** opens an individual monitor; its view selector chooses what to display.
+All sources use the selected namespace, so the preset works across robots without editing topic names.
+For robot 42 on Ethernet, run `./twix /42 --router tcp/10.1.24.42:7447`.
+
+The monitor reads `system/tegrastats`, `system/network_io`, and `system/disk_io`.
+It shows per-core utilization and frequency, online CPU average, GPU utilization, RAM/swap usage, sensor temperatures, and current/average power per rail.
+Graphs retain 60 seconds of history; missing values and sample gaps break the lines.
+Unavailable readings and offline cores are labeled, and live views warn after two seconds without a new sample.
+
+Network views show receive/transmit rates, errors, and drops for each interface.
+Disk views show read/write rates, IOPS, outstanding requests, and average completed-operation latency.
+Expand a device to see its graph and details.
+Devices active during the retained history appear automatically; **Show idle devices** includes the rest.
+Disk and partition rates are shown separately and are never added together.
+These topics do not provide process lists or filesystem capacity.
 
 ## Topic and field selection
 

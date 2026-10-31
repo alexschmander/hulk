@@ -1,5 +1,4 @@
 mod history;
-mod status;
 
 use std::time::Duration;
 
