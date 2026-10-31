@@ -588,7 +588,7 @@ fn launch_hint(ui: &mut eframe::egui::Ui, reason: &str) {
         ui.label(RichText::new(reason).strong());
         ui.add_space(4.0);
         ui.weak("Restart Twix with");
-        ui.code("./twix --simulator /1");
+        ui.code("twix --simulator /hulks/1");
     });
 }
 
@@ -605,6 +605,7 @@ impl crate::panel::Panel for SimulatorPanel {
     }
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _: crate::panel::PanelUiContext<'_>) {
         launch_hint(ui, "This Twix build has no simulator.");
+        ui.code("pepsi install twix --features simulator");
     }
     fn save(&self) -> serde_json::Value {
         self.0.clone()

@@ -40,7 +40,19 @@ Set `ORT_DYLIB_PATH` to your ONNX Runtime library if it is not available in the 
 ./twix --simulator /hulks/1
 ```
 
-The launcher enables Twix's optional `simulator` Cargo feature and configures its MuJoCo library path.
+The repository launcher builds Twix with its optional `simulator` Cargo feature and forwards every argument unchanged.
+Twix itself parses `--simulator` and selects the isolated transport, regardless of the flag's position.
+To install the same executable through Pepsi:
+
+```sh
+export MUJOCO_DOWNLOAD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mujoco-rs"
+pepsi install twix --features simulator
+twix --simulator /hulks/1
+```
+
+`MUJOCO_DOWNLOAD_DIR` selects the build-time cache when MuJoCo is not installed through pkg-config.
+Keep that cache after installation. On Linux, Twix records the selected MuJoCo library directory in its runtime search path, so the installed executable does not need the shell launcher or `LD_LIBRARY_PATH`.
+The ONNX Runtime library, robot assets, parameters, and models are still required as described above and in **Parameter and model paths**.
 Robot N uses global Zenoh prefix `hulk_simulator/hulks/N` and ROS namespace `/hulks/N`, including raw Booster topics, discovery, parameters and RPCs.
 The top-left namespace selector switches Twix and simulator body controls between `/hulks/1` through `/hulks/5` and `/opponents/1` through `/opponents/5`.
 The namespace selector autocompletes live graph namespaces, including robots discovered across the simulator scopes.
@@ -48,8 +60,8 @@ Type to filter, use arrow keys and Enter or click a suggestion; Ctrl+Space opens
 Team names identify namespaces; GameController uses team 24 for HULKs and team 5 for opponents.
 Selecting an absent player dims its name and disables its body controls.
 Without `--router`, simulator mode starts a private loopback router automatically.
-Ordinary Twix builds keep their existing dependencies.
-With Cargo directly, enable `--features simulator`, pass `--zenoh-namespace hulk_simulator`, and set the MuJoCo library path yourself.
+With Cargo directly, enable `--features simulator` and pass the executable's `--simulator` flag after Cargo's `--` separator.
+Without that Cargo feature, `twix --simulator` explains how to reinstall with simulator support.
 The current Nix Twix package builds ordinary Twix; it does not bundle the simulator.
 
 Open the **Simulator** preset or add a **Simulator** panel.

@@ -24,6 +24,12 @@ User presets are retained.
 Twix checks the local repository version at startup and warns when the running binary is older than the checked-out `tools/twix/Cargo.toml` version.
 Use `--repository-root <path>` to point that check at a different checkout.
 
+For the simulator, build or install Twix with `--features simulator`, then run
+`twix --simulator /hulks/1`. The executable selects the private simulator transport;
+the repository launcher forwards the same arguments without interpreting them.
+See the [simulator setup and installation](../../tools/simulate/README.md#run) for
+MuJoCo, ONNX Runtime, and model requirements.
+
 ## Workspaces and presets
 
 Workspaces are named groups in one shared docking layout.
