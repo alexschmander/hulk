@@ -46,9 +46,6 @@ fn helpers_keep_missing_metrics_unavailable_and_scale_readably() {
     assert_eq!(paint::nice_step(11.7), 20.0);
     assert_eq!(paint::nice_step(50.3), 100.0);
     assert_eq!(paint::nice_step(0.0), f64::INFINITY);
-    // Views saved before the tegrastats views were merged open the merged view.
-    let legacy: Settings = serde_json::from_str(r#"{"view":"Thermals"}"#).unwrap();
-    assert!(legacy.view == View::System);
 }
 
 /// Renders the panel and returns all painted text.
@@ -58,35 +55,46 @@ fn render(
     context: &Context,
     width: f32,
 ) -> String {
-    let output = context.run_ui(
-        RawInput {
-            screen_rect: Some(Rect::from_min_size(
-                Default::default(),
-                Vec2::new(width, 600.0),
-            )),
-            ..Default::default()
-        },
-        |root| {
-            let ctx = root.ctx().clone();
-            CentralPanel::default().show(root, |ui| {
-                let context = || PanelUiContext {
-                    backend,
-                    egui_context: &ctx,
-                };
-                panel.header_ui(ui, context());
-                panel.ui(ui, context());
-            });
-        },
-    );
-    output
-        .shapes
-        .iter()
-        .filter_map(|shape| match &shape.shape {
-            Shape::Text(text) => Some(text.galley.text()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut text = String::new();
+    for frame in 0..3 {
+        let output = context.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    Default::default(),
+                    Vec2::new(width, 600.0),
+                )),
+                ..Default::default()
+            },
+            |root| {
+                let ctx = root.ctx().clone();
+                CentralPanel::default().show(root, |ui| {
+                    let context = || PanelUiContext {
+                        backend,
+                        egui_context: &ctx,
+                    };
+                    let right = ui.max_rect().right();
+                    panel.header_ui(ui, context());
+                    panel.ui(ui, context());
+                    assert!(
+                        frame < 2 || ui.min_rect().right() <= right + 1.0,
+                        "{:?} overflows at {width} px: right {}, bound {right}",
+                        panel.settings.view,
+                        ui.min_rect().right()
+                    );
+                });
+            },
+        );
+        text = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    text
 }
 
 fn panel(

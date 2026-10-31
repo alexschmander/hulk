@@ -94,6 +94,7 @@ Network views show receive/transmit rates for each interface, plus errors and dr
 Disk views show read/write rates, IOPS, outstanding requests, and average completed-operation latency.
 Rate charts use the unit of their largest value; the coloured rates in each device header identify the lines.
 Devices active during the retained history appear automatically; **Show idle devices** includes the rest.
+Idle devices stay compact, with graphs reserved for devices active in the retained history.
 Disk and partition rates are shown separately and are never added together.
 These topics do not provide process lists or filesystem capacity.
 

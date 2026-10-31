@@ -29,9 +29,7 @@ type Records<T> = Vec<Arc<SampleRecord<T>>>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum View {
-    // Earlier versions split the tegrastats topic into three views.
     #[default]
-    #[serde(alias = "Compute", alias = "Memory", alias = "Thermals")]
     System,
     Network,
     Disks,

@@ -26,6 +26,7 @@ fn trace<T>(
     value: impl Fn(&T) -> Option<f64>,
 ) -> Trace {
     let mut segments: Vec<Vec<[f64; 2]>> = Vec::new();
+    let end = records.last().map(|record| record.effective_time);
     let mut previous = None;
     for record in records {
         let time = record.effective_time;
@@ -38,8 +39,8 @@ fn trace<T>(
             segments.push(Vec::new());
         }
         previous = Some(time);
-        let age = records[records.len() - 1]
-            .effective_time
+        let age = end
+            .expect("the current record belongs to a nonempty history")
             .duration_since(time);
         segments
             .last_mut()
@@ -77,6 +78,7 @@ fn chart(ui: &mut Ui, id: &str, traces: Vec<Trace>, unit: &str, top: f64, height
         // Steps of at least 24 px give short charts two or more fully visible tick labels.
         .custom_y_axes(vec![
             AxisHints::new_y()
+                .min_thickness(48.0)
                 .label(unit)
                 .label_spacing(16.0..=20.0)
                 // Enough decimals for the step: 0.5 steps need one, which egui_plot rounds away.
@@ -88,6 +90,9 @@ fn chart(ui: &mut Ui, id: &str, traces: Vec<Trace>, unit: &str, top: f64, height
         .y_grid_spacer(uniform_grid_spacer(|input| {
             [nice_step(3.0 * input.base_step_size); 3]
         }))
+        .x_grid_spacer(uniform_grid_spacer(|input| {
+            [nice_step(10.0 * input.base_step_size); 3]
+        }))
         .x_axis_formatter(|mark, _| format!("{:.0}s", mark.value))
         .label_formatter(|hover| match hover {
             HoverPosition::NearDataPoint {
@@ -95,7 +100,7 @@ fn chart(ui: &mut Ui, id: &str, traces: Vec<Trace>, unit: &str, top: f64, height
                 position,
                 ..
             } => Some(format!(
-                "{plot_name}: {:.1} {unit} at {:.1}s",
+                "{plot_name}\n{:.1} {unit}\nat {:.1}s",
                 position.y, position.x
             )),
             HoverPosition::Elsewhere { .. } => None,
@@ -188,9 +193,10 @@ pub(super) fn system(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrasta
     let chart_height = ((ui.available_height() - text_rows as f32 * row) / 2.0).max(100.0);
 
     // Values sit beside, not on, the fill; the last column stretches the gauges to the edge.
+    let right = ui.max_rect().right();
     Grid::new("meters").num_columns(3).show(ui, |ui| {
         for (name, percent, detail, color) in meters {
-            ui.label(name);
+            ui.monospace(name);
             ui.monospace(match percent {
                 Some(percent) => format!("{percent:>3.0}% {detail}"),
                 None if detail.is_empty() => "unavailable".into(),
@@ -199,6 +205,7 @@ pub(super) fn system(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrasta
             let fraction = (percent.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0) as f32;
             ui.add(
                 ProgressBar::new(fraction)
+                    .desired_width((right - ui.cursor().left()).max(0.0))
                     .desired_height(6.0)
                     .corner_radius(0)
                     .fill(color),
@@ -222,6 +229,7 @@ pub(super) fn system(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrasta
 
     ui.separator();
     let [text_color, hottest_color] = [ui.visuals().text_color(), ui.visuals().strong_text_color()];
+    let peak = hottest(stats);
     let width = stats.temperatures.iter().map(|sensor| sensor.name.len());
     let width = width.max().unwrap_or(0);
     tokens(
@@ -229,7 +237,7 @@ pub(super) fn system(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrasta
         stats.temperatures.iter().map(|sensor| {
             let text = format!("{:<width$} {:>5.1} °C", sensor.name, sensor.celsius);
             // The plotted hottest sensor shares the line's colour.
-            let hottest = Some(f64::from(sensor.celsius)) == hottest(stats);
+            let hottest = Some(f64::from(sensor.celsius)) == peak;
             RichText::new(text).color(if hottest { hottest_color } else { text_color })
         }),
     );
@@ -244,16 +252,17 @@ pub(super) fn system(ui: &mut Ui, stats: &Tegrastats, records: &Records<Tegrasta
     if stats.power.is_empty() {
         ui.label("Power readings unavailable");
     }
-    let width = stats.power.iter().map(|rail| rail.name.len()).max();
-    for rail in &stats.power {
-        let [now, average] = [rail.current_milliwatts, rail.average_milliwatts]
-            .map(|milliwatts| f64::from(milliwatts) / 1000.0);
-        let name = format!("{:<1$} {now:>6.2} W", rail.name, width.unwrap_or(0));
-        tokens(
-            ui,
-            [name, format!("average {average:>6.2} W")].map(RichText::new),
-        );
-    }
+    Grid::new("power").num_columns(3).show(ui, |ui| {
+        for rail in &stats.power {
+            let [now, average] = [rail.current_milliwatts, rail.average_milliwatts]
+                .map(|milliwatts| f64::from(milliwatts) / 1000.0);
+            ui.monospace(&rail.name);
+            ui.monospace(format!("{now:>6.2} W"))
+                .on_hover_text("Current power");
+            ui.monospace(format!("{average:>6.2} W avg"));
+            ui.end_row();
+        }
+    });
 }
 
 pub(super) fn byte_unit(value: f64) -> (f64, &'static str) {
@@ -293,7 +302,13 @@ impl Device for NetworkIo {
     }
 
     fn active(&self) -> bool {
-        self.rates().iter().sum::<f64>() > 0.0 || !self.details(AMBER).is_empty()
+        let r = &self.rates;
+        self.rates().iter().sum::<f64>() > 0.0
+            || r.receive_errors_per_second
+                + r.transmit_errors_per_second
+                + r.receive_drops_per_second
+                + r.transmit_drops_per_second
+                > 0.0
     }
 
     /// Errors and drops, only when there are any.
@@ -399,6 +414,9 @@ pub(super) fn devices<T: Device>(
                     );
                 })
                 .body(|ui| {
+                    if !active(name) {
+                        return;
+                    }
                     let max = records
                         .iter()
                         .filter_map(|record| Some(record.value.get(name)?.rates()))
