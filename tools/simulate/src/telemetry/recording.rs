@@ -4,7 +4,7 @@ use color_eyre::{
     eyre::{ensure, eyre},
 };
 use ros_z::dynamic::schema_service::LocalSchemaCapture;
-use ros_z::message::{SerdeCdrCodec, WireEncoder};
+use ros_z::message::{CdrCodec, WireEncoder};
 use ros_z::{attachment::Attachment, prelude::*, time::Clock};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -449,7 +449,7 @@ fn write(
                     log_time: envelope.simulation_time,
                     publish_time: envelope.simulation_time,
                 },
-                &SerdeCdrCodec::<Receipt>::serialize(&receipt)?,
+                &CdrCodec::<Receipt>::serialize(&receipt)?,
             )?;
         }
         writer.finish()?;

@@ -8,7 +8,7 @@ use color_eyre::{
     Result,
     eyre::{ensure, eyre},
 };
-use ros_z::message::{SerdeCdrCodec, WireDecoder};
+use ros_z::message::{CdrCodec, WireDecoder};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -127,7 +127,7 @@ fn consume<'a>(
 ) -> Result<()> {
     if message.channel.topic == "_recording/receipt" {
         if let Some(data) = pending.take() {
-            let receipt: Receipt = SerdeCdrCodec::deserialize(&message.data)?;
+            let receipt: Receipt = CdrCodec::deserialize(&message.data)?;
             ensure!(
                 receipt.channel_id == data.channel.id
                     && message.log_time == data.log_time
@@ -368,7 +368,7 @@ mod tests {
                         log_time: time,
                         publish_time: time,
                     },
-                    &SerdeCdrCodec::serialize(&receipt).unwrap(),
+                    &CdrCodec::serialize(&receipt).unwrap(),
                 )
                 .unwrap();
         }

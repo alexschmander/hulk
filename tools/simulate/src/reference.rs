@@ -22,6 +22,7 @@ mod demand_tests {
     static SERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(serde::Deserialize, ros_z::Message)]
+    #[message(serde)]
     struct Counted {
         value: u64,
     }
