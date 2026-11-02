@@ -223,7 +223,7 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
             .find(|m| m.channel.topic == "optional")
             .unwrap();
         assert_eq!(
-            ros_z::message::SerdeCdrCodec::<Option<u32>>::deserialize(&optional.data).unwrap(),
+            ros_z::message::CdrCodec::<Option<u32>>::deserialize(&optional.data).unwrap(),
             Some(17)
         );
         let paused_input = messages
@@ -254,10 +254,8 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
             .iter()
             .filter(|message| message.channel.topic == "_recording/receipt")
             .map(|message| {
-                ros_z::message::SerdeCdrCodec::<super::recording::Receipt>::deserialize(
-                    &message.data,
-                )
-                .unwrap()
+                ros_z::message::CdrCodec::<super::recording::Receipt>::deserialize(&message.data)
+                    .unwrap()
             })
             .collect();
         assert_eq!(receipts.len() * 2, messages.len());
@@ -385,7 +383,7 @@ async fn checkpoint_is_readable_while_recording_continues_and_replay_spans_segme
             if sample.channel.topic == "checkpoint_value" {
                 values.push((
                     sample.log_time,
-                    ros_z::message::SerdeCdrCodec::<u64>::deserialize(&sample.data).unwrap(),
+                    ros_z::message::CdrCodec::<u64>::deserialize(&sample.data).unwrap(),
                 ));
             }
         }

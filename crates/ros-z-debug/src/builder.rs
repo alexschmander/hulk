@@ -57,6 +57,12 @@ impl CachedSubscriptionBuilder {
         })
     }
 
+    /// Restrict live and retained samples to one publisher identity.
+    pub fn publisher(mut self, publisher: ros_z::attachment::EndpointGlobalId) -> Self {
+        self.publisher = Some(publisher);
+        self
+    }
+
     /// Configure how many samples the handle retains.
     pub fn retention(mut self, retention: RetentionPolicy) -> Self {
         self.policy = self.policy.with_retention(retention);
@@ -147,6 +153,15 @@ impl CachedSubscriptionBuilder {
         if let Some(queue_capacity) = policy.subscriber_queue_capacity() {
             subscriber_builder = subscriber_builder.queue_capacity(queue_capacity);
         }
+        if let Some(publisher) = publisher {
+            subscriber_builder =
+                subscriber_builder
+                    .publisher(publisher)
+                    .qos(ros_z::qos::QosProfile {
+                        durability: ros_z::qos::QosDurability::TransientLocal,
+                        ..policy.subscriber_qos().unwrap_or_default()
+                    });
+        }
         let subscriber = subscriber_builder
             .queue_overflow_reporting(policy.queue_overflow_reporting())
             .build()
@@ -211,6 +226,15 @@ impl CachedSubscriptionBuilder {
             .qos(subscriber_qos(&node, &resolved_topic, policy));
         if let Some(queue_capacity) = policy.subscriber_queue_capacity() {
             subscriber_builder = subscriber_builder.queue_capacity(queue_capacity);
+        }
+        if let Some(publisher) = publisher {
+            subscriber_builder =
+                subscriber_builder
+                    .publisher(publisher)
+                    .qos(ros_z::qos::QosProfile {
+                        durability: ros_z::qos::QosDurability::TransientLocal,
+                        ..policy.subscriber_qos().unwrap_or_default()
+                    });
         }
         let subscriber = subscriber_builder
             .queue_overflow_reporting(policy.queue_overflow_reporting())

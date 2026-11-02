@@ -82,6 +82,7 @@ mod history;
 mod observation;
 mod policy;
 pub mod query;
+pub mod replay;
 mod retention;
 mod sample;
 mod status;
