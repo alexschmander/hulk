@@ -43,7 +43,10 @@ pub struct SolveDiagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ros_z::message::{SerdeCdrCodec, WireDecoder, WireEncoder};
+    use ros_z::{
+        CdrCodec,
+        message::{WireDecoder, WireEncoder},
+    };
 
     #[test]
     fn calibration_diagnostics_have_a_schema_and_round_trip() {
@@ -55,8 +58,8 @@ mod tests {
                 std::array::from_fn(|c| if r == c { 0.04 } else { 0.001 })
             }),
         };
-        let bytes = SerdeCdrCodec::<ImuBiasEstimate>::serialize(&value).unwrap();
-        let decoded = SerdeCdrCodec::<ImuBiasEstimate>::deserialize(&bytes).unwrap();
+        let bytes = CdrCodec::<ImuBiasEstimate>::serialize(&value).unwrap();
+        let decoded = CdrCodec::<ImuBiasEstimate>::deserialize(&bytes).unwrap();
         assert_eq!(decoded.accelerometer, value.accelerometer);
         assert_eq!(decoded.covariance, value.covariance);
     }

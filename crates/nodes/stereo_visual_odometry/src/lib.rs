@@ -27,7 +27,7 @@ use nalgebra as na;
 use coordinate_systems::Camera;
 use linear_algebra::Point3;
 use ros_z::prelude::*;
-use ros_z::qos::QosDurability;
+use ros_z::qos::{QosDurability, QosHistory};
 use types::{
     stereo_camera_info::StereoCameraInfo, stereo_image_pair::StereoImagePair,
     visual_odometry::VisualOdometer,
@@ -55,6 +55,10 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
 
     let stereo_image_pair_sub = node
         .subscriber::<StereoImagePair>("inputs/stereo_image_pair")
+        .qos(QosProfile {
+            history: QosHistory::from_depth(1),
+            ..Default::default()
+        })
         .build()
         .await?;
 

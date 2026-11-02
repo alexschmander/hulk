@@ -23,10 +23,7 @@ use mcap::{
     records::Record,
     sans_io::{LinearReadEvent, LinearReader},
 };
-use ros_z::{
-    message::{SerdeCdrCodec, WireDecoder},
-    time::Time,
-};
+use ros_z::{CdrCodec, message::WireDecoder, time::Time};
 use types::{
     camera_geometry::{CameraGeometry, interpolate_camera_geometry},
     field_dimensions::FieldDimensions,
@@ -141,7 +138,7 @@ fn main() -> Result<()> {
                         .ok_or_else(|| eyre!("unknown MCAP channel {}", header.channel_id))?;
                     let event = match topic.as_str() {
                         "field_dimensions" => {
-                            let dimensions = SerdeCdrCodec::<FieldDimensions>::deserialize(&data)?;
+                            let dimensions = CdrCodec::<FieldDimensions>::deserialize(&data)?;
                             ensure!(
                                 field
                                     .as_ref()
@@ -153,29 +150,29 @@ fn main() -> Result<()> {
                         }
                         "inputs/low_state" => Some(Event::Imu(
                             Time::from_nanos(header.publish_time as i64),
-                            SerdeCdrCodec::<LowState>::deserialize(&data)?.imu_state,
+                            CdrCodec::<LowState>::deserialize(&data)?.imu_state,
                         )),
-                        "robot_kinematics" => Some(Event::Feet(Box::new(SerdeCdrCodec::<
+                        "robot_kinematics" => Some(Event::Feet(Box::new(CdrCodec::<
                             TimeWrapper<RobotKinematics>,
                         >::deserialize(
                             &data
                         )?))),
                         "camera_geometry" => {
                             Some(Event::Camera(
-                                SerdeCdrCodec::<TimeWrapper<CameraGeometry>>::deserialize(&data)?,
+                                CdrCodec::<TimeWrapper<CameraGeometry>>::deserialize(&data)?,
                             ))
                         }
                         "visual_odometry/current_left_camera_to_visual_odometer" => Some(
-                            Event::Vo(SerdeCdrCodec::<VisualOdometer>::deserialize(&data)?),
+                            Event::Vo(CdrCodec::<VisualOdometer>::deserialize(&data)?),
                         ),
-                        "detected_objects" => Some(Event::Objects(SerdeCdrCodec::<
+                        "detected_objects" => Some(Event::Objects(CdrCodec::<
                             TimeWrapper<Vec<Object<RobocupObjectLabel>>>,
                         >::deserialize(
                             &data
                         )?)),
                         "localization/status" => {
                             Some(Event::Reset(
-                                SerdeCdrCodec::<LocalizationStatus>::deserialize(&data)?,
+                                CdrCodec::<LocalizationStatus>::deserialize(&data)?,
                             ))
                         }
                         "debug/solve_diagnostics" => Some(Event::Solve),
