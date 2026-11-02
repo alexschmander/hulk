@@ -69,6 +69,7 @@ pub struct RobotBinding {
     head: usize,
     feet: [usize; 2],
     camera: usize,
+    camera_matrix: CameraMatrix,
     bodies: [usize; 22],
     orientation: usize,
     gyro: usize,
@@ -130,6 +131,26 @@ impl RobotBinding {
         let sensor = |name| -> Result<usize> {
             Ok(model.sensor_adr()[id(MjtObj::mjOBJ_SENSOR, name)?] as usize)
         };
+        let camera = id(MjtObj::mjOBJ_CAMERA, "camera")?;
+        let [width, height] = model.cam_resolution()[camera].map(|v| v as f32);
+        let fovy = (model.cam_fovy()[camera] as f32).to_radians();
+        let focal = height * 0.5 / (fovy * 0.5).tan();
+        // Optics stay fixed until a model rebuild creates a new binding.
+        let image_size = vector![width, height];
+        let intrinsics = projection::intrinsic::Intrinsic::new(
+            nalgebra::vector![focal / width, focal / height].component_mul(&image_size.inner),
+            linear_algebra::point![0.5 * width, 0.5 * height],
+        );
+        // Pose-dependent fields are filled only when observing a physical state.
+        let camera_matrix = CameraMatrix {
+            intrinsics,
+            field_of_view: projection::intrinsic::Intrinsic::calculate_field_of_view(
+                intrinsics.focals,
+                image_size,
+            ),
+            image_size,
+            ..Default::default()
+        };
         Ok(Self {
             bodies: [
                 id(MjtObj::mjOBJ_BODY, "Head_1")?,
@@ -162,7 +183,8 @@ impl RobotBinding {
                 id(MjtObj::mjOBJ_BODY, "left_foot_link")?,
                 id(MjtObj::mjOBJ_BODY, "right_foot_link")?,
             ],
-            camera: id(MjtObj::mjOBJ_CAMERA, "camera")?,
+            camera,
+            camera_matrix,
             orientation: sensor("orientation")?,
             gyro: sensor("angular-velocity")?,
             acceleration: sensor("accelerometer")?,
@@ -284,10 +306,11 @@ impl RobotBinding {
             motor_state_parallel: Vec::new(),
         };
         let robot_to_world = body_pose(data, self.trunk);
+        let world_to_robot = robot_to_world.inverse();
         let head_to_world = body_pose(data, self.head);
         let [left, right] = self.feet.map(|id| data.xpos()[id]);
         let ground_to_world = ground_pose(robot_to_world, left, right);
-        let ground_to_robot = Isometry3::wrap(robot_to_world.inverse() * ground_to_world);
+        let ground_to_robot = Isometry3::wrap(world_to_robot * ground_to_world);
         // MuJoCo camera: right, up, backwards. Projection camera: right, down, forwards.
         let camera_to_world = nalgebra::Isometry3::from_parts(
             Translation3::from(nalgebra::Vector3::from(
@@ -297,20 +320,16 @@ impl RobotBinding {
                 &data.cam_xmat()[self.camera].map(|v| v as f32),
             )) * UnitQuaternion::from_euler_angles(std::f32::consts::PI, 0.0, 0.0),
         );
-        let [width, height] = data.model().cam_resolution()[self.camera].map(|v| v as f32);
-        let fovy = (data.model().cam_fovy()[self.camera] as f32).to_radians();
-        let focal = height * 0.5 / (fovy * 0.5).tan();
-        let camera_matrix = CameraMatrix::from_normalized_focal_and_center(
-            nalgebra::vector![focal / width, focal / height],
-            nalgebra::point![0.5, 0.5],
-            vector![width, height],
-            ground_to_robot,
-            Isometry3::wrap(head_to_world.inverse() * robot_to_world),
-            Isometry3::wrap(camera_to_world.inverse() * head_to_world),
+        let mut camera_matrix = self.camera_matrix.clone();
+        camera_matrix.ground_to_robot = ground_to_robot;
+        camera_matrix.robot_to_head = Isometry3::wrap(head_to_world.inverse() * robot_to_world);
+        camera_matrix.head_to_camera = Isometry3::wrap(camera_to_world.inverse() * head_to_world);
+        camera_matrix.compute_memoized();
+        camera_matrix.horizon = projection::horizon::Horizon::from_parameters(
+            camera_matrix.ground_to_camera,
+            &camera_matrix.intrinsics,
         );
-        let relative = self
-            .bodies
-            .map(|id| robot_to_world.inverse() * body_pose(data, id));
+        let relative = self.bodies.map(|id| world_to_robot * body_pose(data, id));
         let mut kinematics = kinematics::robot_kinematics::RobotKinematics::default();
         kinematics.head.neck_to_robot = Isometry3::wrap(relative[0]);
         kinematics.head.head_to_robot = Isometry3::wrap(relative[1]);
@@ -413,6 +432,58 @@ pub(crate) mod tests {
         let mut data = MjData::new(Box::new(model));
         data.forward();
         data
+    }
+
+    #[test]
+    fn cached_optics_preserve_camera_geometry_across_motion_and_rebinding() {
+        fn compare_camera(binding: &RobotBinding, data: &Data) {
+            let observation = binding.observe(data);
+            let robot = body_pose(data, binding.trunk);
+            let head = body_pose(data, binding.head);
+            let [left, right] = binding.feet.map(|id| data.xpos()[id]);
+            let ground = Isometry3::wrap(robot.inverse() * ground_pose(robot, left, right));
+            let [width, height] = data.model().cam_resolution()[binding.camera].map(|v| v as f32);
+            let fovy = (data.model().cam_fovy()[binding.camera] as f32).to_radians();
+            let focal = height * 0.5 / (fovy * 0.5).tan();
+            let reference = CameraMatrix::from_normalized_focal_and_center(
+                nalgebra::vector![focal / width, focal / height],
+                nalgebra::point![0.5, 0.5],
+                vector![width, height],
+                ground,
+                Isometry3::wrap(head.inverse() * robot),
+                Isometry3::wrap(observation.camera_to_world.inverse() * head),
+            );
+            assert_eq!(observation.camera_matrix, reference);
+            assert_eq!(observation.ground_to_robot, ground);
+        }
+
+        let mut data = model();
+        let binding = RobotBinding::new(&data, "").unwrap();
+        for i in 0..5 {
+            let angle = i as f64 * 0.2;
+            let rotation = UnitQuaternion::from_euler_angles(angle, -angle * 0.5, angle * 2.0);
+            data.qpos_mut()[3..7]
+                .copy_from_slice(&[rotation.w, rotation.i, rotation.j, rotation.k]);
+            for (j, &(q, _, _)) in binding.joints.iter().enumerate() {
+                data.qpos_mut()[q] = angle * ((j % 3) as f64 - 1.0);
+            }
+            data.forward();
+            compare_camera(&binding, &data);
+        }
+
+        // Camera optics can change with a new model. Rebinding must refresh the cache.
+        // These fields do not change the model/data allocation or indexing.
+        unsafe {
+            let model = data.model_mut();
+            model.cam_resolution_mut()[binding.camera] = [800, 600];
+            model.cam_fovy_mut()[binding.camera] = 73.0;
+        }
+        let rebound = RobotBinding::new(&data, "").unwrap();
+        compare_camera(&rebound, &data);
+        assert_ne!(
+            rebound.camera_matrix.intrinsics,
+            binding.camera_matrix.intrinsics
+        );
     }
 
     #[test]

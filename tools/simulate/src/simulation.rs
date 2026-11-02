@@ -314,6 +314,9 @@ impl PhysicsWorker {
             let mut last_frame = None;
             let mut sequence = 0;
             let mut pending_frames = Vec::<(Robotics, crate::observations::Frame)>::new();
+            let mut samples = Vec::new();
+            let mut observations = Vec::new();
+            let mut robot_positions = Vec::new();
             while !stopped.load(Ordering::Acquire) {
                 let started = Instant::now();
                 if let Some(error) = team.poll_controller() {
@@ -326,7 +329,6 @@ impl PhysicsWorker {
                     }
                 }
                 let period;
-                let mut samples = Vec::new();
                 let mut advanced = false;
                 if let Some(mut world) = physics.try_lock() {
                     let rebuilt = generation != Some(world.generation);
@@ -412,9 +414,8 @@ impl PhysicsWorker {
                             referee.update(&mut world, &members, period)?;
                         }
                         contacts.update(world.data());
-                        let observations: Vec<_> = members
-                            .iter()
-                            .filter_map(|member| {
+                        observations.extend(members.iter().enumerate().filter_map(
+                            |(index, member)| {
                                 let mut observation = states
                                     .get(&member.id)?
                                     .binding
@@ -422,9 +423,9 @@ impl PhysicsWorker {
                                 if !running {
                                     observation.stationary();
                                 }
-                                Some((member, observation))
-                            })
-                            .collect();
+                                Some((index, observation))
+                            },
+                        ));
                         let frame_due = rebuilt
                             || !ready
                             || last_frame.is_none_or(|last| {
@@ -433,23 +434,32 @@ impl PhysicsWorker {
                         if frame_due {
                             sequence += 1;
                             last_frame = Some(time);
+                            robot_positions.clear();
+                            robot_positions.extend(observations.iter().map(
+                                |(index, observation)| {
+                                    let p = observation.ground_to_world.translation.vector;
+                                    (members[*index].id, [p.x, p.y, p.z])
+                                },
+                            ));
                         }
-                        let balls = crate::observations::balls(&world);
-                        for (member, observation) in &observations {
+                        let balls = if frame_due {
+                            crate::observations::balls(&world)
+                        } else {
+                            Vec::new()
+                        };
+                        for (index, observation) in observations.drain(..) {
+                            let member = &members[index];
                             let frame = if frame_due {
-                                let others = observations
+                                let others = robot_positions
                                     .iter()
-                                    .filter(|(other, _)| other.id != member.id)
-                                    .map(|(_, other)| {
-                                        let p = other.ground_to_world.translation.vector;
-                                        [p.x, p.y, p.z]
-                                    })
+                                    .filter(|(id, _)| *id != member.id)
+                                    .map(|(_, position)| *position)
                                     .collect::<Vec<_>>();
                                 let field = member.io.field_dimensions;
                                 let detections = member.io.needs_detections().then(|| {
                                     crate::observations::detect_scene(
                                         world.data_mut(),
-                                        observation,
+                                        &observation,
                                         &balls,
                                         &field,
                                         &others,
@@ -473,13 +483,7 @@ impl PhysicsWorker {
                             } else {
                                 None
                             };
-                            samples.push((
-                                member.id,
-                                member.io.clone(),
-                                observation.clone(),
-                                time,
-                                frame,
-                            ));
+                            samples.push((member.id, member.io.clone(), observation, time, frame));
                         }
                     }
                     if advanced {
@@ -498,7 +502,7 @@ impl PhysicsWorker {
                     // than spending an entire physics tick idle after it releases it.
                     period = Duration::from_micros(100);
                 }
-                for (id, io, observation, time, frame) in samples {
+                for (id, io, observation, time, frame) in samples.drain(..) {
                     let state = states.get_mut(&id).unwrap();
                     state.publisher.send(observation, time)?;
                     if let Some(frame) = frame {
