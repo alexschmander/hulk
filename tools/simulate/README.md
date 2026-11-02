@@ -143,6 +143,10 @@ Blue arrows show commanded translation, green shows yaw rate, amber shows kicks.
 
 The physics worker advances a shared ROS-Z logical clock independently of the visible panel and repaint rate.
 Each running physics step advances robotics time by the MuJoCo timestep, and every sensor view of that step shares its timestamp.
+Sensors capture the evaluated state before integration, at that state's physics time.
+The next tick can compute position and velocity dynamics while per-robot workers publish
+those samples; it waits for all publications before reading new actuator commands.
+There is at most one sample in flight per robot, including its matching camera frame.
 The speed selector beside Run/Pause offers ¼×, ½×, 1×, 2× and 4×, and can be changed while running or paused.
 Speed changes wall pacing, keeping the physics timestep fixed.
 The achieved rate shows simulated seconds per real second; available compute may limit faster targets.
@@ -525,3 +529,25 @@ To isolate MCAP overhead, use the same updated binary for both labels and add
 `--recording before=on --recording after=off`. The runner supplies temporary
 parameter overlays with identical settings apart from `mcap_enabled`, verifies
 that disabled sessions create no MCAP files, and keeps robot logs enabled.
+
+To enforce a throughput target for the heaviest profile, compare against the binary
+built after integrating the upstream localization and robotics performance branches:
+
+```sh
+uv run --no-project --with jsonschema python tools/simulate/tests/performance.py \
+  --binary integrated=/path/to/integrated-simulator-mcp \
+  --binary optimized=/path/to/optimized-simulator-mcp \
+  --profiles localization --players 5 --repeats 3 --verify-localization \
+  --require-speedup integrated optimized 2 \
+  --output logs/simulator-performance/results.json
+```
+
+The check compares the median session speeds across fresh repeats and fails if any
+selected profile/player count misses the requested factor. `--verify-localization`
+also checks fresh estimates on every robot and rejects a reduction in field-pose
+acquisition across the compared sessions. Walking accuracy remains covered by the
+live acquisition/tracking fixture. Run without concurrent
+builds or other benchmarks. Full recording remains enabled for both binaries.
+Logical-clock timers wake at their deadlines rather than on every physics tick.
+Subscriber overflow diagnostics are coalesced to one message per wall-clock second
+per subscription; dropped-sample counters still count every lost sample.
