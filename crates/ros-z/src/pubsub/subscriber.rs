@@ -50,9 +50,10 @@ pub enum QueueOverflowReporting {
     ///
     /// Dropped samples are still accounted internally.
     Silent,
-    /// Emit a debug log message for each local queue overflow.
+    /// Emit debug diagnostics, coalesced into one-second reporting windows.
     Debug,
-    /// Emit a warning log message for each local queue overflow. This is the default reporting mode.
+    /// Emit warning diagnostics, coalesced into one-second reporting windows.
+    /// This is the default reporting mode.
     #[default]
     Warn,
 }
@@ -130,6 +131,8 @@ struct PreparedSubscriberBuild {
 
 #[derive(Debug, Clone)]
 struct QueueDropContext {
+    report_started: std::time::Instant,
+    report_second: Arc<AtomicU64>,
     log_prefix: &'static str,
     topic: String,
     node_namespace: String,
@@ -150,6 +153,8 @@ impl QueueDropContext {
             .map_err(|source| crate::Error::topic_name(entity.topic.clone(), source))?;
 
         Ok(Self {
+            report_started: std::time::Instant::now(),
+            report_second: Arc::new(AtomicU64::new(0)),
             log_prefix,
             topic,
             node_namespace: entity.node.namespace.clone(),
@@ -172,6 +177,18 @@ fn record_queue_push<T>(
     }
 
     let total_dropped_samples = dropped_samples.fetch_add(1, Ordering::Relaxed) + 1;
+    // Keep exact loss counts while coalescing repeated diagnostics. A stalled
+    // consumer must not turn each discarded sample into another log publication.
+    if matches!(
+        context.queue_overflow_reporting,
+        QueueOverflowReporting::Silent
+    ) {
+        return;
+    }
+    let second = context.report_started.elapsed().as_secs().saturating_add(1);
+    if context.report_second.fetch_max(second, Ordering::Relaxed) >= second {
+        return;
+    }
     match context.queue_overflow_reporting {
         QueueOverflowReporting::Silent => {}
         QueueOverflowReporting::Debug => {
@@ -729,6 +746,8 @@ mod tests {
 
     fn queue_drop_context(reporting: QueueOverflowReporting) -> QueueDropContext {
         QueueDropContext {
+            report_started: std::time::Instant::now(),
+            report_second: Arc::new(AtomicU64::new(0)),
             log_prefix: "TEST_SUB",
             topic: "/test_topic".to_owned(),
             node_namespace: "/".to_owned(),

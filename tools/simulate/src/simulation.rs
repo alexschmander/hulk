@@ -213,6 +213,78 @@ impl Pacing {
     }
 }
 
+// At most one sample per robot may be in flight. The next tick can compute
+// control-independent physics while it is published, then waits before reading
+// commands. Camera frames follow the completed body-input batch.
+struct SensorPublication {
+    observation: crate::robot_io::Observation,
+    time: ros_z::time::Time,
+}
+
+struct ObservationPublisher {
+    sender: Option<std::sync::mpsc::SyncSender<SensorPublication>>,
+    completion: std::sync::mpsc::Receiver<Result<(), String>>,
+    worker: Option<thread::JoinHandle<()>>,
+    pending: bool,
+}
+impl ObservationPublisher {
+    fn new(io: Robotics) -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<SensorPublication>(1);
+        let (completed, completion) = std::sync::mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            while let Ok(sample) = receiver.recv() {
+                let result = io
+                    .publish_observation(&sample.observation, sample.time)
+                    .map_err(|e| format!("Sensor publication: {e:#}"));
+                if completed.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            completion,
+            worker: Some(worker),
+            pending: false,
+        }
+    }
+    fn send(
+        &mut self,
+        observation: crate::robot_io::Observation,
+        time: ros_z::time::Time,
+    ) -> Result<(), String> {
+        if self.pending {
+            return Err("Previous sensor publication has not completed".into());
+        }
+        self.sender
+            .as_ref()
+            .unwrap()
+            .send(SensorPublication { observation, time })
+            .map_err(|_| "Sensor worker stopped".to_owned())?;
+        self.pending = true;
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        if !self.pending {
+            return Ok(());
+        }
+        let result = self
+            .completion
+            .recv()
+            .map_err(|_| "Sensor worker stopped".to_owned())?;
+        self.pending = false;
+        result
+    }
+}
+impl Drop for ObservationPublisher {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub struct PhysicsWorker {
     playback: Arc<Playback>,
     stop: Arc<AtomicBool>,
@@ -233,6 +305,7 @@ impl PhysicsWorker {
             struct State {
                 binding: RobotBinding,
                 controller: crate::simulated_sdk::Controller,
+                publisher: ObservationPublisher,
             }
             let mut states = std::collections::BTreeMap::<crate::RobotId, State>::new();
             let mut contacts = GroundContacts::default();
@@ -240,6 +313,7 @@ impl PhysicsWorker {
             let mut generation = None;
             let mut last_frame = None;
             let mut sequence = 0;
+            let mut pending_frames = Vec::<(Robotics, crate::observations::Frame)>::new();
             while !stopped.load(Ordering::Acquire) {
                 let started = Instant::now();
                 if let Some(error) = team.poll_controller() {
@@ -251,7 +325,7 @@ impl PhysicsWorker {
                         return Err(format!("Player {}: {error}", member.id));
                     }
                 }
-                let mut period = Duration::from_millis(2);
+                let period;
                 let mut samples = Vec::new();
                 let mut advanced = false;
                 if let Some(mut world) = physics.try_lock() {
@@ -273,14 +347,21 @@ impl PhysicsWorker {
                                     binding.reset_joints(world.data_mut());
                                     world.ground_object(entity, member.pose)?;
                                 }
+                                let previous = previous.remove(&member.id);
+                                let (controller, publisher) = previous
+                                    .map(|state| (state.controller, state.publisher))
+                                    .unwrap_or_else(|| {
+                                        (
+                                            Default::default(),
+                                            ObservationPublisher::new(member.io.clone()),
+                                        )
+                                    });
                                 states.insert(
                                     member.id,
                                     State {
                                         binding,
-                                        controller: previous
-                                            .remove(&member.id)
-                                            .map(|state| state.controller)
-                                            .unwrap_or_default(),
+                                        controller,
+                                        publisher,
                                     },
                                 );
                             }
@@ -289,24 +370,44 @@ impl PhysicsWorker {
                     }
                     period = Duration::from_secs_f64(world.data().model_opt().timestep);
                     let running = world.mode == SimulationMode::Running;
+                    if !running {
+                        for state in states.values_mut() {
+                            state.publisher.finish()?;
+                        }
+                        for (io, frame) in pending_frames.drain(..) {
+                            io.publish_frame(frame);
+                        }
+                    }
                     let ready = states.len() == members.len();
                     initialized.store(ready, Ordering::Release);
                     if running || !ready || rebuilt {
                         let time = team.now();
                         if running {
-                            for member in &members {
-                                if let Some(state) = states.get_mut(&member.id) {
-                                    state.controller.apply(
-                                        &state.binding,
-                                        world.data_mut(),
-                                        &member.io.actuator_control(),
-                                    );
+                            world.prepare_step(|data| {
+                                // Position/velocity work has completed. Join the prior
+                                // sample before accepting this tick's commands.
+                                for state in states.values_mut() {
+                                    state.publisher.finish()?;
                                 }
-                            }
-                            world.data_mut().step();
+                                for (io, frame) in pending_frames.drain(..) {
+                                    io.publish_frame(frame);
+                                }
+                                for member in &members {
+                                    if let Some(state) = states.get_mut(&member.id) {
+                                        state.controller.apply(
+                                            &state.binding,
+                                            data,
+                                            &member.io.actuator_control(),
+                                        );
+                                    }
+                                }
+                                Ok(())
+                            })?;
                             advanced = true;
                         }
-                        world.data_mut().forward();
+                        if !running {
+                            world.forward();
+                        }
                         if running && let Some(referee) = team.referee() {
                             referee.update(&mut world, &members, period)?;
                         }
@@ -372,10 +473,17 @@ impl PhysicsWorker {
                             } else {
                                 None
                             };
-                            samples.push((member.io.clone(), observation.clone(), time, frame));
+                            samples.push((
+                                member.id,
+                                member.io.clone(),
+                                observation.clone(),
+                                time,
+                                frame,
+                            ));
                         }
                     }
                     if advanced {
+                        world.integrate();
                         team.advance(period)
                             .map_err(|error| format!("Simulation clock: {error:#}"))?;
                         if let Some(remaining) = &mut world.remaining_steps {
@@ -385,17 +493,25 @@ impl PhysicsWorker {
                             }
                         }
                     }
+                } else {
+                    // A scene reader only borrowed the world. Retry promptly rather
+                    // than spending an entire physics tick idle after it releases it.
+                    period = Duration::from_micros(100);
                 }
-                for (io, observation, time, _) in &samples {
-                    io.publish_observation(observation, *time)
-                        .map_err(|error| format!("Sensor publication: {error:#}"))?;
-                }
-                for (io, _, _, frame) in samples {
+                for (id, io, observation, time, frame) in samples {
+                    let state = states.get_mut(&id).unwrap();
+                    state.publisher.send(observation, time)?;
                     if let Some(frame) = frame {
-                        io.publish_frame(frame);
+                        pending_frames.push((io, frame));
                     }
                 }
                 pacing.finish(started, period, advanced, &pacing_settings);
+            }
+            for state in states.values_mut() {
+                state.publisher.finish()?;
+            }
+            for (io, frame) in pending_frames {
+                io.publish_frame(frame);
             }
             Ok(())
         });
@@ -502,12 +618,16 @@ impl PhysicsWorker {
                             && (world.mode == SimulationMode::Running
                                 || !initialized.load(Ordering::Acquire))
                         {
-                            let time = io.now() + period;
+                            let time = io.now();
                             if world.mode == SimulationMode::Running {
-                                controller.apply(robot, world.data_mut(), &io.actuator_control());
-                                world.data_mut().step();
+                                world.prepare_step(|data| {
+                                    controller.apply(robot, data, &io.actuator_control());
+                                    Ok(())
+                                })?;
                             }
-                            world.data_mut().forward();
+                            if world.mode != SimulationMode::Running {
+                                world.forward();
+                            }
                             let mut observation = robot.observe(world.data());
                             if world.mode == SimulationMode::Paused {
                                 observation.stationary();
@@ -546,6 +666,9 @@ impl PhysicsWorker {
                                 });
                             }
                             sample = Some((observation, time));
+                            if world.mode == SimulationMode::Running {
+                                world.integrate();
+                            }
                         }
                     }
                 }

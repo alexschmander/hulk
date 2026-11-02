@@ -1,15 +1,16 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     future::Future,
     ops::{Add, Sub},
     pin::Pin,
     sync::Arc,
+    task::{Context, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
 
 use crate::{CdrCodec, Message};
 use ros_z_cdr::{CdrBuffer, CdrReader, CdrWriter, LittleEndian};
@@ -206,8 +207,77 @@ enum ClockInner {
 }
 
 struct LogicalClockState {
-    now: Mutex<Time>,
-    notify: Notify,
+    timers: Mutex<LogicalTimers>,
+}
+
+struct LogicalTimers {
+    now: Time,
+    next_id: u64,
+    sleepers: BTreeMap<(Time, u64), Waker>,
+}
+
+impl LogicalTimers {
+    fn due(&mut self) -> Vec<Waker> {
+        let mut due = Vec::new();
+        while self
+            .sleepers
+            .first_key_value()
+            .is_some_and(|((deadline, _), _)| *deadline <= self.now)
+        {
+            due.push(self.sleepers.pop_first().unwrap().1);
+        }
+        due
+    }
+}
+
+struct LogicalSleep {
+    clock: Clock,
+    deadline: Time,
+    id: Option<u64>,
+}
+
+impl Future for LogicalSleep {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let clock = self.clock.clone();
+        let ClockInner::Logical(state) = clock.inner.as_ref() else {
+            unreachable!()
+        };
+        let mut timers = state.timers.lock();
+        if timers.now >= self.deadline {
+            if let Some(id) = self.id.take() {
+                timers.sleepers.remove(&(self.deadline, id));
+            }
+            return Poll::Ready(());
+        }
+        let id = *self.id.get_or_insert_with(|| {
+            let id = timers.next_id;
+            timers.next_id = timers
+                .next_id
+                .checked_add(1)
+                .expect("logical timer identity exhausted");
+            id
+        });
+        let key = (self.deadline, id);
+        match timers.sleepers.get_mut(&key) {
+            Some(waker) => waker.clone_from(cx.waker()),
+            None => {
+                timers.sleepers.insert(key, cx.waker().clone());
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for LogicalSleep {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let ClockInner::Logical(state) = self.clock.inner.as_ref() else {
+                unreachable!()
+            };
+            state.timers.lock().sleepers.remove(&(self.deadline, id));
+        }
+    }
 }
 
 impl fmt::Debug for Clock {
@@ -244,8 +314,11 @@ impl Clock {
     pub fn logical(start: Time) -> Self {
         Self {
             inner: Arc::new(ClockInner::Logical(LogicalClockState {
-                now: Mutex::new(start),
-                notify: Notify::new(),
+                timers: Mutex::new(LogicalTimers {
+                    now: start,
+                    next_id: 0,
+                    sleepers: BTreeMap::new(),
+                }),
             })),
         }
     }
@@ -263,7 +336,7 @@ impl Clock {
     pub fn now(&self) -> Time {
         match self.inner.as_ref() {
             ClockInner::Wallclock => Time::from_wallclock(SystemTime::now()),
-            ClockInner::Logical(state) => *state.now.lock(),
+            ClockInner::Logical(state) => state.timers.lock().now,
         }
     }
 
@@ -271,12 +344,17 @@ impl Clock {
         match self.inner.as_ref() {
             ClockInner::Wallclock => Err(ClockError::NotLogical),
             ClockInner::Logical(state) => {
-                let mut current = state.now.lock();
-                if time < *current {
-                    return Err(ClockError::TimeWentBackwards);
+                let due = {
+                    let mut timers = state.timers.lock();
+                    if time < timers.now {
+                        return Err(ClockError::TimeWentBackwards);
+                    }
+                    timers.now = time;
+                    timers.due()
+                };
+                for waker in due {
+                    waker.wake();
                 }
-                *current = time;
-                state.notify.notify_waiters();
                 Ok(())
             }
         }
@@ -286,10 +364,14 @@ impl Clock {
         match self.inner.as_ref() {
             ClockInner::Wallclock => Err(ClockError::NotLogical),
             ClockInner::Logical(state) => {
-                let mut current = state.now.lock();
-                *current = current.saturating_add(delta);
-                let now = *current;
-                state.notify.notify_waiters();
+                let (now, due) = {
+                    let mut timers = state.timers.lock();
+                    timers.now = timers.now.saturating_add(delta);
+                    (timers.now, timers.due())
+                };
+                for waker in due {
+                    waker.wake();
+                }
                 Ok(now)
             }
         }
@@ -303,29 +385,11 @@ impl Clock {
                 let duration = deadline.duration_since(now).unwrap_or(Duration::ZERO);
                 Sleep(Box::pin(tokio::time::sleep(duration)))
             }
-            ClockInner::Logical(_) => {
-                let clock = self.clone();
-                Sleep(Box::pin(async move {
-                    loop {
-                        // Obtain and *enable* the Notified future before checking the
-                        // condition.  `enable()` registers this task as a waiter
-                        // immediately, so a concurrent `notify_waiters()` call that
-                        // fires between the condition check and the first `.await` poll
-                        // is not lost.
-                        let notified = match clock.inner.as_ref() {
-                            ClockInner::Wallclock => unreachable!(),
-                            ClockInner::Logical(state) => state.notify.notified(),
-                        };
-                        tokio::pin!(notified);
-                        notified.as_mut().enable();
-
-                        if clock.now() >= deadline {
-                            break;
-                        }
-                        notified.await;
-                    }
-                }))
-            }
+            ClockInner::Logical(_) => Sleep(Box::pin(LogicalSleep {
+                clock: self.clone(),
+                deadline,
+                id: None,
+            })),
         }
     }
 
@@ -427,6 +491,78 @@ impl Timer {
 mod tests {
     use super::*;
     use crate::Message;
+
+    #[derive(Default)]
+    struct WakeCount(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn logical_sleep_wakes_only_due_deadlines_and_releases_cancelled_waiters() {
+        let clock = Clock::logical(Time::zero());
+        let first = Arc::new(WakeCount::default());
+        let second = Arc::new(WakeCount::default());
+        let cancelled = Arc::new(WakeCount::default());
+        let mut a = clock.sleep(Duration::from_millis(10));
+        let mut b = clock.sleep(Duration::from_millis(20));
+        let mut c = clock.sleep(Duration::from_secs(60));
+        for (sleep, count) in [(&mut a, &first), (&mut b, &second), (&mut c, &cancelled)] {
+            let waker = Waker::from(count.clone());
+            assert!(
+                Pin::new(sleep)
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+        }
+        drop(c);
+        for _ in 0..9 {
+            clock.advance(Duration::from_millis(1)).unwrap();
+        }
+        assert_eq!(first.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(second.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        clock.advance(Duration::from_millis(1)).unwrap();
+        assert_eq!(first.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(second.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        clock.advance(Duration::from_secs(120)).unwrap();
+        assert_eq!(first.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(second.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(cancelled.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let ClockInner::Logical(state) = clock.inner.as_ref() else {
+            unreachable!()
+        };
+        assert!(state.timers.lock().sleepers.is_empty());
+    }
+
+    #[test]
+    fn logical_sleep_replaces_its_waker_and_handles_duplicate_deadlines() {
+        let clock = Clock::logical(Time::zero());
+        let old = Arc::new(WakeCount::default());
+        let new = Arc::new(WakeCount::default());
+        let other = Arc::new(WakeCount::default());
+        let mut a = clock.sleep(Duration::from_millis(10));
+        let mut b = clock.sleep(Duration::from_millis(10));
+        for count in [&old, &new] {
+            let waker = Waker::from(count.clone());
+            assert!(
+                Pin::new(&mut a)
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+        }
+        let waker = Waker::from(other.clone());
+        assert!(
+            Pin::new(&mut b)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        clock.set_time(Time::from_nanos(10_000_000)).unwrap();
+        assert_eq!(old.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(new.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(other.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn wallclock_is_default() {
