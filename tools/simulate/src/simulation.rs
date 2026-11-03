@@ -59,9 +59,17 @@ fn spawn_robot(
     }
 }
 
-/// Fill the new robot's sensors and operate its real body buttons at frozen time.
-/// The prepared pose already matches firmware Prepare; no other robot needs to step.
-pub(crate) fn bootstrap(io: &Robotics, cancelled: &AtomicBool) -> color_eyre::Result<()> {
+// Reserve control time before the shared timeline so a new robot can initialize
+// without advancing an existing match or rewinding its own timers at handover.
+pub(crate) const STARTUP_WARMUP: Duration = Duration::from_secs(2);
+
+/// Run the real Damping -> Prepare -> Initial control path against a held pose,
+/// then catch up to the shared clock before adding this robot to the scene.
+pub(crate) fn bootstrap(
+    io: &Robotics,
+    clock: &ros_z::time::Clock,
+    cancelled: &AtomicBool,
+) -> color_eyre::Result<()> {
     thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -94,6 +102,9 @@ pub(crate) fn bootstrap(io: &Robotics, cancelled: &AtomicBool) -> color_eyre::Re
                     observation
                 };
                 let mut startup = crate::buttons::Startup::default();
+                // This observer is only needed during warm-up. A completed
+                // command cycle acknowledges each clock step before catch-up.
+                let commands = io.startup_commands()?;
                 let deadline = Instant::now() + Duration::from_secs(20);
                 loop {
                     color_eyre::eyre::ensure!(
@@ -109,15 +120,28 @@ pub(crate) fn bootstrap(io: &Robotics, cancelled: &AtomicBool) -> color_eyre::Re
                         return Err(color_eyre::eyre::eyre!(error));
                     }
                     io.publish_observation(&observation, io.now())?;
-                    if io.inference.get_latest().is_some_and(|status| {
+                    let initialized = io.inference.get_latest().is_some_and(|status| {
                         matches!(status.state, motion_inference::node::State::Initialized)
-                    }) && startup
-                        .advance(io)
-                        .map_err(|error| color_eyre::eyre::eyre!(error))?
-                    {
+                    });
+                    let complete = initialized
+                        && startup
+                            .advance(io)
+                            .map_err(|error| color_eyre::eyre::eyre!(error))?;
+                    let current = io.now();
+                    let command_current = commands
+                        .latest_stamp()
+                        .is_some_and(|stamp| stamp >= current);
+                    let target = clock.now();
+                    if complete && command_current && current == target {
                         break;
                     }
-                    thread::sleep(Duration::from_millis(10));
+                    if initialized && current < target && (!complete || command_current) {
+                        // After handover, catch up in policy-sized steps, keeping
+                        // sensor and command ages below their production limits.
+                        let period = Duration::from_millis(if complete { 20 } else { 2 });
+                        io.advance_time(period.min(target.duration_since(current)))?;
+                    }
+                    thread::sleep(Duration::from_millis(if initialized { 1 } else { 10 }));
                 }
                 Ok(())
             })

@@ -180,7 +180,8 @@ def smoke(client, directory, render):
     )
     # Completing many tiny pages must reclaim snapshots, including graph snapshots.
     for _ in range(5):
-        page = client.call("rosz_graph", target_id=target, limit=25)
+        args = {"target_id": target, "limit": 25}
+        page = client.call("rosz_graph", **args)
         while page["next_cursor"]:
             args = {
                 "target_id": target,
@@ -282,6 +283,9 @@ def smoke(client, directory, render):
         )
     )
     assert trace["samples"], trace
+    # A healthy startup runs inference from the first tick, so even this short
+    # trace can span multiple pages. Release the snapshot after inspecting it.
+    client.begin("query_release", query_id=trace["query_id"])
     for data_source in ["observations", "recording"]:
         exported = client.complete(
             "rosz_export",

@@ -84,7 +84,8 @@ A running match continues during startup; a paused match keeps the existing cloc
 Reset pose returns the selected robot to its original spawn slot, mirrored if GameController has changed its field side.
 Floating player numbers use the GameController's field-player or goalkeeper jersey color, with the commanded LED color as a small highlight; the selected player's number is ringed.
 Click a number to select that robot in Twix.
-Startup uses the real button bridge, handler and safe-pose check to pass through Prepare to Initial.
+Startup uses the real button bridge, handler and safe-pose check for Damping → Prepare → Initial.
+It waits for the SDK's Prepare acknowledgement and an upright posture before leaving Prepare, then for Custom mode with active leg commands before releasing physics.
 While running, the panel header is the toolbar.
 With Auto referee, its first row is the match: score, half, clock, state, active restart, **Stop play**, the next match step and the **Referee desk** toggle.
 The simulation row follows: **Run**/**Pause**, simulation time, **Add robot** and **Stop simulator**; External mode also offers **Whistle** and **Add ball**.
@@ -141,7 +142,7 @@ Reset pose pauses and returns the robot to its standing spawn pose.
 Stop and Start rebuild the node stack and clear a latched emergency stop.
 Blue arrows show commanded translation, green shows yaw rate, amber shows kicks.
 
-The physics worker advances a shared ROS-Z logical clock independently of the visible panel and repaint rate.
+The physics worker advances the match's ROS-Z logical clock independently of the visible panel and repaint rate; every joined robot follows that time.
 Each running physics step advances robotics time by the MuJoCo timestep, and every sensor view of that step shares its timestamp.
 Sensors capture the evaluated state before integration, at that state's physics time.
 The next tick can compute position and velocity dynamics while per-robot workers publish
@@ -154,7 +155,9 @@ Physics, robotics and all automatic GameController match timers advance together
 Automatic GameController packets follow simulation time, with a real-time heartbeat retained during pauses and slow playback.
 Pause and scene recompilation freeze simulation time and sensor sampling.
 Resume continues from that time without catching up elapsed wall time; pose resets and scene edits never rewind the clock.
-A new robot initializes from stationary sensor samples at the shared clock time, then joins the common physics scene in Initial.
+A new robot initializes against stationary sensor samples on a private logical clock starting two seconds before the current match time.
+Its control loop completes the startup sequence, then catches up to the match clock before joining the common scene in Initial.
+This warm-up never advances the existing match or rewinds the new robot's time; startup recordings can precede the match's displayed time zero.
 Camera frames use simulation time at approximately 30 Hz.
 `diagnostics/camera_frames` reports capture/publication times and cumulative overwritten queued snapshots.
 A whistle clicked while paused is retained for resume; its 750 ms pulse uses simulation time.
@@ -294,6 +297,7 @@ The GUI itself is not driven.
 Tested against upstream commit `af7d12962c671b631dee7b293df70e6f7b8bb491`, protocol 20, return protocol 4.
 
 The ordinary unit suite also checks UDP team-message reception, SDK request/reply isolation for global Zenoh prefixes `42` and `43`, physics model recompilation, sensor transforms, command vectors, fall-detection poses, gizmo geometry, and raw body-button delivery through the real bridge, handler and primary-state filter.
+The dynamic-team test requires active SDK joint control before exposing each initial robot, then checks that every robot stays upright for two seconds after Run, including robots added while paused or running.
 The optional startup test launches profiles sequentially and checks producer ownership, independent truth, whistles, controller input/disconnect, filtering and body estimation.
 Set `SIMULATOR_TEST_PROFILE` to `motion_behavior`, `filtering`, `body_state_odometry` or `localization` to select one.
 It pauses longer than a whistle pulse and verifies frozen physics, robotics time, sensor timestamps and behavior timers, followed by resume without a catch-up jump.
