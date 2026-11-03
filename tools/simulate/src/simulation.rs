@@ -67,8 +67,8 @@ fn spawn_robot(
 // so reaching the shared clock cannot freeze timers before Custom is acquired.
 pub(crate) const STARTUP_WARMUP: Duration = crate::buttons::STARTUP_TIMEOUT.saturating_mul(2);
 
-/// Run the real Damping -> Prepare -> Initial control path against a held pose,
-/// then catch up to the shared clock before adding this robot to the scene.
+/// Warm up against a held pose, using HULK's real Damping -> Prepare -> Initial
+/// path or native B-Human commands, then catch up before joining the scene.
 pub(crate) fn bootstrap(
     io: &Robotics,
     clock: &ros_z::time::Clock,
@@ -106,6 +106,47 @@ pub(crate) fn bootstrap(
                     observation
                 };
                 let mut startup = crate::buttons::Startup::default();
+                #[cfg(all(feature = "bhuman", unix))]
+                if let Some(native) = io.bhuman() {
+                    // Native cognition/motion owns its handover, rather than the
+                    // HULK SDK. Evaluate fresh commands on the held pose while
+                    // advancing only this robot's private startup clock.
+                    let pose = observation.ground_to_world;
+                    let truth = crate::bhuman::World {
+                        pose: [
+                            pose.translation.x,
+                            pose.translation.y,
+                            pose.rotation.euler_angles().2,
+                        ],
+                        ball: None,
+                        players: Vec::new(),
+                    };
+                    let deadline = Instant::now() + Duration::from_secs(20);
+                    loop {
+                        color_eyre::eyre::ensure!(
+                            !cancelled.load(Ordering::Acquire),
+                            "Robot startup cancelled"
+                        );
+                        color_eyre::eyre::ensure!(
+                            Instant::now() < deadline,
+                            "B-Human startup timed out: {}",
+                            io.status()
+                        );
+                        native.step(&observation, truth.clone())?;
+                        io.publish_observation(&observation, io.now())?;
+                        let current = io.now();
+                        let target = clock.now();
+                        if current == target && io.actuator_control().supports_standing() {
+                            return Ok(());
+                        }
+                        if current < target {
+                            io.advance_time(
+                                Duration::from_nanos(crate::bhuman::STEP_NS)
+                                    .min(target.duration_since(current)),
+                            )?;
+                        }
+                    }
+                }
                 // This observer is only needed during warm-up. A completed
                 // command cycle acknowledges each clock step before catch-up.
                 let commands = io.startup_commands()?;
@@ -136,7 +177,13 @@ pub(crate) fn bootstrap(
                         .latest_stamp()
                         .is_some_and(|stamp| stamp >= current);
                     let target = clock.now();
-                    if complete && command_current && current == target {
+                    // Command publication is asynchronous. At faster playback,
+                    // exact equality can chase a moving clock forever even after
+                    // motor handover. Team::add synchronizes the final policy-sized
+                    // gap atomically with insertion, without rewinding either clock.
+                    let caught_up = current <= target
+                        && target.duration_since(current) <= Duration::from_millis(20);
+                    if complete && command_current && caught_up {
                         break;
                     }
                     if initialized && current < target && (!complete || command_current) {

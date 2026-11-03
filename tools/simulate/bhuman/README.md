@@ -80,6 +80,9 @@ The serial mapping omits the T1 waist joint.
 
 Motion executes every 2 ms; cognition executes every 20 ms. Both run synchronously
 on the worker's IPC thread, with separate native blackboards and module graphs.
+Before joining, each player warms up against a held pose on its private startup
+clock until native commands provide active leg support and its clock catches up
+to the match. Paused and running additions use the same handover.
 Their native representation packets carry cognition requests to motion and
 motion feedback to cognition. RobotHealth carries the actual cognition heartbeat.
 Physics snapshots and worker exchanges happen outside the shared physics mutex.
