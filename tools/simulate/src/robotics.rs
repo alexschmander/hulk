@@ -118,6 +118,7 @@ pub struct RobotStack {
     pub primary: ros_z::cache::Cache<types::primary_state::PrimaryState>,
     pub inference: ros_z::cache::Cache<motion_inference::node::Status>,
     pub safe_pose: ros_z::cache::Cache<bool>,
+    pub(crate) posture: ros_z::cache::Cache<types::fall_detection::FallDetection>,
     #[cfg(test)]
     pub field: ros_z::cache::Cache<types::field_dimensions::FieldDimensions>,
     default_away: bool,
@@ -301,6 +302,11 @@ impl RobotStack {
             .build()
             .await?;
         let safe_pose = node.subscriber("is_safe_pose").cache(1).build().await?;
+        let posture = node
+            .subscriber("fall_detection/status")
+            .cache(1)
+            .build()
+            .await?;
         let initial_field = node
             .subscriber::<types::field_dimensions::FieldDimensions>("field_dimensions")
             .qos(QosProfile {
@@ -463,6 +469,7 @@ impl RobotStack {
             primary,
             inference,
             safe_pose,
+            posture,
             #[cfg(test)]
             field,
             game,
@@ -570,6 +577,17 @@ impl RobotStack {
         self.commands.borrow().clone()
     }
 
+    pub(crate) fn startup_commands(
+        &self,
+    ) -> Result<ros_z::cache::Cache<types::robot_command::RobotCommand>> {
+        Ok(self.runtime.block_on(
+            self._node
+                .subscriber("commands/robot_command")
+                .cache(1)
+                .build(),
+        )?)
+    }
+
     pub fn jersey_color(&self, player: u8) -> Option<hsl_network_messages::TeamColor> {
         let state = self.game_state.get_latest()?;
         let team = &state.as_ref().as_ref()?.hulks_team;
@@ -619,9 +637,13 @@ impl RobotStack {
         self.context.clock().now()
     }
 
-    #[cfg(test)]
-    pub fn advance_time(&self, period: std::time::Duration) -> Result<()> {
+    pub(crate) fn advance_time(&self, period: std::time::Duration) -> Result<()> {
         self.context.clock().advance(period)?;
+        Ok(())
+    }
+
+    pub(crate) fn synchronize_time(&self, time: Time) -> Result<()> {
+        self.context.clock().set_time(time)?;
         Ok(())
     }
 
