@@ -83,7 +83,7 @@ Twix selects the robot's namespace automatically.
 Only one simulator can run per Twix process.
 Restoring a saved layout does not start robotics or bind UDP sockets.
 
-HULK robots start upright and paused in **Initial**. B-Human players initialize their native game state on the first physics frame.
+HULK robots start upright and paused in **Initial**. B-Human players initialize native cognition and motion against a held pose and acquire active leg commands before joining the scene.
 Initial players alternate between both long touchlines in their own half, starting 0.5 m from the goal line and spaced 0.9 m toward midfield, facing inward.
 **Add robot** starts the next available player, at a vacant slot along the sideline, without moving existing robots.
 Placement follows the known GameController field side, defaulting to Home for HULKs and Away for opponents before the first packet.

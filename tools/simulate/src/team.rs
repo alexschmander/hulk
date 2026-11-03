@@ -256,9 +256,7 @@ impl Team {
             },
         )
         .await?;
-        if !io.is_bhuman() {
-            crate::simulation::bootstrap(&io, &self.0.clock, &self.0.cancelled)?;
-        }
+        crate::simulation::bootstrap(&io, &self.0.clock, &self.0.cancelled)?;
         let member = Member {
             id,
             io,

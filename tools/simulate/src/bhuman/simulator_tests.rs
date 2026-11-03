@@ -51,7 +51,14 @@ fn mixed_match_steps_native_players_and_preserves_pause() {
                 .into(),
         },
         field_configuration: Some(field),
-        profile: crate::Profile::MotionBehavior,
+        profile: std::env::var("SIMULATOR_TEST_PROFILE")
+            .ok()
+            .map(|profile| {
+                serde_json::from_str(&profile)
+                    .or_else(|_| serde_json::from_value(serde_json::Value::String(profile)))
+                    .unwrap()
+            })
+            .unwrap_or(crate::Profile::MotionBehavior),
         mcap_enabled: Some(false),
     };
     let team = runtime
@@ -63,23 +70,18 @@ fn mixed_match_steps_native_players_and_preserves_pause() {
             false,
         ))
         .unwrap();
+    for member in team.members() {
+        assert_eq!(member.io.now(), team.now());
+        assert!(
+            member.io.actuator_control().supports_standing(),
+            "{}: {}",
+            member.id,
+            member.io.status()
+        );
+    }
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
-    for member in team.members() {
-        let entity = app
-            .world_mut()
-            .spawn((
-                MjcfObject::new(
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/k1_robot.xml"),
-                    "Trunk",
-                )
-                .with_free_joint("world_joint")
-                .grounded(),
-                member.pose,
-            ))
-            .id();
-        team.bind(member.id, entity);
-    }
+    bind_players(&mut app, &team);
     app.update();
     let physics = app.world().resource::<SharedPhysics>().clone();
     physics.lock().mode = SimulationMode::Paused;
@@ -126,15 +128,23 @@ fn mixed_match_steps_native_players_and_preserves_pause() {
             .child
             .id()
     );
+    let native_start: Vec<_> = native
+        .iter()
+        .map(|member| {
+            let time = member.io.bhuman().unwrap().state.lock().unwrap().time_ns;
+            assert!(time >= crate::simulation::STARTUP_WARMUP.as_nanos() as u64);
+            time
+        })
+        .collect();
     {
         let mut world = physics.lock();
         world.remaining_steps = Some(1000);
         world.mode = SimulationMode::Running;
     }
     wait(&mut worker, &|| physics.lock().remaining_steps == Some(0));
-    for member in &native {
+    for (member, start) in native.iter().zip(&native_start) {
         let state = member.io.bhuman().unwrap().state.lock().unwrap();
-        assert_eq!(state.time_ns, 1000 * STEP_NS);
+        assert_eq!(state.time_ns, start + 1000 * STEP_NS);
         assert_eq!(state.output.as_ref().unwrap().player_state, "active");
         assert_eq!(state.output.as_ref().unwrap().motion, "stand");
         assert!(
@@ -146,11 +156,131 @@ fn mixed_match_steps_native_players_and_preserves_pause() {
     let paused = team.now();
     thread::sleep(Duration::from_millis(100));
     assert_eq!(team.now(), paused);
-    for member in &native {
+    for (member, start) in native.iter().zip(&native_start) {
         assert_eq!(
             member.io.bhuman().unwrap().state.lock().unwrap().time_ns,
-            1000 * STEP_NS
+            start + 1000 * STEP_NS
         );
+    }
+    let upright = || {
+        let world = physics.lock();
+        for member in team.members() {
+            assert_eq!(member.io.now(), team.now(), "{} clock diverged", member.id);
+            let pose = world.object_pose(member.entity.unwrap()).unwrap();
+            assert!(
+                pose.translation.y > 0.4 && (pose.rotation * Vec3::Y).dot(Vec3::Y) > 0.5,
+                "{} fell after handover: {pose:?}",
+                member.id
+            );
+        }
+    };
+    upright();
+    if std::env::var_os("BHUMAN_TEST_ADDITIONS").is_some() {
+        let add_running = std::env::var_os("SIMULATOR_TEST_ADD_RUNNING").is_some();
+        if add_running {
+            let mut world = physics.lock();
+            world.remaining_steps = None;
+            world.mode = SimulationMode::Running;
+        }
+        for side in crate::TeamId::ALL {
+            while team
+                .members()
+                .iter()
+                .filter(|member| member.id.team == side)
+                .count()
+                < 5
+            {
+                let (time, occupied) = {
+                    let mut world = physics.lock();
+                    if !add_running {
+                        // The last step integrates qpos after capturing sensors.
+                        // Compare current transforms, not that prior sample.
+                        world.forward();
+                    }
+                    (
+                        team.now(),
+                        world
+                            .robots
+                            .iter()
+                            .map(|entity| world.object_pose(*entity).unwrap())
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                let pose = crate::team::vacant_spawn(
+                    &team
+                        .configuration()
+                        .field_configuration
+                        .as_ref()
+                        .unwrap()
+                        .dimensions,
+                    &occupied,
+                    team.away(side),
+                )
+                .unwrap();
+                let id = runtime.block_on(team.add(side, pose)).unwrap();
+                let member = team
+                    .members()
+                    .into_iter()
+                    .find(|member| member.id == id)
+                    .unwrap();
+                assert!(
+                    member.io.actuator_control().supports_standing(),
+                    "{id} joined without joint support"
+                );
+                bind_players(&mut app, &team);
+                app.update();
+                thread::sleep(Duration::from_millis(100));
+                wait(&mut worker, &|| worker_ready(&physics, &team));
+                if add_running {
+                    assert!(team.now() > time, "Adding {id} froze the running match");
+                } else {
+                    assert_eq!(team.now(), time, "Adding {id} advanced the paused match");
+                    let world = physics.lock();
+                    for pose in &occupied {
+                        assert!(
+                            world
+                                .robots
+                                .iter()
+                                .filter_map(|entity| world.object_pose(*entity))
+                                .any(
+                                    |current| current.translation.distance(pose.translation) < 1e-6
+                                ),
+                            "Adding {id} moved an existing paused robot"
+                        );
+                    }
+                }
+                upright();
+            }
+        }
+        assert_eq!(team.members().len(), 10);
+        {
+            let mut world = physics.lock();
+            world.remaining_steps = Some(1000);
+            world.mode = SimulationMode::Running;
+        }
+        wait(&mut worker, &|| {
+            upright();
+            physics.lock().remaining_steps == Some(0)
+        });
+        upright();
+        let frozen = team.now();
+        let native_times: Vec<_> = team
+            .members()
+            .into_iter()
+            .filter(|member| member.io.is_bhuman())
+            .map(|member| {
+                let time = member.io.bhuman().unwrap().state.lock().unwrap().time_ns;
+                (member, time)
+            })
+            .collect();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(team.now(), frozen);
+        for (member, time) in native_times {
+            assert_eq!(
+                member.io.bhuman().unwrap().state.lock().unwrap().time_ns,
+                time
+            );
+        }
     }
     // Both edges arrive while paused. The bridge must preserve the tap until
     // separate cognition frames can consume it.
@@ -191,4 +321,35 @@ fn mixed_match_steps_native_players_and_preserves_pause() {
     drop(app);
     assert!(crate::finish_recordings().is_empty());
     router.shutdown().unwrap();
+}
+
+fn bind_players(app: &mut App, team: &Team) {
+    for member in team
+        .members()
+        .into_iter()
+        .filter(|member| member.entity.is_none())
+    {
+        let entity = app
+            .world_mut()
+            .spawn((
+                MjcfObject::new(
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/k1_robot.xml"),
+                    "Trunk",
+                )
+                .with_free_joint("world_joint")
+                .grounded(),
+                member.pose,
+            ))
+            .id();
+        team.bind(member.id, entity);
+    }
+}
+
+fn worker_ready(physics: &SharedPhysics, team: &Team) -> bool {
+    let world = physics.lock();
+    team.members().iter().all(|member| {
+        member
+            .entity
+            .is_some_and(|entity| world.contains_object(entity))
+    })
 }

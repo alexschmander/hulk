@@ -68,7 +68,8 @@ impl SimulatorRobot {
         })
     }
 
-    /// Called once for each committed physics step, outside the physics mutex.
+    /// Evaluate a native control tick outside the physics mutex. Startup supplies
+    /// a held pose; the physics worker supplies live samples after joining.
     pub fn step(&self, observation: &Observation, mut world: World) -> Result<Vec<Vec<u8>>> {
         let mut state = self.state.lock().unwrap();
         let mut packet = None;
