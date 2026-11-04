@@ -24,7 +24,7 @@ use crate::{
     node::Blackboard,
     penalty_shootout::{is_penalty_shootout, penalty_shootout_subtree},
     replacement_goalkeeper::{
-        refresh_replacement_goalkeeper_election_status, refresh_replacement_goalkeeper_role,
+        is_replacement_goalkeeper_election_open, refresh_replacement_goalkeeper_role,
         update_replacement_goalkeeper_election,
     },
     search::{leuchtturm, walk_towards_search_position},
@@ -88,7 +88,7 @@ pub fn create_tree() -> Node<Blackboard> {
     );
 
     sequence!(
-        action!(refresh_replacement_goalkeeper_role), // to refresh coordinator every loop
+        action!(refresh_replacement_goalkeeper_role), // to refresh replacement keeper coordinator every loop
         behavior,
     )
 }
@@ -163,7 +163,7 @@ fn playing_subtree() -> Node<Blackboard> {
                 action!(calculate_voronoi_grid),
             ),
             condition!(is_closest_to_ball),
-            action!(update_replacement_goalkeeper_election, false),
+            action!(update_replacement_goalkeeper_election, false), 
             subtree!(striker_subtree),
         ),
         subtree!(replacement_goalkeeper_decision_subtree),
@@ -247,7 +247,7 @@ fn remote_kick_subtree(button: Button, strong: bool) -> Node<Blackboard> {
 
 fn replacement_goalkeeper_decision_subtree() -> Node<Blackboard> {
     sequence!(
-        condition!(refresh_replacement_goalkeeper_election_status),
+        condition!(is_replacement_goalkeeper_election_open),
         action!(update_replacement_goalkeeper_election, true),
         condition!(is_active_replacement_goalkeeper),
         subtree!(goalkeeper_subtree),

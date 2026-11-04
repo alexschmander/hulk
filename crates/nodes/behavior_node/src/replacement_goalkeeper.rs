@@ -50,12 +50,61 @@ impl Default for ReplacementGoalkeeperParameters {
     }
 }
 
-// ToDo: Fehlender-GameController Zustand ergibt hier false, wodurch eine bestehende Rolle zurückgesetzt wird. In Zukunft ändern!
-/// Refreshes role validity and returns whether keeper selection may proceed.
-pub fn refresh_replacement_goalkeeper_election_status(blackboard: &mut Blackboard) -> bool {
+/// Called as a condition in the behavior tree. 
+/// Returns whether this robot may continue an open replacement goalkeeper election.
+/// The coordinator's role must be refreshed earlier in the tree.
+pub fn is_replacement_goalkeeper_election_open(blackboard: &mut Blackboard) -> bool {
+    if is_simple(blackboard) || is_penalty_shootout(blackboard) {
+        return false;
+    }
+
+    if !matches!(
+        blackboard.world_state.robot.primary_state,
+        PrimaryState::Ready | PrimaryState::Playing
+    ) {
+        return false;
+    }
+
+    let Some(game_controller_state) =
+    blackboard.world_state.filtered_game_controller_state.as_ref()
+    else {
+        return false;
+    };
+    
+    let regular_goalkeeper_number = blackboard.parameters.goalkeeper.player_number;
+    if game_controller_state.penalties[regular_goalkeeper_number].is_none() {
+        return false;
+    }
+
+    let available_field_players =
+        calculate_available_field_players(blackboard, regular_goalkeeper_number);
+    let own_number = blackboard.player_number;
+
+    if own_number == regular_goalkeeper_number || !available_field_players[own_number] {
+        return false;
+    }
+
+    let available_count = available_field_players
+        .iter()
+        .filter(|(number, available)| {
+            *number != regular_goalkeeper_number && **available
+        })
+        .count();
+
+    available_count > 1
+        && blackboard
+            .replacement_goalkeeper_coordinator
+            .known_replacement_goalkeeper
+            .is_none()
+}
+
+/// Called as an action in the behavior tree.
+/// Validates the stored replacement goalkeeper and clears invalid role state.
+/// Always allows the behavior tree to continue.
+pub fn refresh_replacement_goalkeeper_role(blackboard: &mut Blackboard) -> Status {
     if is_simple(blackboard) || is_penalty_shootout(blackboard) {
         blackboard.replacement_goalkeeper_coordinator.reset();
-        return false;
+        return Status::Success;
     }
 
     let world_state = &blackboard.world_state;
@@ -77,16 +126,14 @@ pub fn refresh_replacement_goalkeeper_election_status(blackboard: &mut Blackboar
 
     blackboard
         .replacement_goalkeeper_coordinator
-        .refresh_role_status(input)
-}
+        .refresh_role_status(input);
 
-pub fn refresh_replacement_goalkeeper_role(blackboard: &mut Blackboard) -> Status {
-    refresh_replacement_goalkeeper_election_status(blackboard);
     Status::Success
 }
+
 pub(crate) fn build_replacement_goalkeeper_input(
     blackboard: &Blackboard,
-    tree_allows_candidacy: bool,
+    own_candidacy_allowed: bool,
 ) -> ReplacementGoalkeeperInput {
     let world_state = &blackboard.world_state;
     let own_number = blackboard.player_number;
@@ -94,7 +141,7 @@ pub(crate) fn build_replacement_goalkeeper_input(
     let available_field_players =
         calculate_available_field_players(blackboard, regular_goalkeeper_number);
 
-    let is_eligible_candidate = tree_allows_candidacy
+    let is_eligible_candidate = own_candidacy_allowed
         && available_field_players[own_number]
         && world_state.robot.ground_to_field.is_some();
 
@@ -229,12 +276,14 @@ pub(crate) fn find_lowest_numbered_available_other_claiming_player(
         .min()
 }
 
-// Election Action, im Playing Tree aufgerufen. Gibt es bessere datei für diese Funktion?
+/// Called as an action in the tree.
+/// Proceeds the election process: starts or ends own claims, handles other players claims
+/// and fallback times and stores the winner
 pub fn update_replacement_goalkeeper_election(
     blackboard: &mut Blackboard,
-    tree_allows_candidacy: bool,
+    own_candidacy_allowed: bool,
 ) -> Status {
-    let input = build_replacement_goalkeeper_input(blackboard, tree_allows_candidacy);
+    let input = build_replacement_goalkeeper_input(blackboard, own_candidacy_allowed);
 
     blackboard
         .replacement_goalkeeper_coordinator
@@ -286,7 +335,6 @@ impl ReplacementGoalkeeperCoordinator {
     pub fn refresh_role_status(&mut self, input: ReplacementGoalkeeperRoleInput) -> bool {
         let own_number = input.own_player_number;
 
-        // Warum brauche ich hier den Filter?
         let available_count = input
             .available_field_players
             .iter()
@@ -298,7 +346,7 @@ impl ReplacementGoalkeeperCoordinator {
             return false;
         }
 
-        // Notwendig so elaboriert?
+        // Frage für mich: Notwendig so elaboriert?
         let own_is_available = own_number != input.regular_goalkeeper_number
             && input.available_field_players[own_number]
             && input.primary_state != PrimaryState::Penalized;
@@ -336,6 +384,13 @@ impl ReplacementGoalkeeperCoordinator {
         // false: In diesem Update keine Auswahl fortsetzen.
     }
 
+    /// Advances the local replacement goalkeeper election.
+    ///
+    /// First checks whether the current role is still valid. In Ready, it selects
+    /// the lowest-numbered available field player. In Playing, it manages this
+    /// robot's claim, considers teammates' claims, and selects the lowest-numbered
+    /// claimant when the election window ends. The winner is remembered locally
+    /// until the role becomes invalid.
     pub fn update(
         &mut self,
         input: ReplacementGoalkeeperInput,
@@ -356,6 +411,7 @@ impl ReplacementGoalkeeperCoordinator {
         let own_number = input.own_player_number;
 
         match input.primary_state {
+            // Issue: In Ready State roles and claims are lost. Election not possible bc no StateMessages
             PrimaryState::Ready => {
                 self.clear_election();
 
