@@ -98,7 +98,7 @@ pub fn is_replacement_goalkeeper_election_open(blackboard: &mut Blackboard) -> b
             .is_none()
 }
 
-/// Called as an action in the behavior tree.
+/// Called as an action in the behavior tree (in every loop.).
 /// Validates the stored replacement goalkeeper and clears invalid role state.
 /// Always allows the behavior tree to continue.
 pub fn refresh_replacement_goalkeeper_role(blackboard: &mut Blackboard) -> Status {
@@ -283,6 +283,10 @@ pub fn update_replacement_goalkeeper_election(
     blackboard: &mut Blackboard,
     own_candidacy_allowed: bool,
 ) -> Status {
+    if is_simple(blackboard) || is_penalty_shootout(blackboard) {
+        return Status::Success;
+    }
+
     let input = build_replacement_goalkeeper_input(blackboard, own_candidacy_allowed);
 
     blackboard
@@ -429,7 +433,6 @@ impl ReplacementGoalkeeperCoordinator {
             }
 
             PrimaryState::Playing => {
-                // Dieser Timer läuft auch ohne eigene Kandidatur.
                 let needed_since = *self.replacement_needed_since.get_or_insert(input.now);
 
                 if self.state == ReplacementGoalkeeperState::Candidate
@@ -440,7 +443,7 @@ impl ReplacementGoalkeeperCoordinator {
 
                 let other_claim = input.lowest_other_claiming_player;
 
-                // Kleinere verfügbare Nummern beginnen den Fallback früher.
+                // Rank Players for the fallback, lowest number claims first.
                 let backoff_rank = input
                     .available_field_players
                     .iter()
@@ -464,15 +467,14 @@ impl ReplacementGoalkeeperCoordinator {
                     self.state = ReplacementGoalkeeperState::Candidate;
                 }
 
-                // Eigenen Claim ohne Netzwerk-Echo einbeziehen.
+                // Include own claim, which is not received via StateMessages.
                 let own_claim =
                     (self.state == ReplacementGoalkeeperState::Candidate).then_some(own_number);
 
                 let lowest_claim = other_claim.into_iter().chain(own_claim).min();
 
                 let Some(winner) = lowest_claim else {
-                    // Kein Claim: Wahlfenster zurücksetzen.
-                    // Der Fallback-Timer läuft weiter.
+                    // reset election timer, fallback timer keeps going
                     self.election_started_at = None;
                     return;
                 };

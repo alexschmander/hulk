@@ -88,7 +88,7 @@ pub fn create_tree() -> Node<Blackboard> {
     );
 
     sequence!(
-        action!(refresh_replacement_goalkeeper_role), // to refresh replacement keeper coordinator every loop
+        action!(refresh_replacement_goalkeeper_role),
         behavior,
     )
 }
@@ -114,7 +114,11 @@ fn fall_subtree() -> Node<Blackboard> {
 }
 
 fn ready_subtree() -> Node<Blackboard> {
-    sequence!(action!(walk_to_kickoff_pose), action!(look_around),)
+    sequence!(
+        action!(update_replacement_goalkeeper_election, false),
+        action!(walk_to_kickoff_pose),
+        action!(look_around),
+    )
 }
 
 fn playing_subtree() -> Node<Blackboard> {
