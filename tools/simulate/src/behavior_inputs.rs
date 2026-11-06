@@ -35,7 +35,6 @@ pub struct BehaviorInputs {
     pose: Reference<Isometry2<Ground, Field>>,
     ball: Reference<Option<BallPosition<Ground>>>,
     visual_ball: Reference<Option<BallPosition<Ground>>>,
-    obstacles: Reference<Vec<Obstacle>>,
     humanoid_obstacles: Reference<Vec<Obstacle>>,
     goal_post_obstacles: Reference<Vec<Obstacle>>,
     humanoids: Reference<Vec<HumanoidTruth>>,
@@ -49,7 +48,6 @@ impl BehaviorInputs {
             pose: Reference::new(node, "ground_to_field", profile).await?,
             ball: Reference::new(node, "ball_filter/ball_position", profile).await?,
             visual_ball: Reference::new(node, "visual_kick/ball_position", profile).await?,
-            obstacles: Reference::new(node, "obstacles", profile).await?,
             humanoid_obstacles: Reference::new(node, "humanoid_filter/obstacles", profile).await?,
             goal_post_obstacles: Reference::new(
                 node,
@@ -92,11 +90,6 @@ impl BehaviorInputs {
                 })
                 .collect::<Vec<_>>()
         };
-        let obstacles = self.obstacles.needed().then(|| {
-            let mut obstacles = goal_post_obstacles();
-            obstacles.extend(robot_obstacles());
-            obstacles
-        });
         if self.humanoid_obstacles.needed() {
             self.humanoid_obstacles
                 .publish(&robot_obstacles(), time)
@@ -132,9 +125,6 @@ impl BehaviorInputs {
         self.pose.publish(&pose, time).await?;
         self.ball.publish(&ball, time).await?;
         self.visual_ball.publish(&ball, time).await?;
-        if let Some(obstacles) = obstacles {
-            self.obstacles.publish(&obstacles, time).await?;
-        }
         self.interest
             .publish_with_source_time(
                 &self

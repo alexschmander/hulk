@@ -5591,7 +5591,6 @@ dependencies = [
  "motion_inference",
  "motor_commands_collector",
  "nix 0.31.3",
- "obstacle_filter",
  "odometer_bridge",
  "odometry",
  "player_states_receiver",
@@ -8109,26 +8108,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "obstacle_filter"
-version = "0.1.0"
-dependencies = [
- "color-eyre",
- "coordinate_systems",
- "filtering",
- "geometry",
- "hsl_network_messages",
- "itertools 0.14.0",
- "linear_algebra",
- "nalgebra 0.34.2",
- "projection",
- "ros-z",
- "ros-z-streams",
- "serde",
- "tokio",
- "types",
-]
-
-[[package]]
 name = "odometer_bridge"
 version = "0.1.0"
 dependencies = [
@@ -10526,7 +10505,6 @@ dependencies = [
  "mujoco-rs",
  "nalgebra 0.34.2",
  "nix 0.31.3",
- "obstacle_filter",
  "odometry",
  "player_states_receiver",
  "primary_state_filter",

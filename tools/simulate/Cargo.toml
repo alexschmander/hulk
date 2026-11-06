@@ -66,7 +66,6 @@ mujoco-rs = { version = "5.0.0", features = [
   "renderer",
 ] }
 nalgebra = { workspace = true }
-obstacle_filter = { workspace = true }
 odometry = { workspace = true }
 player_states_receiver = { workspace = true }
 primary_state_filter = { workspace = true }

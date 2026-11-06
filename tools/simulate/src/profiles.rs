@@ -221,7 +221,6 @@ pub(crate) const REFERENCES: &[ReferenceSpec] = {
         "ground_to_field": Unless(Localization), "Exact planar field pose";
         "ball_filter/ball_position": Unless(Filtering), "First scene ball, whether visible or not";
         "visual_kick/ball_position": Unless(Filtering), "First scene ball, for visual kicks";
-        "obstacles": Unless(Filtering), "Goal posts and every other robot";
         "humanoid_filter/obstacles": Unless(Filtering), "Every other robot";
         "goal_post_filter/obstacles": Unless(Filtering), "Goal posts";
         "humanoids": Never, "Every other robot with its team, player number and teammate relation";
@@ -329,7 +328,6 @@ pub(crate) const NETWORK: &[NodeSpec] = nodes![
 const FILTERING: &[NodeSpec] = nodes![
     ball_filter,
     visual_kick_ball_selector,
-    obstacle_filter,
     humanoid_filter,
     goal_post_filter
 ];
@@ -361,7 +359,7 @@ mod tests {
     #[test]
     fn presets_are_cumulative_and_keep_all_common_nodes() {
         let mut previous = HashSet::new();
-        for (profile, count) in Profile::PRESETS.into_iter().zip([24, 29, 34, 37]) {
+        for (profile, count) in Profile::PRESETS.into_iter().zip([24, 28, 33, 36]) {
             let names: HashSet<_> = profile.nodes().map(|node| node.name).collect();
             assert_eq!(names.len(), count);
             assert!(previous.is_subset(&names));
@@ -390,7 +388,6 @@ mod tests {
                     &[
                         "ball_filter/ball_position",
                         "visual_kick/ball_position",
-                        "obstacles",
                         "humanoid_filter/obstacles",
                         "goal_post_filter/obstacles",
                     ][..],
@@ -432,7 +429,6 @@ mod tests {
             for (node, expected) in [
                 ("ball_filter", profile.filtering()),
                 ("visual_kick_ball_selector", profile.filtering()),
-                ("obstacle_filter", profile.filtering()),
                 ("humanoid_filter", profile.filtering()),
                 ("goal_post_filter", profile.filtering()),
                 ("kinematics_provider", profile.body_state()),

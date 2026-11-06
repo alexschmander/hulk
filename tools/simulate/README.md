@@ -14,7 +14,7 @@ The [profile plan](PROFILES.md) records topic ownership and validation contracts
 | Preset | Additional real nodes | Remaining ideal inputs |
 | --- | --- | --- |
 | Motion & behavior | Common 24-node stack per robot, including search, raw sensor/button bridges, LED handler, whistle filter and HSL communications; one shared gamepad handler | Body geometry, odometry, field pose, first ball, other robots and fixed goalposts |
-| Ball and obstacle filtering | Ball filter, visual-kick selector, obstacle filter and the humanoid and goal post filters | Body geometry, odometry and field pose; synthetic camera detections |
+| Ball and obstacle filtering | Ball filter, visual-kick selector and the humanoid and goal post filters | Body geometry, odometry and field pose; synthetic camera detections |
 | Body state & odometry | Kinematics, support foot, ground provider, camera matrix and odometry | Field pose; synthetic camera detections and camera calibration |
 | Localization | Field-mark association and 3D/2D localization | Synthetic camera detections, calibration and coherent camera-motion measurements |
 
@@ -240,10 +240,9 @@ Ball edits preserve the epoch.
 Set `simulator.observations.pixel_noise_std_dev`, `detection_dropout_probability` and `seed` through the Parameter panel for repeatable detection faults.
 Defaults are exact observations with no loss.
 Noise never changes ground truth.
-No producer is added for the obsolete `current_odometry_to_last_odometry` topic; the preferred obstacle filter uses absolute odometry.
-During a three-second simulated walking fixture, goalpost outputs differed from current truth by up to 6.11 cm.
+No producer is added for the obsolete `current_odometry_to_last_odometry` topic; the object filters use absolute odometry.
+During a three-second simulated walking fixture, goalpost outputs of the previous obstacle filter differed from current truth by up to 6.11 cm.
 These outputs lack a measurement timestamp, so that diagnostic includes processing delay as well as hypothesis lag.
-The obstacle filter also places mapped posts 2 cm beyond the shared field helper's goal-line centers with the default field parameters.
 
 This tool hosts selected unchanged node entry points in Twix; it does not launch the complete `hulk_ros_z` executable.
 Image rendering/transport, neural detection and actual stereo VO are deferred to a later profile.

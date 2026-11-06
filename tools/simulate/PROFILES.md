@@ -31,7 +31,7 @@ Whistle detection is replaced by a UI-generated detection stream; the real whist
 | Profile | Additional real nodes | Remaining simulated observations |
 | --- | --- | --- |
 | Motion & behavior | Common stack below | Raw joint/IMU samples; perfect ground/camera geometry, field pose, selected ball and obstacles |
-| Ball and obstacle filtering | `ball_filter`, `visual_kick_ball_selector`, `obstacle_filter`, `humanoid_filter`, `goal_post_filter` | Raw sensors; synthetic detections; perfect ground/camera geometry, planar odometry and field pose |
+| Ball and obstacle filtering | `ball_filter`, `visual_kick_ball_selector`, `humanoid_filter`, `goal_post_filter` | Raw sensors; synthetic detections; perfect ground/camera geometry, planar odometry and field pose |
 | Body state & odometry | `kinematics_provider`, `support_foot_estimator`, `ground_provider`, `camera_matrix_calculator`, `odometry` | Raw sensors, camera calibration, synthetic detections and perfect field pose |
 | Localization | `field_mark_association`, `localization_3d`, `localization_2d` | Raw sensors, camera calibration, synthetic detections and camera-motion measurements substituting for stereo VO |
 
@@ -81,7 +81,6 @@ Mirror production topic suffixes and types where meaningful, for example:
 | `ground_truth/camera_geometry` | Exact body-relative camera geometry, independent of ground contact |
 | `ground_truth/inputs/odometry` | Exact planar movement relative to the trial's odometry origin |
 | `ground_truth/ball_filter/ball_position`, `ground_truth/visual_kick/ball_position` | Ideal scalar ball reference with the documented selection policy |
-| `ground_truth/obstacles` | Physical obstacle positions |
 | `ground_truth/humanoid_filter/obstacles`, `ground_truth/goal_post_filter/obstacles` | Physical robot and goalpost obstacles, split like the object filters' outputs |
 | `ground_truth/humanoids` | Other robots with team, player number and ground/field positions, seen from the observer |
 | `ground_truth/detected_objects` | Ideal visible observations before optional observation perturbations |
@@ -113,7 +112,6 @@ The table below describes only production ownership, not whether the reference i
 | `current_odometry_to_last_odometry` | Not needed | No producer, matching production | No producer, matching production | No producer, matching production |
 | `detected_objects` and its announcements | Not needed | Synthetic observations | Synthetic observations | Synthetic observations, including field marks |
 | `ball_filter/ball_position`, `visual_kick/ball_position` | Truth | Real filters/selector | Real filters/selector | Real filters/selector |
-| `obstacles` | Truth | Obstacle filter | Obstacle filter | Obstacle filter |
 | `humanoid_filter/obstacles`, `goal_post_filter/obstacles` | Truth | Object filters | Object filters | Object filters |
 | Ball hypotheses | No producer | Ball filter | Ball filter | Ball filter |
 | Search suggestions | Search suggestor | Search suggestor | Search suggestor | Search suggestor |
@@ -243,7 +241,7 @@ Anchor it at startup, independently of field side.
 Use the Ground frame convention expected by the real estimator/filter.
 
 The old `current_odometry_to_last_odometry` topic remains unproduced.
-The preferred obstacle-filter branch now consumes absolute `inputs/odometry` and computes its own prediction deltas.
+The object filters consume absolute `inputs/odometry` and compute their own prediction deltas.
 Profiles 1–2 provide ideal absolute odometry; profiles 3–4 run the real odometry node.
 That node also publishes continuous-contact measurements on `odometry/kinematic_delta` for localization, whose production parameters control whether it uses them.
 Keep moving-observer tests and ground-truth comparisons to expose the actual production behavior.
@@ -535,7 +533,7 @@ Runtime validation is required for these implementations.
   Retain its transform check and verify joint/sole frame parity when enabling profile 3.
   Any actual robotics correction still requires explicit approval.
 - The obstacle-delta subscriber intentionally remains dangling, matching main `hulk_ros_z`.
-  The preferred obstacle filter uses absolute odometry; preserve that production path without a simulator delta adapter.
+  The object filters use absolute odometry; preserve that production path without a simulator delta adapter.
 - Start at the established sideline placement.
   Additional arbitrary-placement, symmetry and GC side-change tests are excluded by the user's decision; do not make them implementation gates or introduce simulator workarounds for them.
 - Correct sensor publication during pauses and scene edits matters more once IMU integration runs.
@@ -546,7 +544,7 @@ Runtime validation is required for these implementations.
 Profiles 1–4 have passed the same production launcher with real physics, motion models and ONNX Runtime.
 The latest profile-3 fixture measured 0.0489 m maximum walking odometry error over three seconds of simulation time, less than 1 mm paused drift, and less than 0.1 mm initial camera translation difference.
 The filter fixtures cover rolling-ball velocity, seeded 2 px noise, total detection loss, reacquisition, multiple hypotheses, nearest kick-ball selection and deletion expiry.
-The robot-obstacle fixture exercises the actual filter through announcing publishers and verifies acquisition and timeout.
+The robot-obstacle fixture exercises the actual humanoid filter through announcing publishers and verifies acquisition and removal.
 Raw sensor pairing and source timestamps are tested through the unchanged low-state bridge.
 A pause fixture verifies that physics time, robotics time, raw sensor timestamps, camera capture times and behavior timers remain frozen.
 A 300 ms model-lock fixture verifies frozen robotics time, no stale-sensor emergency and resumed coherent publication without catching up elapsed wall time.
@@ -561,10 +559,9 @@ The updated Bevy renderer displays the scene with orbit controls disabled, and t
 The local controller node starts without a device and injected controller inputs pass walking/disconnect tests.
 OS gamepad capture remains unverified because this environment exposes neither an input device nor `uinput`.
 
-The preferred obstacle filter computes observer-motion compensation from absolute odometry.
-Moving-observer goalpost outputs differed from arrival-time truth by up to 0.0611 m in the walking fixture; this comparison includes processing delay.
+The object filters compute observer-motion compensation from absolute odometry.
+With the previous obstacle filter, moving-observer goalpost outputs differed from arrival-time truth by up to 0.0611 m in the walking fixture; this comparison includes processing delay.
 The obsolete `current_odometry_to_last_odometry` topic remains unproduced.
-The obstacle filter's fixed map still offsets post centers by `(goal_post_diameter - line_width)/2` relative to the shared field helper, or 0.02 m with the default dimensions.
 These findings do not authorize further robotics changes.
 
 The user explicitly authorized the localization-improvements branch, ball-filter-realism branch and ball-search-behavior branch as three squashes below the simulator history.
@@ -587,7 +584,7 @@ The four live profiles and the separate localization tracking fixture pass; both
 - Current assembly and inputs: [robotics.rs](src/robotics.rs), [behavior_inputs.rs](src/behavior_inputs.rs), [robot_io.rs](src/robot_io.rs), [simulation.rs](src/simulation.rs), [Twix panel](../twix/src/panels/simulator.rs).
 - Raw sensor matching: [low_state_bridge](../../crates/nodes/low_state_bridge/src/lib.rs).
 - Common controls: [controller_handler](../../crates/nodes/controller_handler/src/lib.rs), [behavior input freshness](../../crates/nodes/behavior_node/src/node.rs), [whistle_filter](../../crates/nodes/whistle_filter/src/lib.rs), [game state filter](../../crates/nodes/game_controller_state_filter/src/lib.rs).
-- Filtering contracts: [ball_filter](../../crates/nodes/ball_filter/src/lib.rs), [obstacle_filter](../../crates/nodes/obstacle_filter/src/lib.rs), [announcing publisher](../../crates/ros-z-streams/src/announce.rs).
+- Filtering contracts: [ball_filter](../../crates/nodes/ball_filter/src/lib.rs), [humanoid_filter](../../crates/nodes/humanoid_filter/src/lib.rs), [goal_post_filter](../../crates/nodes/goal_post_filter/src/lib.rs), [announcing publisher](../../crates/ros-z-streams/src/announce.rs).
 - Estimated geometry: [ground_provider](../../crates/nodes/ground_provider/src/lib.rs), [camera_matrix_calculator](../../crates/nodes/camera_matrix_calculator/src/lib.rs), [odometry](../../crates/nodes/odometry/src/lib.rs).
 - Localization contracts: [feature extraction](../../crates/nodes/field_mark_association/src/features.rs), [VO messages](../../crates/types/src/visual_odometry.rs), [localization node](../../crates/nodes/localization-3d/src/node.rs), [local-frame initialization](../../crates/nodes/localization-3d/src/pose.rs), [symmetry branch selection](../../crates/nodes/localization-3d/src/alignment.rs), [IMU constraints](../../crates/localization-fagra/src/factors/imu.rs), [field side provider](../../crates/nodes/world_to_field_provider/src/lib.rs), [2D projection](../../crates/nodes/localization-2d/src/lib.rs).
 
@@ -595,7 +592,7 @@ The four live profiles and the separate localization tracking fixture pass; both
 
 The four profiles also run as independent player stacks in one shared MuJoCo world.
 Every player publishes its own `ground_truth/` references within its isolated transport scope.
-Profile 1 includes other simulated robots in ideal obstacles, and profiles 2–4 receive visible synthetic robot detections through the existing obstacle filter.
+Profile 1 includes other simulated robots in ideal obstacles, and profiles 2–4 receive visible synthetic robot detections through the humanoid filter.
 Initial count and the shared parameter location are selected before startup.
 Dynamic robot initialization preserves paused simulation time and existing poses.
 The team runtime test covers identity allocation, isolated body commands, paused and running additions, common clock behavior and socket cleanup.
