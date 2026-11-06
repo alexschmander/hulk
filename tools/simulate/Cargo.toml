@@ -6,7 +6,7 @@ license.workspace = true
 homepage.workspace = true
 
 [features]
-bhuman = ["dep:flatbuffers"]
+bhuman = ["dep:flatbuffers", "dep:nix"]
 
 [dependencies]
 ball_filter = { workspace = true }
@@ -69,6 +69,7 @@ mujoco-rs = { version = "5.0.0", features = [
   "renderer",
 ] }
 nalgebra = { workspace = true }
+nix = { workspace = true, features = ["socket"], optional = true }
 obstacle_filter = { workspace = true }
 odometry = { workspace = true }
 player_states_receiver = { workspace = true }

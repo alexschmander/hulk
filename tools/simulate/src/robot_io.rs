@@ -89,6 +89,23 @@ pub struct Observation {
     pub camera_matrix: CameraMatrix,
 }
 
+/// Measurements needed by a motion controller, without camera or limb geometry.
+#[derive(Clone)]
+pub(crate) struct MotionSample {
+    pub robot_to_world: nalgebra::Isometry3<f32>,
+    pub ground_to_world: nalgebra::Isometry3<f32>,
+    pub low_state: LowState,
+}
+impl From<&Observation> for MotionSample {
+    fn from(sample: &Observation) -> Self {
+        Self {
+            robot_to_world: sample.robot_to_world,
+            ground_to_world: sample.ground_to_world,
+            low_state: sample.low_state.clone(),
+        }
+    }
+}
+
 impl Observation {
     pub fn stationary(&mut self) {
         for motor in &mut self.low_state.motor_state_serial {
@@ -265,17 +282,16 @@ impl RobotBinding {
         data.forward();
     }
 
-    pub fn observe(&self, data: &Data) -> Observation {
-        let mut contacts = GroundContacts::default();
-        contacts.update(data);
-        self.observe_with_contacts(data, &contacts)
-    }
-
-    pub(crate) fn observe_with_contacts(
+    pub(crate) fn body_and_ground_pose(
         &self,
         data: &Data,
-        contacts: &GroundContacts,
-    ) -> Observation {
+    ) -> (nalgebra::Isometry3<f32>, nalgebra::Isometry3<f32>) {
+        let robot_to_world = body_pose(data, self.trunk);
+        let [left, right] = self.feet.map(|id| data.xpos()[id]);
+        (robot_to_world, ground_pose(robot_to_world, left, right))
+    }
+
+    pub(crate) fn motion_sample(&self, data: &Data) -> MotionSample {
         let sensors = data.sensordata();
         let orientation = quaternion(&sensors[self.orientation..self.orientation + 4]);
         let (roll, pitch, yaw) = orientation.euler_angles();
@@ -310,11 +326,32 @@ impl RobotBinding {
             // The MJCF models serial ankles; it does not model the parallel linkage motors.
             motor_state_parallel: Vec::new(),
         };
-        let robot_to_world = body_pose(data, self.trunk);
+        let (robot_to_world, ground_to_world) = self.body_and_ground_pose(data);
+        MotionSample {
+            low_state,
+            robot_to_world,
+            ground_to_world,
+        }
+    }
+
+    pub fn observe(&self, data: &Data) -> Observation {
+        let mut contacts = GroundContacts::default();
+        contacts.update(data);
+        self.observe_with_contacts(data, &contacts)
+    }
+
+    pub(crate) fn observe_with_contacts(
+        &self,
+        data: &Data,
+        contacts: &GroundContacts,
+    ) -> Observation {
+        let MotionSample {
+            low_state,
+            robot_to_world,
+            ground_to_world,
+        } = self.motion_sample(data);
         let world_to_robot = robot_to_world.inverse();
         let head_to_world = body_pose(data, self.head);
-        let [left, right] = self.feet.map(|id| data.xpos()[id]);
-        let ground_to_world = ground_pose(robot_to_world, left, right);
         let ground_to_robot = Isometry3::wrap(world_to_robot * ground_to_world);
         // MuJoCo camera: right, up, backwards. Projection camera: right, down, forwards.
         let camera_to_world = nalgebra::Isometry3::from_parts(

@@ -6,9 +6,10 @@ use ros_z::prelude::*;
 use types::primary_state::PrimaryState;
 
 use super::{
-    Actuation, Buttons, Configuration, Frame, JointSample, LedState, Robot, STEP_NS, Whistle, World,
+    Actuation, Buttons, COGNITION_NS, Configuration, Frame, JointSample, LedState, Robot, STEP_NS,
+    Whistle, World,
 };
-use crate::{network::Ports, robot_io::Observation, simulated_sdk::Control};
+use crate::{network::Ports, robot_io::MotionSample, simulated_sdk::Control};
 
 #[cfg(test)]
 #[path = "simulator_tests.rs"]
@@ -27,12 +28,59 @@ struct State {
     whistle: bool,
     incoming: Vec<Vec<u8>>,
     game: UdpSocket,
+    game_buffer: Box<[u8]>,
     sender: UdpSocket,
     ports: Ports,
     away: bool,
     packet: Option<Vec<u8>>,
     output: Option<Actuation>,
     primary: Option<PrimaryState>,
+}
+
+/// Keeps a robot's frame exclusive until its response is consumed. Dropping a
+/// batch on failure closes every unfinished exchange rather than leaving stale
+/// responses for a later tick.
+pub(crate) struct PendingStep<'a> {
+    native: &'a SimulatorRobot,
+    returns: Option<Vec<u8>>,
+    finished: bool,
+}
+
+impl PendingStep<'_> {
+    pub fn finish(mut self) -> Result<Vec<Vec<u8>>> {
+        let mut state = self.native.state.lock().unwrap();
+        let result = state.robot.finish_step()?;
+        let primary = primary_state(&result);
+        if state.primary != Some(primary) {
+            self.native
+                .runtime
+                .block_on(self.native.primary.publish(&primary))?;
+            state.primary = Some(primary);
+        }
+        if let Some(bytes) = &self.returns {
+            state
+                .sender
+                .send_to(bytes, ("127.0.0.1", state.ports.returns))?;
+        }
+        for packet in &result.team_messages {
+            state
+                .sender
+                .send_to(packet, ("127.0.0.1", state.ports.team))?;
+        }
+        let outgoing = result.team_messages.clone();
+        state.output = Some(result);
+        state.time_ns += STEP_NS;
+        self.finished = true;
+        Ok(outgoing)
+    }
+}
+
+impl Drop for PendingStep<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.native.state.lock().unwrap().robot.terminate();
+        }
+    }
 }
 
 impl SimulatorRobot {
@@ -58,6 +106,7 @@ impl SimulatorRobot {
                 whistle: false,
                 incoming: Vec::new(),
                 game,
+                game_buffer: vec![0; 65536].into_boxed_slice(),
                 sender: UdpSocket::bind("127.0.0.1:0")?,
                 ports,
                 away: true,
@@ -70,14 +119,35 @@ impl SimulatorRobot {
 
     /// Evaluate a native control tick outside the physics mutex. Startup supplies
     /// a held pose; the physics worker supplies live samples after joining.
-    pub fn step(&self, observation: &Observation, mut world: World) -> Result<Vec<Vec<u8>>> {
+    pub fn step(&self, observation: &MotionSample, world: World) -> Result<Vec<Vec<u8>>> {
+        self.begin_step(observation, Some(world))?.finish()
+    }
+
+    pub fn needs_world(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .time_ns
+            .is_multiple_of(COGNITION_NS)
+    }
+
+    pub fn begin_step(
+        &self,
+        observation: &MotionSample,
+        mut world: Option<World>,
+    ) -> Result<PendingStep<'_>> {
         let mut state = self.state.lock().unwrap();
         let mut packet = None;
         for _ in 0..64 {
-            let mut buffer = [0u8; 65536];
-            match state.game.recv(&mut buffer) {
+            let received = {
+                let State {
+                    game, game_buffer, ..
+                } = &mut *state;
+                game.recv(game_buffer)
+            };
+            match received {
                 Ok(size) => {
-                    let mut bytes = buffer[..size].to_vec();
+                    let mut bytes = state.game_buffer[..size].to_vec();
                     // Network presents opponents as team 24 for the HULK endpoints.
                     // Undo that translation before passing data to native team 5.
                     if crate::network::translate_state(&mut bytes) {
@@ -90,7 +160,9 @@ impl SimulatorRobot {
                 Err(error) => return Err(error.into()),
             }
         }
-        if state.away {
+        if state.away
+            && let Some(world) = &mut world
+        {
             let rotate = |pose: &mut [f32; 3]| {
                 pose[0] = -pose[0];
                 pose[1] = -pose[1];
@@ -111,7 +183,7 @@ impl SimulatorRobot {
         }
         // At most one edge per cognition frame, so a short tap between physics
         // steps is visible to native KeyStateEnhancer as a complete press/release.
-        if state.time_ns.is_multiple_of(20_000_000)
+        if state.time_ns.is_multiple_of(COGNITION_NS)
             && let Some((button, pressed)) = state.button_queue.pop_front()
         {
             match button {
@@ -123,6 +195,14 @@ impl SimulatorRobot {
         }
         let low = &observation.low_state;
         let imu = &low.imu_state;
+        let returns = if state.time_ns.is_multiple_of(500_000_000) {
+            let world = world
+                .as_ref()
+                .ok_or_else(|| color_eyre::eyre::eyre!("missing world for native return packet"))?;
+            Some(return_packet(&state, world, observation))
+        } else {
+            None
+        };
         let frame = Frame {
             time_ns: state.time_ns,
             joints: std::array::from_fn(|index| {
@@ -156,31 +236,15 @@ impl SimulatorRobot {
             }),
             game_controller: packet,
             team_messages: std::mem::take(&mut state.incoming),
-            world: Some(world.clone()),
+            world,
             ..Default::default()
         };
-        let result = state.robot.step(&frame)?;
-        let primary = primary_state(&result);
-        if state.primary != Some(primary) {
-            // The caller is the blocking physics worker, never a runtime worker.
-            self.runtime.block_on(self.primary.publish(&primary))?;
-            state.primary = Some(primary);
-        }
-        if state.time_ns.is_multiple_of(500_000_000) {
-            let bytes = return_packet(&state, &world, observation);
-            state
-                .sender
-                .send_to(&bytes, ("127.0.0.1", state.ports.returns))?;
-        }
-        for packet in &result.team_messages {
-            state
-                .sender
-                .send_to(packet, ("127.0.0.1", state.ports.team))?;
-        }
-        let outgoing = result.team_messages.clone();
-        state.output = Some(result);
-        state.time_ns += STEP_NS;
-        Ok(outgoing)
+        state.robot.begin_step(&frame)?;
+        Ok(PendingStep {
+            native: self,
+            returns,
+            finished: false,
+        })
     }
 
     pub fn enqueue_team(&self, packets: &[Vec<u8>]) -> Result<()> {
@@ -328,7 +392,7 @@ pub(super) fn led_brightness(state: LedState, time_ms: u64) -> u8 {
     }
 }
 
-fn return_packet(state: &State, world: &World, observation: &Observation) -> Vec<u8> {
+fn return_packet(state: &State, world: &World, observation: &MotionSample) -> Vec<u8> {
     let pose = world.pose;
     let ball = world.ball.map(|ball| {
         let dx = ball.position[0] - pose[0];

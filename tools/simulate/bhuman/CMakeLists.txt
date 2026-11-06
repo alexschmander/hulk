@@ -26,6 +26,10 @@ endforeach()
 get_target_property(worker_sources B-Human SOURCES)
 list(FILTER worker_sources EXCLUDE REGEX "/TeamMessageChannel\\.cpp$")
 set_property(TARGET B-Human PROPERTY SOURCES "${worker_sources}")
+# The IPC worker discards debug output; do not collect its unused stopwatch data.
+get_target_property(debug_sources Debugging SOURCES)
+list(FILTER debug_sources EXCLUDE REGEX "/TimingManager\\.cpp$")
+set_property(TARGET Debugging PROPERTY SOURCES "${debug_sources}")
 
 set(generated "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${generated}")
@@ -35,6 +39,7 @@ add_custom_command(OUTPUT "${generated}/protocol_generated.h"
 add_executable(bhuman-motion-worker "${CMAKE_CURRENT_LIST_DIR}/main.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/MotionInputs.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/CognitionInputs.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/HeadlessTiming.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/TeamTransport.cpp" "${generated}/protocol_generated.h")
 # Upstream forces mold for desktop executables; the adapter also supports the system linker.
 include(CheckLinkerFlag)
@@ -48,5 +53,6 @@ endif()
 set_property(TARGET bhuman-motion-worker PROPERTY CXX_COMPILER_LAUNCHER "")
 target_compile_features(bhuman-motion-worker PRIVATE cxx_std_20)
 target_compile_definitions(bhuman-motion-worker PRIVATE LINUX BHUMAN_REVISION="${BHUMAN_REVISION}")
-target_include_directories(bhuman-motion-worker PRIVATE "${generated}" "${FLATBUFFERS_SOURCE}/include")
+target_include_directories(bhuman-motion-worker PRIVATE "${generated}" "${FLATBUFFERS_SOURCE}/include"
+  "${BHUMAN_SOURCE}/Util/onnxruntime/include")
 target_link_libraries(bhuman-motion-worker PRIVATE B-Human Flags::Default)

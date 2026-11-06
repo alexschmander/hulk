@@ -108,6 +108,7 @@ pub(crate) fn bootstrap(
                     // Native cognition/motion owns its handover, rather than the
                     // HULK SDK. Evaluate fresh commands on the held pose while
                     // advancing only this robot's private startup clock.
+                    let motion_sample = crate::robot_io::MotionSample::from(&observation);
                     let pose = observation.ground_to_world;
                     let truth = crate::bhuman::World {
                         pose: [
@@ -129,7 +130,7 @@ pub(crate) fn bootstrap(
                             "B-Human startup timed out: {}",
                             io.status()
                         );
-                        native.step(&observation, truth.clone())?;
+                        native.step(&motion_sample, truth.clone())?;
                         io.publish_observation(&observation, io.now())?;
                         let current = io.now();
                         let target = clock.now();
@@ -409,6 +410,35 @@ pub struct PhysicsWorker {
     ready: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<Result<(), String>>>,
 }
+#[cfg(all(feature = "bhuman", unix))]
+fn finish_native_steps(
+    pending: &mut Vec<(crate::RobotId, crate::bhuman::PendingStep<'_>)>,
+    members: &[crate::team::Member],
+) -> Result<(), String> {
+    let mut outgoing = Vec::new();
+    for (id, step) in pending.drain(..) {
+        let packets = step
+            .finish()
+            .map_err(|error| format!("Player {id} B-Human: {error:#}"))?;
+        outgoing.push((id, packets));
+    }
+    // Deliver only after every robot has consumed this frame. Robot iteration
+    // order cannot make a packet arrive one frame earlier.
+    for (sender, packets) in outgoing {
+        for member in members {
+            if member.id.team == sender.team
+                && member.id != sender
+                && let Some(native) = member.io.bhuman()
+            {
+                native
+                    .enqueue_team(&packets)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl PhysicsWorker {
     pub(crate) fn start_team(physics: SharedPhysics, team: crate::team::Team) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -519,51 +549,73 @@ impl PhysicsWorker {
                     let ready = states.len() == members.len();
                     initialized.store(ready, Ordering::Release);
                     #[cfg(all(feature = "bhuman", unix))]
-                    if running && ready {
+                    let mut native_pending = Vec::new();
+                    #[cfg(all(feature = "bhuman", unix))]
+                    if running && ready && members.iter().any(|member| member.io.is_bhuman()) {
                         let mut native_frames = Vec::new();
-                        let balls = crate::observations::balls(&world);
-                        let observations: Vec<_> = members
+                        let inputs: Vec<_> = members
                             .iter()
-                            .filter_map(|member| {
-                                let state = states.get(&member.id)?;
-                                Some((member, state.binding.observe(world.data())))
+                            .filter(|member| member.io.is_bhuman())
+                            .map(|member| {
+                                let epoch = world.object_epoch(member.entity.unwrap());
+                                let needs_world = member.io.bhuman().unwrap().needs_world()
+                                    || native_epochs
+                                        .get(&member.id)
+                                        .is_none_or(|old| *old != epoch);
+                                (member, epoch, needs_world)
                             })
                             .collect();
-                        let pose = |observation: &crate::robot_io::Observation| {
-                            let transform = observation.ground_to_world;
-                            [
-                                transform.translation.x,
-                                transform.translation.y,
-                                transform.rotation.euler_angles().2,
-                            ]
+                        let needs_world = inputs.iter().any(|(_, _, needed)| *needed);
+                        let balls = if needs_world {
+                            crate::observations::balls(&world)
+                        } else {
+                            Vec::new()
                         };
-                        for (member, observation) in &observations {
-                            if member.io.is_bhuman() {
-                                let epoch = world.object_epoch(member.entity.unwrap());
-                                let truth = crate::bhuman::World {
-                                    pose: pose(observation),
-                                    ball: balls.first().map(|ball| crate::bhuman::Ball {
-                                        position: ball.position.map(|value| value as f32),
-                                        velocity: ball.velocity.map(|value| value as f32),
-                                    }),
-                                    players: observations
-                                        .iter()
-                                        .filter(|(other, _)| other.id != member.id)
-                                        .map(|(other, observation)| crate::bhuman::Player {
-                                            number: other.id.number,
-                                            teammate: other.id.team == member.id.team,
-                                            upright: observation.robot_to_world.translation.z > 0.4
-                                                && observation
-                                                    .robot_to_world
-                                                    .rotation
-                                                    .to_rotation_matrix()[(2, 2)]
-                                                    > 0.5,
-                                            pose: pose(observation),
-                                        })
-                                        .collect(),
-                                };
-                                native_frames.push((member, observation.clone(), truth, epoch));
-                            }
+                        let poses: Vec<_> = if needs_world {
+                            members
+                                .iter()
+                                .filter_map(|member| {
+                                    let binding = &states.get(&member.id)?.binding;
+                                    let (body, ground) = binding.body_and_ground_pose(world.data());
+                                    Some((
+                                        member.id,
+                                        [
+                                            ground.translation.x,
+                                            ground.translation.y,
+                                            ground.rotation.euler_angles().2,
+                                        ],
+                                        body.translation.z > 0.4
+                                            && body.rotation.to_rotation_matrix()[(2, 2)] > 0.5,
+                                    ))
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        for (member, epoch, needed) in inputs {
+                            let truth = needed.then(|| crate::bhuman::World {
+                                pose: poses.iter().find(|(id, _, _)| *id == member.id).unwrap().1,
+                                ball: balls.first().map(|ball| crate::bhuman::Ball {
+                                    position: ball.position.map(|value| value as f32),
+                                    velocity: ball.velocity.map(|value| value as f32),
+                                }),
+                                players: poses
+                                    .iter()
+                                    .filter(|(id, _, _)| *id != member.id)
+                                    .map(|(id, pose, upright)| crate::bhuman::Player {
+                                        number: id.number,
+                                        teammate: id.team == member.id.team,
+                                        upright: *upright,
+                                        pose: *pose,
+                                    })
+                                    .collect(),
+                            });
+                            let sample = states
+                                .get(&member.id)
+                                .unwrap()
+                                .binding
+                                .motion_sample(world.data());
+                            native_frames.push((member, sample, truth, epoch));
                         }
                         if !native_frames.is_empty() {
                             let frame_generation = world.generation;
@@ -571,41 +623,38 @@ impl PhysicsWorker {
                                 return Err("B-Human requires a 2 ms physics step".into());
                             }
                             drop(world);
-                            let mut outgoing = Vec::new();
-                            for (member, observation, truth, epoch) in &native_frames {
+                            native_pending.reserve(native_frames.len());
+                            for (member, observation, truth, epoch) in native_frames {
                                 let native = member.io.bhuman().unwrap();
                                 if native_epochs
-                                    .insert(member.id, *epoch)
-                                    .is_some_and(|old| old != *epoch)
+                                    .insert(member.id, epoch)
+                                    .is_some_and(|old| old != epoch)
                                 {
                                     native.reset().map_err(|error| {
                                         format!("Player {} reset: {error:#}", member.id)
                                     })?;
                                 }
-                                let packets =
-                                    native.step(observation, truth.clone()).map_err(|error| {
+                                let step =
+                                    native.begin_step(&observation, truth).map_err(|error| {
                                         format!("Player {} B-Human: {error:#}", member.id)
                                     })?;
-                                outgoing.push((member.id, packets));
+                                native_pending.push((member.id, step));
                             }
-                            // Deliver only after all robots have consumed this frame. Robot
-                            // iteration order cannot make a packet arrive one frame earlier.
-                            for (sender, packets) in outgoing {
-                                for member in &members {
-                                    if member.id.team == sender.team
-                                        && member.id != sender
-                                        && let Some(native) = member.io.bhuman()
-                                    {
-                                        native
-                                            .enqueue_team(&packets)
-                                            .map_err(|error| error.to_string())?;
-                                    }
+                            world = match physics.try_lock() {
+                                Some(world) => world,
+                                None => {
+                                    // A renderer/editor may hold the world for seconds.
+                                    // Consume responses before waiting on that unrelated
+                                    // lock so it cannot exhaust a native RPC deadline.
+                                    finish_native_steps(&mut native_pending, &members)?;
+                                    physics.lock()
                                 }
-                            }
-                            world = physics.lock();
+                            };
                             if world.generation != frame_generation {
                                 drop(world);
-                                for (member, _, _, _) in native_frames {
+                                native_pending.clear();
+                                for member in members.iter().filter(|member| member.io.is_bhuman())
+                                {
                                     member
                                         .io
                                         .bhuman()
@@ -632,11 +681,20 @@ impl PhysicsWorker {
                                         io.publish_frame(frame);
                                     }
                                 }
+                                // Native workers run while step1 and the previous body
+                                // publication complete. Join before accepting controls;
+                                // every robot still acts on this tick's original sample.
+                                #[cfg(all(feature = "bhuman", unix))]
+                                finish_native_steps(&mut native_pending, &members)?;
                                 for member in &members {
                                     if let Some(state) = states.get_mut(&member.id) {
                                         #[cfg(all(feature = "bhuman", unix))]
                                         if let Some(native) = member.io.bhuman() {
-                                            state.controller.apply(&state.binding, data, &native.control());
+                                            state.controller.apply(
+                                                &state.binding,
+                                                data,
+                                                &native.control(),
+                                            );
                                             continue;
                                         }
                                         // Every active-motion tick consumes a new motor packet.

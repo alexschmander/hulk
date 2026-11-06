@@ -101,7 +101,7 @@ pub fn run_benchmark(options: BenchmarkOptions) -> Result<Value> {
         let entity = app
             .world_mut()
             .spawn((
-                MjcfObject::new(root.join("assets/k1_robot.xml"), "Trunk")
+                MjcfObject::from_shared_file(root.join("assets/k1_robot.xml"), "Trunk")
                     .with_free_joint("world_joint")
                     .grounded(),
                 member.pose,

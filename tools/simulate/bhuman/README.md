@@ -85,7 +85,18 @@ clock until native commands provide active leg support and its clock catches up
 to the match. Paused and running additions use the same handover.
 Their native representation packets carry cognition requests to motion and
 motion feedback to cognition. RobotHealth carries the actual cognition heartbeat.
-Physics snapshots and worker exchanges happen outside the shared physics mutex.
+The host sends each robot its own motion sample every 2 ms and fresh world models
+on each 20 ms cognition tick. All workers execute concurrently while the host runs
+control-independent physics. Every reply is consumed before applying joint controls.
+The host never carries a native-state mutex across acquisition of the physics mutex.
+
+The worker creates a small ONNX Runtime pool with idle spinning disabled before
+loading native modules. It also replaces the discarded native debug stopwatch
+collector with an empty collector. Module graphs, policies, execution rates and
+simulator recording remain intact.
+The shared simulator owns the Rust runtime worker count, CPU placement,
+publication and recording pools, and Linux application allocator.
+The B-Human adapter configures its native child processes and frame exchanges.
 
 The host supplies field geometry through a temporary configuration layer,
 including ball radius, so native tactics and the MuJoCo field use the same dimensions.
@@ -118,7 +129,7 @@ Fetch simulator Git LFS assets and configure MuJoCo as described in the
 ```sh
 export BHUMAN_WORKER=/path/to/bhuman-motion-worker
 export BHUMAN_SOURCE=/path/to/BHumanCodeRelease
-cargo test -p simulate --features bhuman --lib bhuman:: -- --include-ignored
+cargo test -p simulate --features bhuman --lib bhuman:: -- --include-ignored --skip native_worker_preserves_reference_actuation --test-threads=1
 cargo test -p simulate --features bhuman --lib robot_io::tests
 cargo run -p simulate --features bhuman --bin bhuman-motion-smoke -- --soccer "$BHUMAN_WORKER" "$BHUMAN_SOURCE"
 ```
@@ -130,6 +141,12 @@ The physical soccer fixture starts in Initial, then switches to Playing with a
 ball in MuJoCo. It requires movement without falling and reports displacement.
 Omit `--soccer` for the explicit Prepare/Stand motion fixture. An optional final
 argument sets the number of 2 ms frames.
+
+To compare actuator outputs against a saved worker from before a runtime change,
+set `BHUMAN_REFERENCE_WORKER` to that binary and run
+`cargo test -p simulate --features bhuman --lib native_worker_preserves_reference_actuation -- --ignored --nocapture`.
+The replay varies the robot pose, ball and buttons while comparing every joint
+command, LED, game state and motion phase over 3,000 frames.
 
 After changing the schema, run the build script with `--generate-rust` to
 regenerate checked-in Rust bindings. C++ bindings regenerate during native builds.

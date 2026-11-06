@@ -6,15 +6,18 @@ mod benchmark;
 mod field;
 mod simulator;
 mod smoke;
-use field::write_field_configuration;
-pub(crate) use simulator::SimulatorRobot;
 pub use benchmark::{BenchmarkOptions, run_benchmark};
+use field::write_field_configuration;
+pub(crate) use simulator::{PendingStep, SimulatorRobot};
 pub use smoke::{SmokeReport, run_smoke};
 
 use std::{
     io::{Read, Write},
     net::Shutdown,
-    os::unix::net::{UnixListener, UnixStream},
+    os::{
+        fd::AsRawFd,
+        unix::net::{UnixListener, UnixStream},
+    },
     path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
@@ -30,6 +33,7 @@ use protocol_generated::hulk::bhuman as wire;
 
 pub const REVISION: &str = "2e3374ba896da8288607f9a1881b876642fe18b8";
 pub const STEP_NS: u64 = 2_000_000;
+pub const COGNITION_NS: u64 = 20_000_000;
 pub const JOINT_NAMES: [&str; 22] = [
     "headYaw",
     "headPitch",
@@ -96,6 +100,7 @@ pub struct Frame {
     pub motion: Motion,
     /// Forward and lateral velocity in m/s, followed by angular velocity in rad/s.
     pub velocity: [f32; 3],
+    /// Ground truth is needed on the native 20 ms cognition ticks.
     pub world: Option<World>,
     pub buttons: Buttons,
     pub whistle: Option<Whistle>,
@@ -177,6 +182,7 @@ pub struct Robot {
     epoch: u64,
     sequence: u64,
     time_ns: u64,
+    pending: Option<Instant>,
 }
 
 impl Robot {
@@ -212,11 +218,13 @@ impl Robot {
             epoch: (uuid::Uuid::new_v4().as_u128() as u64).max(1),
             sequence: 0,
             time_ns: 0,
+            pending: None,
         };
         let deadline = Instant::now() + robot.configuration.timeout;
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    stream.set_write_timeout(Some(robot.configuration.timeout))?;
                     robot.stream = Some(stream);
                     break;
                 }
@@ -285,6 +293,15 @@ impl Robot {
     }
 
     pub fn step(&mut self, frame: &Frame) -> Result<Actuation> {
+        self.begin_step(frame)?;
+        self.finish_step()
+    }
+
+    fn begin_step(&mut self, frame: &Frame) -> Result<()> {
+        ensure!(
+            self.pending.is_none(),
+            "B-Human already has a pending frame"
+        );
         ensure!(
             frame.time_ns == self.time_ns,
             "expected simulation time {}, got {}",
@@ -304,14 +321,14 @@ impl Robot {
                     .all(f32::is_finite),
             "non-finite B-Human input"
         );
-        let result = self.step_inner(frame);
+        let result = self.send_step(frame);
         if result.is_err() {
             self.terminate();
         }
         result
     }
 
-    fn step_inner(&mut self, frame: &Frame) -> Result<Actuation> {
+    fn send_step(&mut self, frame: &Frame) -> Result<()> {
         let mut builder = FlatBufferBuilder::new();
         let samples = frame
             .joints
@@ -405,7 +422,25 @@ impl Robot {
                 team_messages: Some(team_messages),
             },
         );
-        let bytes = self.exchange(&mut builder, wire::Payload::Step, payload.as_union_value())?;
+        self.send(&mut builder, wire::Payload::Step, payload.as_union_value())?;
+        self.pending = Some(Instant::now() + self.configuration.timeout);
+        Ok(())
+    }
+
+    fn finish_step(&mut self) -> Result<Actuation> {
+        let deadline = self
+            .pending
+            .take()
+            .ok_or_else(|| eyre!("no pending B-Human frame"))?;
+        let result = self.read_commands(deadline);
+        if result.is_err() {
+            self.terminate();
+        }
+        result
+    }
+
+    fn read_commands(&mut self, deadline: Instant) -> Result<Actuation> {
+        let bytes = self.receive(deadline)?;
         let envelope = decode(&bytes, self.epoch, self.sequence)?;
         let commands = envelope
             .payload_as_commands()
@@ -505,6 +540,17 @@ impl Robot {
         kind: wire::Payload,
         payload: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>,
     ) -> Result<Vec<u8>> {
+        ensure!(self.pending.is_none(), "B-Human has an unfinished frame");
+        self.send(builder, kind, payload)?;
+        self.receive(Instant::now() + self.configuration.timeout)
+    }
+
+    fn send<'a>(
+        &mut self,
+        builder: &mut FlatBufferBuilder<'a>,
+        kind: wire::Payload,
+        payload: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>,
+    ) -> Result<()> {
         let envelope = wire::Envelope::create(
             builder,
             &wire::EnvelopeArgs {
@@ -520,11 +566,17 @@ impl Robot {
             .stream
             .as_mut()
             .ok_or_else(|| eyre!("B-Human worker is stopped"))?;
-        stream.set_write_timeout(Some(self.configuration.timeout))?;
         stream
             .write_all(builder.finished_data())
             .wrap_err("sending B-Human frame")?;
-        let deadline = Instant::now() + self.configuration.timeout;
+        Ok(())
+    }
+
+    fn receive(&mut self, deadline: Instant) -> Result<Vec<u8>> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| eyre!("B-Human worker is stopped"))?;
         let mut prefix = [0u8; 4];
         read_exact_until(stream, &mut prefix, deadline)?;
         let length = u32::from_le_bytes(prefix) as usize;
@@ -539,6 +591,7 @@ impl Robot {
     }
 
     fn terminate(&mut self) {
+        self.pending = None;
         if let Some(stream) = self.stream.take() {
             let _ = stream.shutdown(Shutdown::Both);
         }
@@ -562,8 +615,21 @@ fn read_exact_until(
             .checked_duration_since(Instant::now())
             .ok_or_else(|| eyre!("B-Human response timed out"))?;
         ensure!(!remaining.is_zero(), "B-Human response timed out");
-        stream.set_read_timeout(Some(remaining))?;
-        let count = stream.read(bytes).wrap_err("reading B-Human response")?;
+        // Replies normally arrive during physics step1. Avoid changing socket
+        // options for those ready bytes; only a blocked read needs a timeout.
+        let count = match nix::sys::socket::recv(
+            stream.as_raw_fd(),
+            bytes,
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+        ) {
+            Ok(count) => count,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(nix::errno::Errno::EAGAIN) => {
+                stream.set_read_timeout(Some(remaining))?;
+                stream.read(bytes).wrap_err("reading B-Human response")?
+            }
+            Err(error) => return Err(error).wrap_err("reading B-Human response"),
+        };
         ensure!(count != 0, "B-Human worker disconnected");
         bytes = &mut bytes[count..];
     }
@@ -724,6 +790,83 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires BHUMAN_REFERENCE_WORKER and the native worker/source"]
+    fn native_worker_preserves_reference_actuation() {
+        let mut configuration = native_configuration(2);
+        configuration.cognition = true;
+        let mut reference_configuration = configuration.clone();
+        reference_configuration.executable = std::env::var_os("BHUMAN_REFERENCE_WORKER")
+            .expect("Set BHUMAN_REFERENCE_WORKER")
+            .into();
+        let mut reference = Robot::start(reference_configuration).unwrap();
+        let mut candidate = Robot::start(configuration).unwrap();
+        let mut maximum_error = 0.0f32;
+        for index in 0..3000 {
+            let mut frame = soccer_frame(index * STEP_NS, if index < 500 { 0 } else { 3 });
+            let truth = frame.world.as_mut().unwrap();
+            truth.pose[0] += index as f32 * 0.00005;
+            truth.pose[2] = index as f32 * 0.00002;
+            truth.ball.as_mut().unwrap().position[1] = (index as f32 * 0.03).sin() * 0.1;
+            // Exercise both real policy inference and native button handling.
+            frame.buttons.f1 = (2000..2020).contains(&index);
+            frame.buttons.stand = (2200..2900).contains(&index);
+            let world = if !frame.time_ns.is_multiple_of(COGNITION_NS) {
+                frame.world.take()
+            } else {
+                None
+            };
+            candidate.begin_step(&frame).unwrap();
+            if let Some(world) = world {
+                frame.world = Some(world);
+            }
+            if index == 0 {
+                assert!(
+                    candidate.begin_step(&frame).is_err(),
+                    "accepted overlapping frames"
+                );
+            }
+            let expected = reference.step(&frame).unwrap();
+            let actual = candidate.finish_step().unwrap();
+            assert_eq!(actual.leds, expected.leds, "frame {index}");
+            assert_eq!(actual.motion, expected.motion, "frame {index}");
+            assert_eq!(actual.phase, expected.phase, "frame {index}");
+            assert_eq!(actual.game_state, expected.game_state, "frame {index}");
+            assert_eq!(actual.player_state, expected.player_state, "frame {index}");
+            assert_eq!(actual.cognition_time_ns, expected.cognition_time_ns);
+            for (joint, (actual, expected)) in
+                actual.joints.iter().zip(&expected.joints).enumerate()
+            {
+                for (a, b) in [
+                    actual.position,
+                    actual.velocity,
+                    actual.torque,
+                    actual.kp,
+                    actual.kd,
+                    actual.torque_limit,
+                ]
+                .into_iter()
+                .zip([
+                    expected.position,
+                    expected.velocity,
+                    expected.torque,
+                    expected.kp,
+                    expected.kd,
+                    expected.torque_limit,
+                ]) {
+                    maximum_error = maximum_error.max((a - b).abs());
+                    assert!(
+                        (a - b).abs() <= 1e-5,
+                        "frame {index} joint {joint}: {a} != {b}"
+                    );
+                }
+            }
+        }
+        eprintln!("native reference maximum actuator difference: {maximum_error}");
+        candidate.stop().unwrap();
+        reference.stop().unwrap();
+    }
+
+    #[test]
     #[ignore = "Requires the pinned B-Human worker and source checkout"]
     fn native_handlers_apply_whistle_confidence_buttons_penalties_and_leds() {
         let mut configuration = native_configuration(2);
@@ -800,7 +943,10 @@ mod tests {
                 let mut frame = soccer_frame(index * STEP_NS, 3);
                 frame.game_controller.as_mut().unwrap()[5] = (index / 250) as u8;
                 frame.team_messages = std::mem::take(&mut pending[robot]);
-                let result = robots[robot].step(&frame).unwrap();
+                robots[robot].begin_step(&frame).unwrap();
+            }
+            for robot in 0..2 {
+                let result = robots[robot].finish_step().unwrap();
                 received[robot] |= result.teammates > 0;
                 sent += result.team_messages.len();
                 outgoing[robot] = result.team_messages;
