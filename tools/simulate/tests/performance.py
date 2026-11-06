@@ -99,7 +99,7 @@ def run_case(binary, label, profile, players, repeat, args):
             print(f'START {label} {profile} {players}v{players} '
                   f'repeat={repeat} startup={startup:.2f}s', flush=True)
             client.complete('simulator_control', session_id=sid,
-                            command={'kind': 'set_speed', 'factor': 4})
+                            command={'kind': 'set_speed', 'factor': args.speed})
             client.complete('simulator_control', session_id=sid, command={
                 'kind': 'advance', 'duration_ns': str(round(args.warmup * 1e9)),
                 'wall_timeout_ms': 120000,
@@ -208,6 +208,8 @@ def main():
     parser.add_argument('--repeats', type=int, default=1)
     parser.add_argument('--samples', type=int, default=3)
     parser.add_argument('--seconds', type=float, default=3)
+    parser.add_argument('--speed', type=float, choices=(0.25, 0.5, 1, 2, 4, 8, 16), default=4,
+                        help='Playback ceiling; use 16 to measure throughput above 4x')
     parser.add_argument('--warmup', type=float, default=5,
                         help='Simulation seconds to advance before sampling')
     args = parser.parse_args()
@@ -240,7 +242,7 @@ def main():
         'binaries': {label: {'path': str(binary), 'sha256': hashlib.sha256(
             binary.read_bytes()).hexdigest()} for label, binary in binaries.items()},
         'configuration': {'location': 'hsl_middle', 'referee': 'external',
-                          'rendering': 'disabled', 'recording': 'all topics', 'speed': 4,
+                          'rendering': 'disabled', 'recording': 'all topics', 'speed': args.speed,
                           'robot_state': 'Initial', 'warmup_simulation_seconds': args.warmup,
                           'sample_wall_seconds': args.seconds, 'samples': args.samples},
     }

@@ -522,6 +522,11 @@ with an external referee, rendering disabled and full topic recording enabled.
 The results measure standing simulation throughput and CPU cost; they do not
 measure a running match or GUI rendering.
 
+Pass `--speed 16` to measure throughput above the default 4x playback ceiling.
+Both binaries must support the selected ceiling and use the same value. The 8x
+and 16x playback choices change wall pacing only; physics timesteps and robotics
+clock increments remain unchanged.
+
 The script alternates binary order between cases and reports simulation speed,
 worker CPU seconds per simulation second, memory and recording drops. It checks
 recording finalization and removes its temporary recordings after each session.

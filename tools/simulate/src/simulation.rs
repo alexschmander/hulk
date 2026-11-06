@@ -160,14 +160,18 @@ pub(crate) enum Speed {
     Normal,
     Double,
     Quadruple,
+    Octuple,
+    Sixteenfold,
 }
 impl Speed {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Quarter,
         Self::Half,
         Self::Normal,
         Self::Double,
         Self::Quadruple,
+        Self::Octuple,
+        Self::Sixteenfold,
     ];
     pub fn factor(self) -> f64 {
         match self {
@@ -176,6 +180,8 @@ impl Speed {
             Self::Normal => 1.0,
             Self::Double => 2.0,
             Self::Quadruple => 4.0,
+            Self::Octuple => 8.0,
+            Self::Sixteenfold => 16.0,
         }
     }
     pub fn label(self) -> &'static str {
@@ -185,6 +191,8 @@ impl Speed {
             Self::Normal => "1×",
             Self::Double => "2×",
             Self::Quadruple => "4×",
+            Self::Octuple => "8×",
+            Self::Sixteenfold => "16×",
         }
     }
 }
