@@ -86,7 +86,6 @@ pub struct MapPanel {
     ball_percepts: EnabledLayer<layers::BallPercepts, Ground>,
     ball_position: EnabledLayer<layers::BallPosition, Field>,
     ball_filter: EnabledLayer<layers::BallFilter, Ground>,
-    obstacle_filter: EnabledLayer<layers::ObstacleFilter, Ground>,
     voronoi_cells: EnabledLayer<layers::VoronoiCell, Field>,
 }
 
@@ -108,7 +107,6 @@ impl Panel for MapPanel {
         let ball_percepts = EnabledLayer::new(context.backend.clone(), context.value, false);
         let ball_position = EnabledLayer::new(context.backend.clone(), context.value, true);
         let ball_filter = EnabledLayer::new(context.backend.clone(), context.value, false);
-        let obstacle_filter = EnabledLayer::new(context.backend.clone(), context.value, false);
         let voronoi_cells = EnabledLayer::new(context.backend.clone(), context.value, false);
 
         let runtime_handle = context.backend.runtime_handle().clone();
@@ -160,7 +158,6 @@ impl Panel for MapPanel {
             ball_percepts,
             ball_position,
             ball_filter,
-            obstacle_filter,
             voronoi_cells,
         }
     }
@@ -182,7 +179,6 @@ impl Panel for MapPanel {
             "ball_percepts": self.ball_percepts.save(),
             "ball_position": self.ball_position.save(),
             "ball_filter": self.ball_filter.save(),
-            "obstacle_filter": self.obstacle_filter.save(),
             "voronoi_cells": self.voronoi_cells.save(),
         })
     }
@@ -203,7 +199,6 @@ impl Panel for MapPanel {
                 self.ball_percepts.checkbox(ui);
                 self.ball_position.checkbox(ui);
                 self.ball_filter.checkbox(ui);
-                self.obstacle_filter.checkbox(ui);
                 self.voronoi_cells.checkbox(ui);
             });
         ComboBox::from_id_salt("plot_type_selector")
@@ -280,8 +275,6 @@ impl Panel for MapPanel {
         self.ball_position
             .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.ball_filter
-            .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
-        self.obstacle_filter
             .generic_paint(&painter, plot_type, ground_to_field, &field_dimensions);
         self.goal_post_filter.generic_paint(
             &painter,
