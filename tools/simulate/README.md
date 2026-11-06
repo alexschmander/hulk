@@ -684,3 +684,24 @@ binary measured 1.99995x the original hill-climb baseline in that batch, narrowl
 missing the strict 2x assertion. All runs retained recording without drops and
 fresh localization. Exact samples, hashes, checks and limitations are in the
 [panel responsiveness record](../../docs/tooling/simulator_panel_responsiveness_20261107.json).
+
+For native opponents, build `bhuman-benchmark` with `--features bhuman` and save
+both simulator binaries and their native worker binaries before comparing:
+
+```sh
+python3 tools/simulate/tests/bhuman_performance.py \
+  --case before=/path/to/before-benchmark,/path/to/before-native-worker \
+  --case after=/path/to/after-benchmark,/path/to/after-native-worker \
+  --source /path/to/pinned/BHumanCodeRelease \
+  --output logs/simulator-performance/bhuman.json
+```
+
+Use the same MuJoCo environment as the MCP smoke test. This fixture runs five
+HULKs against five native B-Humans with Localization, full MCAP recording, field,
+goals and ball. Both binaries must include the identical benchmark harness and
+16× playback ceiling. Every repeat warms up for five simulated seconds and
+measures thirty simulated seconds, alternating binary order. Results include
+binary hashes, process-tree CPU cost, recording finalization and topic counts,
+upright/clock checks, and fresh HULK localization estimates checked against truth.
+Use `--playing` for autonomous match behavior, `--no-recording` to measure MCAP
+overhead, or `--require-speedup before after 3` to enforce a throughput target.

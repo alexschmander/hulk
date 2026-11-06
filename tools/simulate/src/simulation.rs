@@ -247,6 +247,7 @@ impl Speed {
         }
     }
 }
+
 struct Playback {
     speed: AtomicU8,
     actual: AtomicU32,

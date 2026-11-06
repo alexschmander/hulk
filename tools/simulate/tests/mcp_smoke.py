@@ -163,6 +163,13 @@ def smoke(client, directory, render):
     sid = session["session_id"]
     target = session["targets"][0]["target_id"]
     print("Started paused headless session", flush=True)
+    for factor in [16, 1]:
+        status = client.complete(
+            "simulator_control", session_id=sid,
+            command={"kind": "set_speed", "factor": factor},
+        )
+        assert status["session"]["state"] == "paused", status
+        assert status["session"]["simulation_time_ns"] == "0", status
     graph = client.call("rosz_graph", target_id=target, limit=1000)
     assert graph["endpoints"]
     (directory / "graph.json").write_text(json.dumps(graph, indent=2))

@@ -2,11 +2,13 @@
 #[allow(dead_code, unused_imports, mismatched_lifetime_syntaxes, unsafe_op_in_unsafe_fn)]
 #[rustfmt::skip]
 mod protocol_generated;
+mod benchmark;
 mod field;
 mod simulator;
 mod smoke;
 use field::write_field_configuration;
 pub(crate) use simulator::SimulatorRobot;
+pub use benchmark::{BenchmarkOptions, run_benchmark};
 pub use smoke::{SmokeReport, run_smoke};
 
 use std::{

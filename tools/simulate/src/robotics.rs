@@ -769,7 +769,7 @@ impl RobotStack {
         ))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "bhuman", unix)))]
     pub(crate) fn node(&self) -> &Arc<Node> {
         &self._node
     }

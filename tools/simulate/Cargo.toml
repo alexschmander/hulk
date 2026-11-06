@@ -123,6 +123,11 @@ name = "bhuman-motion-smoke"
 path = "src/bin/bhuman_motion_smoke.rs"
 required-features = ["bhuman"]
 
+[[bin]]
+name = "bhuman-benchmark"
+path = "src/bin/bhuman_benchmark.rs"
+required-features = ["bhuman"]
+
 [dev-dependencies]
 bincode = { workspace = true }
 ros-z-schema = { workspace = true }
