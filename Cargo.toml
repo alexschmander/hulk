@@ -54,7 +54,6 @@ members = [
   "crates/nodes/motion",
   "crates/nodes/motion_inference",
   "crates/nodes/motor_commands_collector",
-  "crates/nodes/obstacle_filter",
   "crates/nodes/odometer_bridge",
   "crates/nodes/odometry",
   "crates/nodes/player_states_receiver",
@@ -222,7 +221,6 @@ notify = "8"
 nucleo-matcher = "0.3.1"
 num-traits = "0.2"
 object_tracking = { path = "crates/object_tracking" }
-obstacle_filter = { path = "crates/nodes/obstacle_filter" }
 odometer_bridge = { path = "crates/nodes/odometer_bridge" }
 odometry = { path = "crates/nodes/odometry" }
 once_cell = "1.20.3"
