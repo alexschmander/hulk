@@ -10,6 +10,7 @@
     "localization/estimate",
     "ball_filter/ball_position",
     "visual_kick/ball_position",
-    "obstacles",
+    "humanoid_filter/obstacles",
+    "goal_post_filter/obstacles",
   ],
 }

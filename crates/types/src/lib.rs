@@ -24,7 +24,6 @@ pub mod motion_type;
 pub mod motor_command;
 pub mod multivariate_normal_distribution;
 pub mod object_detection;
-pub mod obstacle_filter;
 pub mod obstacles;
 pub mod odometry;
 pub mod parameters;

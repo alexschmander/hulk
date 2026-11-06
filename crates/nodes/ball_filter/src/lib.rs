@@ -86,8 +86,9 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .build()
         .await?;
     let mut field_poses = field_prior::FieldPoseHistory::default();
+    // Only robots occlude balls, so goal posts are not needed.
     let obstacle_sub = node
-        .subscriber::<Vec<Obstacle>>("obstacles")
+        .subscriber::<Vec<Obstacle>>("humanoid_filter/obstacles")
         .build()
         .await?;
     let selected_obstacles_pub = node

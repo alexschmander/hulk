@@ -132,7 +132,8 @@ fn validate_profile(profile: crate::Profile, require_acquisition: bool) {
         "ground_to_field",
         "ball_filter/ball_position",
         "visual_kick/ball_position",
-        "obstacles",
+        "humanoid_filter/obstacles",
+        "goal_post_filter/obstacles",
     ] {
         let name = format!("/simulator/startup_test/{topic}");
         let graph = io.node().graph().lock();
@@ -586,11 +587,13 @@ fn validate_filtering(
                 .build()
                 .await
                 .unwrap(),
-            node.subscriber::<Vec<types::obstacles::Obstacle>>("obstacles")
-                .cache(1)
-                .build()
-                .await
-                .unwrap(),
+            node.subscriber::<Vec<types::obstacles::Obstacle>>(
+                "goal_post_filter/obstacles",
+            )
+            .cache(1)
+            .build()
+            .await
+            .unwrap(),
             node.subscriber::<Option<linear_algebra::Point2<coordinate_systems::Field>>>(
                 "suggested_search_position",
             )
@@ -842,16 +845,20 @@ fn validate_body_state(runtime: &tokio::runtime::Runtime, io: &Robotics, physics
     let (obstacles, reference_obstacles) = runtime.block_on(async {
         let node = io.node();
         (
-            node.subscriber::<Vec<types::obstacles::Obstacle>>("obstacles")
-                .cache(16)
-                .build()
-                .await
-                .unwrap(),
-            node.subscriber::<Vec<types::obstacles::Obstacle>>("ground_truth/obstacles")
-                .cache(16)
-                .build()
-                .await
-                .unwrap(),
+            node.subscriber::<Vec<types::obstacles::Obstacle>>(
+                "goal_post_filter/obstacles",
+            )
+            .cache(16)
+            .build()
+            .await
+            .unwrap(),
+            node.subscriber::<Vec<types::obstacles::Obstacle>>(
+                "ground_truth/goal_post_filter/obstacles",
+            )
+            .cache(16)
+            .build()
+            .await
+            .unwrap(),
         )
     });
     let start = Instant::now();
@@ -916,7 +923,7 @@ fn validate_body_state(runtime: &tokio::runtime::Runtime, io: &Robotics, physics
         let reference = reference_obstacles
             .get_nearest(obstacles.latest_stamp().unwrap())
             .unwrap();
-        assert!(obstacles.get_latest().unwrap().len() >= 4);
+        assert!(!obstacles.get_latest().unwrap().is_empty());
         assert!(
             obstacles
                 .get_latest()

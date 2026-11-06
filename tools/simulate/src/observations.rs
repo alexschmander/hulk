@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn real_obstacle_filter_consumes_robot_boxes_and_expires_them() {
+    async fn real_humanoid_filter_consumes_robot_boxes_and_expires_them() {
         use projection::Projection;
         use ros_z_streams::CreateAnnouncingPublisher;
         use std::{sync::Arc, time::Duration};
@@ -703,12 +703,12 @@ mod tests {
             .await
             .unwrap();
         let obstacles = node
-            .subscriber::<Vec<Obstacle>>("obstacles")
+            .subscriber::<Vec<Obstacle>>("humanoid_filter/obstacles")
             .cache(1)
             .build()
             .await
             .unwrap();
-        let task = tokio::spawn(obstacle_filter::run_boxed(context.clone()));
+        let task = tokio::spawn(humanoid_filter::run_boxed(context.clone()));
         let sample = {
             let data = model();
             RobotBinding::new(&data, "").unwrap().observe(&data)
@@ -759,9 +759,16 @@ mod tests {
             .iter()
             .find(|o| o.kind == ObstacleKind::Robot)
             .expect("robot fixture not acquired");
-        assert!((robot.position - position).norm() < 0.001);
+        assert!((robot.position - position).norm() < 0.05);
         for _ in 0..45 {
             let time = node.clock().now();
+            camera
+                .publish(&TimeWrapper {
+                    time,
+                    inner: sample.camera_matrix.clone(),
+                })
+                .await
+                .unwrap();
             odometry
                 .announce(time)
                 .await

@@ -66,7 +66,9 @@ impl Readiness {
                     |_| true,
                 )
                 .await?,
-                Probe::new::<Vec<Obstacle>>(node, "obstacles", |_| true).await?,
+                Probe::new::<Vec<Obstacle>>(node, "humanoid_filter/obstacles", |_| true).await?,
+                Probe::new::<Vec<Obstacle>>(node, "goal_post_filter/obstacles", |_| true)
+                    .await?,
             ]);
         }
         if profile.body_state() {
