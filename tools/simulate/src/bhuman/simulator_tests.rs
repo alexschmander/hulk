@@ -316,6 +316,33 @@ fn mixed_match_steps_native_players_and_preserves_pause() {
         "native LED blink advanced during pause"
     );
     drop(worker);
+    // Inputs may arrive while a native frame computes. Cancelling that frame
+    // must close the process, rather than leave a reply for the next tick.
+    {
+        let member = &native[1];
+        let observation = {
+            let world = physics.lock();
+            crate::robot_io::RobotBinding::new(
+                world.data(),
+                &format!("object_{}_", member.entity.unwrap().to_bits()),
+            )
+            .unwrap()
+            .observe(world.data())
+        };
+        let robot = member.io.bhuman().unwrap();
+        let pending = robot
+            .begin_step(
+                &crate::robot_io::MotionSample::from(&observation),
+                Some(crate::bhuman::World::default()),
+            )
+            .unwrap();
+        robot
+            .button(0, booster::ButtonEventType::PressDown)
+            .unwrap();
+        drop(pending);
+        assert!(robot.poll().is_some(), "cancelled native process survived");
+        assert!(robot.state.lock().unwrap().robot.stream.is_none());
+    }
     drop(native);
     drop(team);
     drop(app);
@@ -332,7 +359,7 @@ fn bind_players(app: &mut App, team: &Team) {
         let entity = app
             .world_mut()
             .spawn((
-                MjcfObject::new(
+                MjcfObject::from_shared_file(
                     concat!(env!("CARGO_MANIFEST_DIR"), "/assets/k1_robot.xml"),
                     "Trunk",
                 )

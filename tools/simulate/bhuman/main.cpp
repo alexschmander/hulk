@@ -16,6 +16,7 @@
 #include "Streaming/InStreams.h"
 #include "Streaming/OutStreams.h"
 #include "protocol_generated.h"
+#include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
 #include <cmath>
@@ -360,34 +361,37 @@ private:
               "invalid world pose");
       return Pose2f(p->yaw(), p->x() * 1000.f, p->y() * 1000.f);
     };
-    require(step.world(), "cognition requires world ground truth");
-    data.pose = pose(step.world()->pose());
-    data.pose.quality = RobotPose::superb;
-    if (const auto *ball = step.world()->ball()) {
-      require(ball->position() && ball->velocity(),
-              "invalid ball ground truth");
-      const auto *p = ball->position();
-      const auto *v = ball->velocity();
-      require(std::isfinite(p->x()) && std::isfinite(p->y()) &&
-                  std::isfinite(v->x()) && std::isfinite(v->y()),
-              "invalid ball vector");
-      data.ball.estimate.position =
-          data.pose.inverse() * Vector2f(p->x() * 1000.f, p->y() * 1000.f);
-      data.ball.estimate.velocity = Vector2f(v->x() * 1000.f, v->y() * 1000.f)
-                                        .rotated(-data.pose.rotation);
-      data.ball.lastPerception = data.ball.estimate.position;
-      data.ball.timeWhenLastSeen = data.ball.timeWhenDisappeared = time;
-      data.ball.seenPercentage = 100;
-    } else
-      data.ball.seenPercentage = 0;
-    data.players.clear();
-    if (const auto *players = step.world()->players()) {
-      require(players->size() <= 9, "too many world players");
-      for (const auto *p : *players) {
-        require(p->number() >= 1 && p->number() <= 5,
-                "invalid world player number");
-        data.players.push_back(
-            {p->number(), p->teammate(), p->upright(), pose(p->pose())});
+    require(step.world() || step.time_ns() % 20000000 != 0,
+            "cognition frames require world ground truth");
+    if (step.world()) {
+      data.pose = pose(step.world()->pose());
+      data.pose.quality = RobotPose::superb;
+      if (const auto *ball = step.world()->ball()) {
+        require(ball->position() && ball->velocity(),
+                "invalid ball ground truth");
+        const auto *p = ball->position();
+        const auto *v = ball->velocity();
+        require(std::isfinite(p->x()) && std::isfinite(p->y()) &&
+                    std::isfinite(v->x()) && std::isfinite(v->y()),
+                "invalid ball vector");
+        data.ball.estimate.position =
+            data.pose.inverse() * Vector2f(p->x() * 1000.f, p->y() * 1000.f);
+        data.ball.estimate.velocity = Vector2f(v->x() * 1000.f, v->y() * 1000.f)
+                                          .rotated(-data.pose.rotation);
+        data.ball.lastPerception = data.ball.estimate.position;
+        data.ball.timeWhenLastSeen = data.ball.timeWhenDisappeared = time;
+        data.ball.seenPercentage = 100;
+      } else
+        data.ball.seenPercentage = 0;
+      data.players.clear();
+      if (const auto *players = step.world()->players()) {
+        require(players->size() <= 9, "too many world players");
+        for (const auto *p : *players) {
+          require(p->number() >= 1 && p->number() <= 5,
+                  "invalid world player number");
+          data.players.push_back(
+              {p->number(), p->teammate(), p->upright(), pose(p->pose())});
+        }
       }
     }
     if (const auto *buttons = step.buttons()) {
@@ -445,6 +449,14 @@ int main(int argc, char **argv) {
   const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   uint64_t epoch = 0, sequence = 0;
   try {
+    // CompiledNN2ONNX uses the process-wide ORT environment. Create it before
+    // loading any modules: each robot already runs in its own worker, and the
+    // small batch-one motion policies do not need a machine-sized spinning pool.
+    Ort::ThreadingOptions threading;
+    threading.SetGlobalIntraOpNumThreads(2)
+        .SetGlobalInterOpNumThreads(1)
+        .SetGlobalSpinControl(0);
+    Ort::Env inference(threading, ORT_LOGGING_LEVEL_WARNING, "hulk-bhuman");
     require(fd >= 0, "cannot create worker socket");
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
