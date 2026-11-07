@@ -12,7 +12,7 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     sync::{
-        Arc, Mutex, Weak,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -70,39 +70,6 @@ enum WriteEvent {
     Checkpoint(Checkpoint, CheckpointReply),
     Finish(Checkpoint),
 }
-// Recorders share an I/O runtime while any recording is alive. A weak cache
-// permits reuse across robots without keeping threads alive after the session.
-struct RecordingRuntime(Option<tokio::runtime::Runtime>);
-impl RecordingRuntime {
-    fn new() -> Result<Self> {
-        Ok(Self(Some(
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .thread_name("simulator-mcap")
-                .on_thread_start(crate::cpu_affinity::worker)
-                .enable_all()
-                .build()?,
-        )))
-    }
-}
-impl Drop for RecordingRuntime {
-    fn drop(&mut self) {
-        if let Some(runtime) = self.0.take() {
-            runtime.shutdown_background();
-        }
-    }
-}
-fn recording_runtime() -> Result<Arc<RecordingRuntime>> {
-    static SHARED: Mutex<Weak<RecordingRuntime>> = Mutex::new(Weak::new());
-    let mut shared = SHARED.lock().unwrap();
-    if let Some(runtime) = shared.upgrade() {
-        return Ok(runtime);
-    }
-    let runtime = Arc::new(RecordingRuntime::new()?);
-    *shared = Arc::downgrade(&runtime);
-    Ok(runtime)
-}
-
 pub struct Recording {
     sender: mpsc::Sender<Ingest>,
     admission: Arc<std::sync::Mutex<Admission>>,
@@ -110,7 +77,7 @@ pub struct Recording {
     stop: tokio_util::sync::CancellationToken,
     task: Option<tokio::task::JoinHandle<Result<()>>>,
     pub dropped: Arc<AtomicU64>,
-    _runtime: Arc<RecordingRuntime>,
+    _runtime: Arc<super::RobotRuntime>,
 }
 impl Recording {
     pub async fn start(
@@ -120,26 +87,7 @@ impl Recording {
         directory: &std::path::Path,
         parameters: &super::Parameters,
         health: super::Health,
-    ) -> Result<Self> {
-        Self::start_on(
-            context,
-            node,
-            namespace,
-            directory,
-            parameters,
-            health,
-            recording_runtime()?,
-        )
-        .await
-    }
-    async fn start_on(
-        context: &Arc<Context>,
-        node: Arc<Node>,
-        namespace: &str,
-        directory: &std::path::Path,
-        parameters: &super::Parameters,
-        health: super::Health,
-        runtime: Arc<RecordingRuntime>,
+        runtime: Arc<super::RobotRuntime>,
     ) -> Result<Self> {
         let local_schemas = LocalSchemaCapture::default();
         let file = File::options()
@@ -301,10 +249,11 @@ impl Recording {
             writer.await??;
             Ok(())
         };
+        // Keep capture beside its producers to avoid cross-runtime wakeups on
+        // every sample. The owner also keeps this runtime alive while a dropped
+        // recorder drains during failed or cancelled robot startup.
         let task = runtime
-            .0
-            .as_ref()
-            .unwrap()
+            .handle()
             .spawn(work.with_subscriber(tracing::Dispatch::none()));
         Ok(Self {
             sender,
@@ -550,7 +499,11 @@ mod tests {
         );
         let node = Arc::new(context.create_node("capture").build().await.unwrap());
         let directory = tempfile::tempdir().unwrap();
-        let recording = Recording::start_on(
+        let startup =
+            super::super::Startup::new(directory.path().join("logs"), context.clock().clone())
+                .unwrap();
+        let owner = Arc::new(super::super::RobotRuntime::new(startup.capture).unwrap());
+        let recording = Recording::start(
             &context,
             node.clone(),
             "/capture_lifetime",
@@ -562,7 +515,7 @@ mod tests {
                 capture_level: 3,
             },
             super::super::Health::default(),
-            Arc::new(RecordingRuntime::new().unwrap()),
+            owner.clone(),
         )
         .await
         .unwrap();
@@ -572,6 +525,8 @@ mod tests {
             publisher.publish(&value).await.unwrap();
         }
         drop(recording);
+        // Simulate failed startup dropping the robot's last external owner.
+        drop(owner);
         tokio::time::timeout(Duration::from_secs(5), async {
             while runtime.strong_count() != 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;

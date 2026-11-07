@@ -111,6 +111,7 @@ impl Telemetry {
         context: &Arc<Context>,
         namespace: &str,
         layers: &[PathBuf],
+        runtime: Arc<RobotRuntime>,
     ) -> Result<Self> {
         let node = Arc::new(context.create_node("simulator_recording").build().await?);
         let parameters = node.bind_parameter_as::<Parameters>("simulator_recording")?;
@@ -155,6 +156,7 @@ impl Telemetry {
                     &startup.directory,
                     &parameters,
                     health.clone(),
+                    runtime,
                 )
                 .await?,
             )

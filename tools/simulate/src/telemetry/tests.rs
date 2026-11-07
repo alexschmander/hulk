@@ -42,9 +42,11 @@ async fn disabling_mcap_keeps_logs_without_subscribing_or_creating_recordings() 
                 .await
                 .unwrap(),
         );
-        let telemetry = Telemetry::start(startup, &context, "/recording_disabled/1", &layers)
-            .await
-            .unwrap();
+        let owner = Arc::new(RobotRuntime::new(startup.capture.clone()).unwrap());
+        let telemetry =
+            Telemetry::start(startup, &context, "/recording_disabled/1", &layers, owner)
+                .await
+                .unwrap();
         assert!(!telemetry.mcap_enabled());
         let node = context.create_node("test").build().await.unwrap();
         let publisher = node
@@ -95,7 +97,8 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
     for namespace in ["/test_a/1", "/test_b/1"] {
         let path = directory.path().join(namespace.trim_matches('/'));
         let startup = Startup::new(path.clone(), clock.clone()).unwrap();
-        let runtime = RobotRuntime::new(startup.capture.clone()).unwrap();
+        let runtime = Arc::new(RobotRuntime::new(startup.capture.clone()).unwrap());
+        let owner = runtime.clone();
         let logical_clock = clock.clone();
         let (context, telemetry, publisher, producers) = runtime
             .handle()
@@ -114,7 +117,7 @@ async fn isolated_robots_capture_nested_tasks_and_record_startup_late_topics_and
                         .unwrap(),
                 );
                 let node = Arc::new(context.create_node("test").build().await.unwrap());
-                let telemetry = Telemetry::start(startup, &context, namespace, &layers)
+                let telemetry = Telemetry::start(startup, &context, namespace, &layers, owner)
                     .await
                     .unwrap();
                 tracing::info!("{namespace} startup");
@@ -338,14 +341,11 @@ async fn checkpoint_is_readable_while_recording_continues_and_replay_spans_segme
     );
     let node = Arc::new(context.create_node("test").build().await.unwrap());
     let layers = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("parameters")];
-    let telemetry = Telemetry::start(
-        Startup::new(directory.path().to_owned(), clock.clone()).unwrap(),
-        &context,
-        "/checkpoint/1",
-        &layers,
-    )
-    .await
-    .unwrap();
+    let startup = Startup::new(directory.path().to_owned(), clock.clone()).unwrap();
+    let owner = Arc::new(RobotRuntime::new(startup.capture.clone()).unwrap());
+    let telemetry = Telemetry::start(startup, &context, "/checkpoint/1", &layers, owner)
+        .await
+        .unwrap();
     let publisher = node
         .publisher::<u64>("checkpoint_value")
         .build()

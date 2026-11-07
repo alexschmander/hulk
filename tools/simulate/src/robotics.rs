@@ -80,8 +80,13 @@ impl Robotics {
         let handle = runtime.clone();
         let owner = owned_runtime.clone();
         let task = tokio_util::task::AbortOnDropHandle::new(runtime.spawn(async move {
-            let mut stack =
-                RobotStack::new(handle, configuration, Some(settings), Some(startup)).await?;
+            let mut stack = RobotStack::new(
+                handle,
+                configuration,
+                Some(settings),
+                Some((startup, owner.clone())),
+            )
+            .await?;
             stack.owned_runtime = Some(owner);
             Ok::<_, color_eyre::Report>(stack)
         }));
@@ -135,7 +140,10 @@ impl RobotStack {
         runtime: Handle,
         configuration: Configuration,
         settings: Option<RobotSettings>,
-        telemetry_startup: Option<crate::telemetry::Startup>,
+        telemetry_startup: Option<(
+            crate::telemetry::Startup,
+            Arc<crate::telemetry::RobotRuntime>,
+        )>,
     ) -> Result<Self> {
         let overrides = tempfile::tempdir()?;
         // Twix can write this last layer without changing the robot parameter files.
@@ -220,13 +228,14 @@ impl RobotStack {
             "ZENOH_CONFIG_OVERRIDE conflicts with the simulator transport namespace"
         );
         let node = Arc::new(context.create_node("simulator").build().await?);
-        let telemetry = if let Some(startup) = telemetry_startup {
+        let telemetry = if let Some((startup, owner)) = telemetry_startup {
             Some(
                 crate::telemetry::Telemetry::start(
                     startup,
                     &context,
                     &configuration.namespace,
                     &layers,
+                    owner,
                 )
                 .await?,
             )
