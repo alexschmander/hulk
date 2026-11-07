@@ -19,7 +19,8 @@ pub struct FootObservation<R: RealField + Copy = f64> {
 /// Two one-sided residuals per observation, penalizing soles below local z = 0.
 /// Each row is `max(0, -height) / sigma`, where height is the sole's local z
 /// after applying the interpolated robot pose. Emit both feet in one observation
-/// scope. At the hinge (`height = 0`), use the inactive branch with zero Jacobian.
+/// scope, omitting inactive zero rows. At the hinge (`height = 0`), use the
+/// inactive branch with zero Jacobian.
 #[derive(Clone, Debug)]
 pub struct FootGround<R: RealField + Copy = f64> {
     pub controls: [StateKey<PoseControl<R>>; 4],
@@ -68,22 +69,23 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>>> FactorBatch<S> for Foot
         }
         let inverse_sigma = common::positive(self.sigma)?;
         let spline = common::spline(states, &self.controls, self.duration)?;
-        let mut linearized = None;
+        let prepared = spline.linearize()?;
         for (id, observation) in factors {
             // Recheck activity and input validity at the current state. Inactive
             // rows contribute no information; their factor scope still gets visited.
-            let value = spline.pose(observation.tau)?;
-            let (residual, active) = foot_residuals(&value.inner, observation, inverse_sigma)?;
+            let value = prepared.sample(observation.tau)?;
+            let (residual, active) =
+                foot_residuals(&value.pose().inner, observation, inverse_sigma)?;
             if !active[0] && !active[1] {
                 sink.factor(id, |_| Ok(()))?;
                 continue;
             }
-            let prepared = match linearized {
-                Some(ref prepared) => prepared,
-                None => linearized.insert(spline.linearize()?),
-            };
-            let pose = prepared.pose(observation.tau)?;
-            let rotation = pose.pose.inner.rotation.to_rotation_matrix().into_inner();
+            let rotation = value
+                .pose()
+                .inner
+                .rotation
+                .to_rotation_matrix()
+                .into_inner();
             let mut h = SMatrix::<R, 2, 6>::zeros();
             for (row, sole) in [observation.left_sole, observation.right_sole]
                 .iter()
@@ -96,9 +98,17 @@ impl<R: RealField + Copy, S: StateStore<PoseControl<R>>> FactorBatch<S> for Foot
                     );
                 }
             }
-            let jacobians = pose.jacobians.map(|j| h * j);
             sink.factor(id, |sink| {
-                common::emit(sink, &self.controls, &residual, &jacobians)
+                if active[0] && active[1] {
+                    let jacobians = value.project_jacobians(&h)?;
+                    common::emit(sink, &self.controls, &residual, &jacobians)
+                } else {
+                    let row = usize::from(!active[0]);
+                    let residual = residual.fixed_rows::<1>(row).into_owned();
+                    let h = h.fixed_rows::<1>(row).into_owned();
+                    let jacobians = value.project_jacobians(&h)?;
+                    common::emit(sink, &self.controls, &residual, &jacobians)
+                }
             })?;
         }
         Ok(())
