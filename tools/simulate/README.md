@@ -605,15 +605,17 @@ robots before warmup, for 35 simulated seconds total. All robots moved and finis
 upright, with fresh field poses. Walking speeds were 3.441 / 3.424 / 3.490x before
 and 3.354 / 3.361 / 3.331x after.
 
-Walking throughput is **2.5% lower**. At higher physics throughput, asynchronous
-motor delivery increased control delay and degraded walking. The simulator now
-requires a fresh SDK motor packet before every active-motion physics tick, while
-standing, Prepare and Damping retain asynchronous control. Less restrictive
-handoffs were rejected after sustained walking failures. This quality safeguard
-limits moving throughput; the 2x result applies to the standing fixture.
+Walking throughput in that comparison was **2.5% lower**. At higher physics
+throughput, asynchronous motor delivery increased control delay and degraded
+walking. Subsequent repeated validation also found occasional standing posture
+failures. Custom control now requires a fresh SDK motor packet before every physics
+tick, including standing balance. Prepare and Damping use their simulated SDK
+controllers without this packet wait. The 6.616x standing result above predates
+that correctness fix and is not the current validated throughput. Less restrictive
+active-motion handoffs were rejected after sustained walking failures.
 
 The retained optimizations share immutable K1 meshes, bound publication and camera
-workers, separate recording ingestion from robot computation, place physics on a
+workers, keep recording ingestion on its owning robot runtime, place physics on a
 dedicated core, use jemalloc on Linux, and project active foot-contact Jacobians
 without constructing dense pose blocks. Production node wiring, neural weights,
 estimator weights, physical parameters, solver settings and logical publication

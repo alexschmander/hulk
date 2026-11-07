@@ -591,53 +591,22 @@ impl RobotStack {
         self.commands.borrow()
     }
 
-    // Active motions need bounded feedback delay. Stationary commands keep the
-    // latest packet without waiting for another posture update.
+    // Standing also needs bounded feedback delay. Mode and packet freshness,
+    // rather than the asynchronous behavior cache, decide whether to wait.
     pub(crate) fn finish_actuator_cycle(
         &self,
         previous: u64,
         stopped: &std::sync::atomic::AtomicBool,
     ) -> Result<(), String> {
-        let stationary = || {
-            self.motion.get_latest().is_none_or(|command| {
-                matches!(
-                    &*command,
-                    MotionCommand::Damping | MotionCommand::Prepare | MotionCommand::Stand { .. }
-                )
-            })
-        };
-        if stationary() {
+        if self.commands.borrow().actuator_cycle_ready(previous) {
             return Ok(());
         }
-        let ready = |control: &crate::simulated_sdk::Control| {
-            stationary()
-                || control.mode != booster::RobotMode::Custom
-                || control.command.is_none()
-                || control.command_sequence() != previous
-        };
-        if ready(&self.commands.borrow()) {
-            return Ok(());
-        }
-        self.runtime.block_on(async {
-            let mut updates = self.commands.clone();
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
-            loop {
-                if ready(&updates.borrow_and_update())
-                    || stopped.load(std::sync::atomic::Ordering::Acquire)
-                {
-                    return Ok(());
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err("Timed out waiting for a fresh simulator actuator packet".into());
-                }
-                match tokio::time::timeout(std::time::Duration::from_millis(1), updates.changed())
-                    .await
-                {
-                    Ok(Ok(())) | Err(_) => {}
-                    Ok(Err(_)) => return Err("Simulator actuator sender stopped".into()),
-                }
-            }
-        })
+        self.runtime
+            .block_on(crate::simulated_sdk::finish_actuator_cycle(
+                self.commands.clone(),
+                previous,
+                stopped,
+            ))
     }
 
     pub(crate) fn startup_commands(

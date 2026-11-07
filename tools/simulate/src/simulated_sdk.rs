@@ -34,6 +34,12 @@ impl Control {
         self.command_sequence
     }
 
+    pub(crate) fn actuator_cycle_ready(&self, previous: u64) -> bool {
+        self.mode != RobotMode::Custom
+            || self.command.is_none()
+            || self.command_sequence != previous
+    }
+
     pub(crate) fn supports_standing(&self) -> bool {
         self.mode == RobotMode::Custom
             && self.command.as_ref().is_some_and(|command| {
@@ -51,6 +57,30 @@ impl Control {
             // Custom resumes only after a new joint packet. In particular, an old
             // walking target must not survive Damping -> Prepare -> Custom.
             self.command = None;
+        }
+    }
+}
+
+// Custom control includes standing balance, not only locomotion. A packet must
+// arrive between physics ticks even when the behavior command itself is unchanged.
+pub(crate) async fn finish_actuator_cycle(
+    mut updates: watch::Receiver<Control>,
+    previous: u64,
+    stopped: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
+    loop {
+        if updates.borrow_and_update().actuator_cycle_ready(previous)
+            || stopped.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("Timed out waiting for a fresh simulator actuator packet".into());
+        }
+        match tokio::time::timeout(std::time::Duration::from_millis(1), updates.changed()).await {
+            Ok(Ok(())) | Err(_) => {}
+            Ok(Err(_)) => return Err("Simulator actuator sender stopped".into()),
         }
     }
 }
@@ -276,6 +306,75 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn custom_control_waits_for_a_joint_packet_not_an_led_update() {
+        let (sender, receiver) = watch::channel(Control {
+            mode: RobotMode::Custom,
+            command: Some(LowCommand::default()),
+            command_sequence: 7,
+            ..Default::default()
+        });
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        let cycle = finish_actuator_cycle(receiver, 7, &stopped);
+        tokio::pin!(cycle);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), &mut cycle)
+                .await
+                .is_err()
+        );
+        sender.send_modify(|control| control.led = Some(LedColor { r: 255, g: 0, b: 0 }));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), &mut cycle)
+                .await
+                .is_err()
+        );
+        sender.send_modify(|control| control.command_sequence += 1);
+        cycle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_custom_packet_has_a_bounded_wait() {
+        let (_sender, receiver) = watch::channel(Control {
+            mode: RobotMode::Custom,
+            command: Some(LowCommand::default()),
+            ..Default::default()
+        });
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        let result = finish_actuator_cycle(receiver, 0, &stopped).await;
+        assert_eq!(
+            result.unwrap_err(),
+            "Timed out waiting for a fresh simulator actuator packet"
+        );
+    }
+
+    #[tokio::test]
+    async fn actuator_wait_exits_on_mode_change_cancellation_or_closed_sender() {
+        for action in 0..3 {
+            let (sender, receiver) = watch::channel(Control {
+                mode: RobotMode::Custom,
+                command: Some(LowCommand::default()),
+                ..Default::default()
+            });
+            let stopped = std::sync::atomic::AtomicBool::new(false);
+            let cycle = finish_actuator_cycle(receiver, 0, &stopped);
+            tokio::pin!(cycle);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(2), &mut cycle)
+                    .await
+                    .is_err()
+            );
+            match action {
+                0 => sender.send_modify(|control| control.change_mode(RobotMode::Damping)),
+                1 => stopped.store(true, std::sync::atomic::Ordering::Release),
+                _ => drop(sender),
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_millis(20), cycle)
+                .await
+                .unwrap();
+            assert_eq!(result.is_ok(), action != 2);
+        }
+    }
+
     use mujoco_rs::prelude::{MjData, MjSpec, MjtGeom, MjtObj};
     use ros_z::{parameter::NodeParametersExt, prelude::ContextBuilder};
     use std::time::Duration;

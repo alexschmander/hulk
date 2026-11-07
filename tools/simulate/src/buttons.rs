@@ -19,6 +19,7 @@ pub async fn publish(session: &zenoh::Session, button: i32, event: ButtonEventTy
 
 // One second is the simulator's hold threshold, not a firmware timing guarantee.
 const HOLD: Duration = Duration::from_secs(1);
+pub(crate) const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub struct BodyButtons {
@@ -124,7 +125,7 @@ impl Startup {
     pub fn advance(&mut self, io: &Robotics) -> Result<bool, String> {
         let started = self.started.get_or_insert_with(Instant::now);
         let primary = io.primary.get_latest().map(|state| *state);
-        if started.elapsed() > Duration::from_secs(10) {
+        if started.elapsed() > STARTUP_TIMEOUT {
             return Err(format!(
                 "Startup could not acquire joint control: primary={primary:?}, sdk_mode={:?}, safe_pose={:?}",
                 io.actuator_control().mode,

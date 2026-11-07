@@ -62,7 +62,10 @@ fn spawn_robot(
 
 // Reserve control time before the shared timeline so a new robot can initialize
 // without advancing an existing match or rewinding its own timers at handover.
-pub(crate) const STARTUP_WARMUP: Duration = Duration::from_secs(2);
+// Before handover, at most 2 ms of logical time is consumed per 1 ms wall
+// sleep. Cover the whole bounded startup, including delayed mode/SDK replies,
+// so reaching the shared clock cannot freeze timers before Custom is acquired.
+pub(crate) const STARTUP_WARMUP: Duration = crate::buttons::STARTUP_TIMEOUT.saturating_mul(2);
 
 /// Run the real Damping -> Prepare -> Initial control path against a held pose,
 /// then catch up to the shared clock before adding this robot to the scene.
@@ -248,7 +251,7 @@ impl Pacing {
 
 // At most one sample per robot may be in flight. Publication overlaps the next
 // physics tick, with a barrier before camera frames and before the next sample.
-// Controls read the latest command available without waiting for a new one.
+// Custom controls require a fresh actuator packet before each physics tick.
 struct SensorPublication {
     io: Robotics,
     observation: crate::robot_io::Observation,
