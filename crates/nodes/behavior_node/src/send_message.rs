@@ -67,7 +67,8 @@ impl Blackboard {
     }
 
     pub fn try_sending_state_message(&mut self) -> Option<OutgoingMessage> {
-        if self.world_state.robot.primary_state != PrimaryState::Playing {
+        let primary_state = self.world_state.robot.primary_state;
+        if !primary_state.sends_team_messages() {
             return None;
         }
 
@@ -75,7 +76,14 @@ impl Blackboard {
         let game_controller_state = self.world_state.filtered_game_controller_state.as_ref()?;
         let send_interval =
             state_message_send_interval(game_controller_state, &self.parameters.network)?;
-        if !is_cooldown_elapsed(now, self.last_sent_hsl_message_time, send_interval) {
+        if !is_state_message_due(
+            primary_state,
+            now,
+            self.last_sent_hsl_message_time,
+            self.last_sent_hsl_message_state,
+            send_interval,
+            &self.parameters.network,
+        ) {
             return None;
         }
         if let Some(ground_to_field) = self.world_state.robot.ground_to_field {
@@ -103,10 +111,36 @@ impl Blackboard {
             });
 
             self.last_sent_hsl_message_time = Some(now);
+            self.last_sent_hsl_message_state = Some(primary_state);
             Some(OutgoingMessage::Hsl(message))
         } else {
             None
         }
+    }
+}
+
+/// Whether a state message is due, given the time and primary state of the last one.
+///
+/// While playing, messages are paced by the remaining budget. Before a kick-off they are sparser,
+/// because teammates only need to be told apart from opponents. One is sent right away on entering
+/// ready, so that teammates are identified early, and one on entering set, when everybody has
+/// reached their kick-off position.
+fn is_state_message_due(
+    primary_state: PrimaryState,
+    now: Time,
+    last_time: Option<Time>,
+    last_state: Option<PrimaryState>,
+    send_interval: Duration,
+    parameters: &HslNetworkParameters,
+) -> bool {
+    match primary_state {
+        PrimaryState::Playing => is_cooldown_elapsed(now, last_time, send_interval),
+        PrimaryState::Ready | PrimaryState::Set if last_state != Some(primary_state) => true,
+        _ => is_cooldown_elapsed(
+            now,
+            last_time,
+            send_interval.max(parameters.ready_and_set_message_interval),
+        ),
     }
 }
 
@@ -154,5 +188,97 @@ fn is_cooldown_elapsed(now: Time, last: Option<Time>, cooldown: Duration) -> boo
     match last {
         None => true,
         Some(last_time) => now.duration_since(last_time) > cooldown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parameters() -> HslNetworkParameters {
+        HslNetworkParameters {
+            ready_and_set_message_interval: Duration::from_secs(2),
+            ..Default::default()
+        }
+    }
+
+    fn at(seconds: u64) -> Time {
+        Time::zero() + Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn playing_is_paced_by_the_budget() {
+        let last_sent = (Some(at(0)), Some(PrimaryState::Playing));
+        let interval = Duration::from_secs(3);
+        assert!(!is_state_message_due(
+            PrimaryState::Playing,
+            at(2),
+            last_sent.0,
+            last_sent.1,
+            interval,
+            &parameters()
+        ));
+        assert!(is_state_message_due(
+            PrimaryState::Playing,
+            at(4),
+            last_sent.0,
+            last_sent.1,
+            interval,
+            &parameters()
+        ));
+    }
+
+    #[test]
+    fn ready_sends_at_once_and_then_sparsely() {
+        let interval = Duration::from_millis(500);
+        let after_playing = (Some(at(10)), Some(PrimaryState::Playing));
+        assert!(is_state_message_due(
+            PrimaryState::Ready,
+            at(10),
+            after_playing.0,
+            after_playing.1,
+            interval,
+            &parameters()
+        ));
+        let after_ready = (Some(at(10)), Some(PrimaryState::Ready));
+        assert!(!is_state_message_due(
+            PrimaryState::Ready,
+            at(11),
+            after_ready.0,
+            after_ready.1,
+            interval,
+            &parameters()
+        ));
+        assert!(is_state_message_due(
+            PrimaryState::Ready,
+            at(13),
+            after_ready.0,
+            after_ready.1,
+            interval,
+            &parameters()
+        ));
+    }
+
+    #[test]
+    fn entering_set_sends_once() {
+        let interval = Duration::from_secs(3);
+        let after_ready = (Some(at(10)), Some(PrimaryState::Ready));
+        assert!(is_state_message_due(
+            PrimaryState::Set,
+            at(11),
+            after_ready.0,
+            after_ready.1,
+            interval,
+            &parameters()
+        ));
+        let after_set = (Some(at(11)), Some(PrimaryState::Set));
+        assert!(!is_state_message_due(
+            PrimaryState::Set,
+            at(12),
+            after_set.0,
+            after_set.1,
+            interval,
+            &parameters()
+        ));
     }
 }
