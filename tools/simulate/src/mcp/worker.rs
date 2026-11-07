@@ -577,7 +577,7 @@ fn spawn_robot(app: &mut App, team: &Team, member: &crate::team::Member) {
     let entity = app
         .world_mut()
         .spawn((
-            MjcfObject::new(
+            MjcfObject::from_shared_file(
                 concat!(env!("CARGO_MANIFEST_DIR"), "/assets/k1_robot.xml"),
                 "Trunk",
             )

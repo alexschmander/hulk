@@ -78,7 +78,7 @@ pub(crate) fn bootstrap(
                 let entity = app
                     .world_mut()
                     .spawn((
-                        crate::bevy_mujoco::MjcfObject::new(
+                        crate::bevy_mujoco::MjcfObject::from_shared_file(
                             concat!(env!("CARGO_MANIFEST_DIR"), "/assets/k1_robot.xml"),
                             "Trunk",
                         )
