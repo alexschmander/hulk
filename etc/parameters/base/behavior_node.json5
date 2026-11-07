@@ -141,6 +141,10 @@
       nanos: 0,
       secs: 1,
     },
+    ready_and_set_message_interval: {
+      nanos: 0,
+      secs: 2,
+    },
     hsl_striker_message_receive_timeout: {
       nanos: 0,
       secs: 3,
