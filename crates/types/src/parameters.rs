@@ -169,6 +169,8 @@ pub struct HslNetworkParameters {
     pub extra_half_duration: Duration,
     pub remaining_amount_of_messages_to_stop_sending: u16,
     pub silence_interval_between_messages: Duration,
+    /// Shortest interval between state messages in ready and set.
+    pub ready_and_set_message_interval: Duration,
     pub hsl_striker_message_receive_timeout: Duration,
 }
 

@@ -88,6 +88,8 @@ pub struct Blackboard {
     pub last_motion_type: Option<MotionType>,
     pub last_sent_game_controller_return_message_time: Option<Time>,
     pub last_sent_hsl_message_time: Option<Time>,
+    /// Primary state in which the last state message was sent.
+    pub last_sent_hsl_message_state: Option<PrimaryState>,
     /// Acquisition time of the latest localization estimate.
     pub localization_time: Option<Time>,
     pub last_closest_to_ball: bool,
@@ -396,6 +398,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         last_motion_type: None,
         last_sent_game_controller_return_message_time: None,
         last_sent_hsl_message_time: None,
+        last_sent_hsl_message_state: None,
         localization_time: None,
         last_closest_to_ball: false,
         closest_to_ball_entered_area_since: None,
