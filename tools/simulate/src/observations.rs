@@ -143,7 +143,7 @@ pub(crate) fn detect(
 }
 
 pub(crate) fn detect_scene(
-    data: &mut Data,
+    data: &Data,
     sample: &Observation,
     balls: &[Ball],
     field: &FieldDimensions,
@@ -167,7 +167,7 @@ pub(crate) fn detect_scene(
             && pixel.y() < sample.camera_matrix.image_size.y())
         .then_some((pixel, camera.z))
     };
-    let mut visible = |position: Point3<f32>, tolerance: f32| {
+    let visible = |position: Point3<f32>, tolerance: f32| {
         let origin = sample.camera_to_world.translation.vector.cast::<f64>();
         let offset = position.coords.cast::<f64>() - origin;
         let distance = offset.norm();
@@ -176,14 +176,22 @@ pub(crate) fn detect_scene(
         }
         let direction = offset / distance;
         // The collision mesh is a solid camera housing with no lens aperture.
-        let (_, hit) = data.ray(
-            origin.as_ref(),
-            direction.as_ref(),
-            None,
-            true,
-            Some(sample.camera_housing),
-            None,
-        );
+        let mut geom = -1;
+        // mj_ray reads both model and data. Each query owns its output and may
+        // run alongside other queries while physics holds the world unchanged.
+        let hit = unsafe {
+            mujoco_rs::mujoco_c::mj_ray(
+                data.model().ffi(),
+                data.ffi(),
+                origin.as_ref(),
+                direction.as_ref(),
+                std::ptr::null(),
+                true,
+                sample.camera_housing as i32,
+                &mut geom,
+                std::ptr::null_mut(),
+            )
+        };
         hit < 0.0 || hit + f64::from(tolerance) >= distance
     };
     let bbox = |label, min, max| Object {
@@ -479,6 +487,40 @@ impl CameraInputs {
 mod tests {
     use super::*;
     use crate::robot_io::{RobotBinding, tests::model};
+
+    #[test]
+    fn concurrent_visibility_queries_match_serial_results() {
+        let data = model();
+        let sample = RobotBinding::new(&data, "").unwrap().observe(&data);
+        let robots =
+            [sample.camera_to_world * nalgebra::point![0.0, 0.0, 2.0]].map(|p| p.coords.into());
+        let query = || {
+            serde_json::to_value(detect_scene(
+                &data,
+                &sample,
+                &[],
+                &FieldDimensions::SPL_2025,
+                &robots,
+                crate::scene::goal::GOAL_HEIGHT as f32,
+            ))
+            .unwrap()
+        };
+        let expected = query();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        for _ in 0..20 {
+                            assert_eq!(query(), expected);
+                        }
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+    }
 
     #[test]
     fn robot_detections_keep_visible_boxes_and_reject_off_camera_targets() {

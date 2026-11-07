@@ -22,6 +22,7 @@ bytes = "1"
 camera_matrix_calculator = { workspace = true }
 cdr = { workspace = true }
 color-eyre = { workspace = true }
+crossbeam-channel = "0.5"
 controller_handler = { workspace = true }
 coordinate_systems = { workspace = true }
 eframe = { workspace = true }
@@ -71,6 +72,7 @@ primary_state_filter = { workspace = true }
 projection = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
+rayon = "1.11"
 rmcp = { version = "3.5.1", default-features = false, features = [
   "server",
   "transport-io",
@@ -103,6 +105,10 @@ visual_kick_ball_selector = { workspace = true }
 whistle_filter = { workspace = true }
 world_to_field_provider = { workspace = true }
 zenoh = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+tikv-jemallocator = { workspace = true }
 
 [[bin]]
 name = "simulator-mcp"

@@ -537,3 +537,29 @@ fn rejects_invalid_domains_and_branch_seams() {
         assert!(seam.linearize().is_err());
     }
 }
+
+#[test]
+fn projected_pose_jacobians_match_the_dense_chain_rule() {
+    let controls: [PoseControl<f64>; 4] = std::array::from_fn(|i| PoseControl {
+        pose: Pose3::wrap(nalgebra::Isometry3::new(
+            nalgebra::vector![0.1 * i as f64, -0.2, 0.5],
+            nalgebra::vector![0.04, -0.05 * i as f64, 0.07],
+        )),
+    });
+    let spline = PoseSpline::new(controls.each_ref(), 0.1).unwrap();
+    let prepared = spline.linearize().unwrap();
+    let projection =
+        nalgebra::SMatrix::<f64, 3, 6>::from_fn(|r, c| ((r * 6 + c + 1) as f64 * 0.17).sin());
+    for tau in [0.0, 0.17, 0.63, 1.0] {
+        let dense = prepared.pose(tau).unwrap();
+        let sample = prepared.sample(tau).unwrap();
+        assert_eq!(sample.pose().inner, dense.pose.inner);
+        let projected = sample.project_jacobians(&projection).unwrap();
+        let row = projection.fixed_rows::<1>(1).into_owned();
+        let projected_row = sample.project_jacobians(&row).unwrap();
+        for i in 0..4 {
+            assert!((projected[i] - projection * dense.jacobians[i]).amax() < 1e-13);
+            assert!((projected_row[i] - row * dense.jacobians[i]).amax() < 1e-13);
+        }
+    }
+}

@@ -2,8 +2,8 @@
 use bevy::{light::NotShadowCaster, prelude::*, transform::TransformSystems};
 use types::motion_command::MotionCommand;
 
-use super::ball::{self, SpawnedBalls};
-use crate::{bevy_mujoco::SharedPhysics, robot_io::RobotBinding};
+use super::ball::SpawnedBalls;
+use crate::bevy_mujoco::SharedPhysics;
 
 pub struct CommandVectorsPlugin;
 
@@ -167,25 +167,20 @@ fn update(
         return;
     };
     let io = &member.io;
-    let world = physics.lock();
-    let data = world.data();
-    let prefix = format!("object_{}_", robot.to_bits());
-    let arrows = RobotBinding::new(data, &prefix)
-        .ok()
-        .and_then(|binding| {
-            let position = data.body(&format!("{prefix}Trunk"))?.view(data).xpos;
-            let height = ball::first_position(&world, &balls)
-                .ok()
-                .map(|position| position[2] as f32);
-            if matches!(io.active_motion(), MotionCommand::Kick { .. }) && height.is_none() {
+    let world = physics.view();
+    let arrows = world
+        .motion_pose(robot)
+        .and_then(|(ground, position)| {
+            let height = balls
+                .0
+                .first()
+                .and_then(|entity| world.object_pose(*entity))
+                .map(|pose| pose.translation.y);
+            let motion = io.active_motion();
+            if matches!(motion, MotionCommand::Kick { .. }) && height.is_none() {
                 return None;
             }
-            Some(vectors(
-                &io.active_motion(),
-                binding.ground_to_world(data),
-                nalgebra::point![position[0] as f32, position[1] as f32, position[2] as f32],
-                height.unwrap_or(0.0),
-            ))
+            Some(vectors(&motion, ground, position, height.unwrap_or(0.0)))
         })
         .unwrap_or([None; 3]);
     for (part, mut transform, mut visibility) in &mut parts {

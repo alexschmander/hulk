@@ -46,10 +46,12 @@ impl RobotRuntime {
         let dispatcher = tracing::Dispatch::new(tracing_subscriber::registry().with(capture));
         Ok(Self(Some(
             tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
+                // CPU-heavy nodes use block_in_place; keep sensor callbacks on one worker.
+                .worker_threads(1)
                 .thread_name("simulator-robot")
                 .enable_all()
                 .on_thread_start(move || {
+                    crate::cpu_affinity::worker();
                     DISPATCH.with(|guard| {
                         *guard.borrow_mut() = Some(tracing::dispatcher::set_default(&dispatcher))
                     })

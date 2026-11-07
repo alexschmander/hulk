@@ -4,7 +4,7 @@ use std::{
     ffi::{CStr, CString},
     path::PathBuf,
     ptr,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::Arc,
 };
 
 use bevy::{platform::cell::SyncCell, prelude::*};
@@ -18,6 +18,7 @@ type MjcfFactory = Arc<dyn Fn() -> Result<MjSpec, String> + Send + Sync>;
 #[derive(Clone, Component)]
 pub struct MjcfObject {
     factory: MjcfFactory,
+    mesh_source: Option<PathBuf>,
     root_body: String,
     pose_target: PoseTarget,
     grounded: bool,
@@ -47,6 +48,7 @@ impl MjcfObject {
     pub fn new(path: impl Into<PathBuf>, root_body: impl Into<String>) -> Self {
         let path = path.into();
         Self {
+            mesh_source: None,
             factory: Arc::new(move || MjSpec::from_xml(&path).map_err(|error| error.to_string())),
             root_body: root_body.into(),
             pose_target: PoseTarget::Fixed,
@@ -55,12 +57,22 @@ impl MjcfObject {
         }
     }
 
+    /// Reuse immutable geometry meshes across instances of the same MJCF.
+    /// Use only when meshes are referenced by geoms, as in the K1 model.
+    pub fn from_shared_file(path: impl Into<PathBuf>, root_body: impl Into<String>) -> Self {
+        let path = path.into();
+        let mut object = Self::new(path.clone(), root_body);
+        object.mesh_source = Some(path);
+        object
+    }
+
     pub fn from_factory<F>(factory: F, root_body: impl Into<String>) -> Self
     where
         F: Fn() -> Result<MjSpec, String> + Send + Sync + 'static,
     {
         Self {
             factory: Arc::new(factory),
+            mesh_source: None,
             root_body: root_body.into(),
             pose_target: PoseTarget::Fixed,
             grounded: false,
@@ -115,21 +127,9 @@ struct ObjectBinding {
     pose_target: PoseTarget,
 }
 
-#[derive(Resource, Clone, Default)]
-pub struct SharedPhysics(Arc<Mutex<MujocoWorld>>);
-impl SharedPhysics {
-    pub fn try_lock(&self) -> Option<MutexGuard<'_, MujocoWorld>> {
-        match self.0.try_lock() {
-            Ok(world) => Some(world),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-            Err(error) => panic!("physics mutex poisoned: {error}"),
-        }
-    }
-
-    pub fn lock(&self) -> MutexGuard<'_, MujocoWorld> {
-        self.0.lock().unwrap()
-    }
-}
+#[path = "shared_physics.rs"]
+mod shared_physics;
+pub use shared_physics::SharedPhysics;
 
 pub struct MujocoWorld {
     pub mode: SimulationMode,
@@ -140,6 +140,7 @@ pub struct MujocoWorld {
     spec: SyncCell<MjSpec>,
     data: Option<MjData<Box<MjModel>>>,
     objects: HashMap<Entity, ObjectBinding>,
+    shared_meshes: HashMap<(PathBuf, String), String>,
     pub generation: u64,
     pub motion_epoch: u64,
     object_epochs: HashMap<Entity, u64>,
@@ -158,6 +159,7 @@ impl Default for MujocoWorld {
             spec: SyncCell::new(spec),
             data: Some(MjData::new(Box::new(model))),
             objects: HashMap::new(),
+            shared_meshes: HashMap::new(),
             generation: 0,
             motion_epoch: 0,
             object_epochs: HashMap::new(),
@@ -212,12 +214,19 @@ impl MujocoWorld {
             return Err(format!("physics object {entity:?} already exists"));
         }
 
-        attach_mjcf(
-            self.spec.get(),
-            entity,
-            (object.factory)()?,
-            &object.root_body,
-        )?;
+        let child = (object.factory)()?;
+        let meshes: Vec<_> = if object.mesh_source.is_some() {
+            child
+                .mesh_iter()
+                .map(|mesh| mesh.name().to_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        attach_mjcf(self.spec.get(), entity, child, &object.root_body)?;
+        if let Some(source) = &object.mesh_source {
+            self.share_meshes(entity, source, meshes)?;
+        }
         if object.root_body == "Trunk" {
             self.robots.push(entity);
         }
@@ -239,6 +248,54 @@ impl MujocoWorld {
                 },
             },
         );
+        Ok(())
+    }
+
+    // Shared-file instances use identical, immutable mesh definitions. Keep
+    // one asset per source/name, while bodies, geoms and state stay per object.
+    // Otherwise MuJoCo duplicates the mesh BVHs and clears all of them in every
+    // collision pass. Procedural factories retain independent assets.
+    fn share_meshes(
+        &mut self,
+        entity: Entity,
+        source: &std::path::Path,
+        meshes: Vec<String>,
+    ) -> Result<(), String> {
+        let spec = self.spec.get();
+        let mut aliases = HashMap::new();
+        let mut duplicates = Vec::new();
+        for name in meshes {
+            let attached = qualified_name(entity, &name);
+            if spec.mesh(&attached).is_none() {
+                continue;
+            }
+            let next = self.shared_meshes.len();
+            let shared = self
+                .shared_meshes
+                .entry((source.to_owned(), name))
+                .or_insert_with(|| format!("shared_mesh_{next}"))
+                .clone();
+            if spec.mesh(&shared).is_some() {
+                duplicates.push(attached.clone());
+            } else {
+                spec.mesh_mut(&attached)
+                    .unwrap()
+                    .set_name(&shared)
+                    .map_err(|e| e.to_string())?;
+            }
+            aliases.insert(attached, shared);
+        }
+        for geom in spec.geom_iter_mut() {
+            if let Some(shared) = aliases.get(geom.meshname()) {
+                geom.set_meshname(shared);
+            }
+        }
+        for name in duplicates {
+            let mesh = spec.mesh_mut(&name).unwrap().element_mut_pointer();
+            // The spec owns this element; all geometry references were replaced
+            // above and no Rust borrow of the mesh survives this deletion.
+            unsafe { spec.delete_element(mesh) }.map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -450,61 +507,61 @@ fn update_objects(
     objects: Query<(Entity, Ref<MjcfObject>, Option<&Transform>)>,
     physics: Res<SharedPhysics>,
 ) {
-    let mut world = physics.lock();
-    let mut changed = false;
-    for entity in removed.read() {
-        changed |= world
-            .remove_object(entity)
-            .unwrap_or_else(|error| panic!("failed to remove MJCF object: {error}"));
-    }
-
-    let mut poses_to_apply = Vec::new();
-    for (entity, object, transform) in &objects {
-        if !object.is_added() && !object.is_changed() {
-            continue;
-        }
-        if object.is_changed() && !object.is_added() {
-            world
-                .remove_object(entity)
-                .unwrap_or_else(|error| panic!("failed to replace MJCF object: {error}"));
-        }
-        world
-            .add_object(entity, &object)
-            .unwrap_or_else(|error| panic!("failed to add MJCF object: {error}"));
-        if !matches!(object.pose_target, PoseTarget::Fixed)
-            && (object.is_added() || object.reapply_pose_on_change)
-        {
-            poses_to_apply.push((
+    let removed: Vec<_> = removed.read().collect();
+    let changed: Vec<_> = objects
+        .iter()
+        .filter(|(_, object, _)| object.is_changed())
+        .map(|(entity, object, transform)| {
+            (
                 entity,
+                (*object).clone(),
                 transform.copied().unwrap_or_default(),
-                object.is_added() && object.grounded,
-            ));
-        }
-        changed = true;
-    }
-
-    if !changed {
+                object.is_added(),
+            )
+        })
+        .collect();
+    if removed.is_empty() && changed.is_empty() {
         return;
     }
-
-    world.recompile();
-    world.generation += 1;
-
-    for (entity, transform, grounded) in poses_to_apply {
-        let result = if grounded {
-            world.ground_object(entity, transform)
-        } else {
-            world.set_object_pose(entity, transform)
-        };
-        result.unwrap_or_else(|error| panic!("failed to set initial object pose: {error}"));
-    }
+    physics.edit(move |world| {
+        let mut modified = false;
+        for entity in removed {
+            modified |= world.remove_object(entity)?;
+        }
+        let mut poses_to_apply = Vec::new();
+        for (entity, object, transform, added) in changed {
+            if !added {
+                world.remove_object(entity)?;
+            }
+            world.add_object(entity, &object)?;
+            if !matches!(object.pose_target, PoseTarget::Fixed)
+                && (added || object.reapply_pose_on_change)
+            {
+                poses_to_apply.push((entity, transform, added && object.grounded));
+            }
+            modified = true;
+        }
+        if !modified {
+            return Ok(());
+        }
+        world.recompile();
+        world.generation += 1;
+        for (entity, transform, grounded) in poses_to_apply {
+            if grounded {
+                world.ground_object(entity, transform)?;
+            } else {
+                world.set_object_pose(entity, transform)?;
+            }
+        }
+        Ok(())
+    });
 }
 
 fn sync_bodies(
     physics: Res<SharedPhysics>,
     mut bodies: Query<(&MujocoBody, &mut Transform, Option<&mut Visibility>)>,
 ) {
-    let world = physics.lock();
+    let world = physics.view();
     for (body, mut transform, visibility) in &mut bodies {
         if let Some(pose) = world.body_pose(&body.name) {
             *transform = pose;
@@ -650,6 +707,118 @@ mod tests {
         MjcfObject::from_factory(move || goal_spec(dimensions), "goal").with_mocap_body("goal")
     }
 
+    fn mesh_test_world(ids: &[Entity], shared: bool) -> MujocoWorld {
+        let mut world = MujocoWorld::default();
+        for &id in ids {
+            let object = if shared {
+                MjcfObject::from_shared_file(ROBOT_MJCF, "Trunk")
+            } else {
+                MjcfObject::from_factory(
+                    || MjSpec::from_xml(ROBOT_MJCF).map_err(|e| e.to_string()),
+                    "Trunk",
+                )
+            }
+            .with_free_joint("world_joint");
+            world.add_object(id, &object).unwrap();
+        }
+        world.recompile();
+        for (i, &id) in ids.iter().enumerate() {
+            world
+                .ground_object(id, Transform::from_xyz(i as f32, 0.0, 0.0))
+                .unwrap();
+        }
+        world
+    }
+
+    #[test]
+    fn shared_meshes_preserve_collision_dynamics_sensors_and_visibility() {
+        use mujoco_rs::mujoco_c::mjtIntegrator;
+        let mut entities = World::new();
+        let ids: Vec<_> = (0..4).map(|_| entities.spawn_empty().id()).collect();
+        let before = mesh_test_world(&ids, false);
+        let after = mesh_test_world(&ids, true);
+        let old = before.data().model().ffi();
+        let new = after.data().model().ffi();
+        assert_eq!(old.nbody, new.nbody);
+        assert_eq!(old.ngeom, new.ngeom);
+        assert_eq!(old.nmesh, new.nmesh * 4);
+        assert!(new.nbvh < old.nbvh / 3);
+        for integrator in [
+            mjtIntegrator::mjINT_EULER,
+            mjtIntegrator::mjINT_IMPLICIT,
+            mjtIntegrator::mjINT_IMPLICITFAST,
+            mjtIntegrator::mjINT_RK4,
+        ] {
+            let mut reference = before.data().clone();
+            let mut candidate = after.data().clone();
+            // These models are exclusively owned. The integrator changes no array sizes.
+            unsafe {
+                reference.model_mut().opt_mut().integrator = integrator as i32;
+                candidate.model_mut().opt_mut().integrator = integrator as i32;
+            }
+            for tick in 0..100 {
+                for (i, value) in reference.ctrl_mut().iter_mut().enumerate() {
+                    *value = (tick as f64 * 0.05 + i as f64 * 0.1).sin() * 0.1;
+                }
+                candidate.ctrl_mut().copy_from_slice(reference.ctrl());
+                reference.step();
+                candidate.step();
+                for (actual, expected) in candidate
+                    .qpos()
+                    .iter()
+                    .chain(candidate.qvel())
+                    .chain(candidate.sensordata())
+                    .zip(
+                        reference
+                            .qpos()
+                            .iter()
+                            .chain(reference.qvel())
+                            .chain(reference.sensordata()),
+                    )
+                {
+                    assert!(
+                        (actual - expected).abs() < 1e-10,
+                        "{integrator:?} tick {tick}: {actual} != {expected}"
+                    );
+                }
+            }
+            for x in [-0.2, 0.0, 0.2, 1.0, 2.0, 3.0] {
+                let query = |data: &mut MjData<Box<MjModel>>| {
+                    data.ray(&[x, -2.0, 0.5], &[0.0, 1.0, 0.0], None, true, None, None)
+                };
+                assert_eq!(query(&mut reference), query(&mut candidate));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_meshes_survive_owner_removal_and_reuse_on_addition() {
+        let mut entities = World::new();
+        let ids: Vec<_> = (0..4).map(|_| entities.spawn_empty().id()).collect();
+        let mut world = mesh_test_world(&ids[..3], true);
+        let meshes = world.data().model().ffi().nmesh;
+        let pose = world.body_pose(&qualified_name(ids[1], "Trunk")).unwrap();
+        world.remove_object(ids[0]).unwrap();
+        world.recompile();
+        assert_eq!(world.data().model().ffi().nmesh, meshes);
+        assert_eq!(
+            world.body_pose(&qualified_name(ids[1], "Trunk")).unwrap(),
+            pose
+        );
+        world
+            .add_object(
+                ids[3],
+                &MjcfObject::from_shared_file(ROBOT_MJCF, "Trunk").with_free_joint("world_joint"),
+            )
+            .unwrap();
+        world.recompile();
+        assert_eq!(world.data().model().ffi().nmesh, meshes);
+        assert_eq!(
+            world.body_pose(&qualified_name(ids[1], "Trunk")).unwrap(),
+            pose
+        );
+    }
+
     #[test]
     fn sampled_step_matches_mujoco_integrators_and_capture_time() {
         use mujoco_rs::mujoco_c::mjtIntegrator;
@@ -778,6 +947,113 @@ mod tests {
                 .body_pose(&ball_body.name)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn panel_pose_update_does_not_wait_for_busy_physics() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
+        let ball = app.world_mut().spawn(ball_object()).id();
+        let visual = app
+            .world_mut()
+            .spawn((MujocoBody::new(ball, "ball"), Transform::default()))
+            .id();
+        app.update();
+        let previous = *app.world().get::<Transform>(visual).unwrap();
+        let shared = app.world().resource::<SharedPhysics>().clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _world = shared.lock();
+            sender.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        });
+        receiver.recv().unwrap();
+        let started = std::time::Instant::now();
+        app.update();
+        let elapsed = started.elapsed();
+        worker.join().unwrap();
+        assert_eq!(*app.world().get::<Transform>(visual).unwrap(), previous);
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "panel update waited {elapsed:?} for physics"
+        );
+    }
+
+    #[test]
+    fn pending_model_changes_survive_a_busy_frame() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
+        let old = app.world_mut().spawn(ball_object()).id();
+        app.update();
+        let shared = app.world().resource::<SharedPhysics>().clone();
+        let previous = shared.view();
+        let moved = Transform::from_xyz(1.0, 0.5, 2.0);
+        let new = app.world_mut().spawn((ball_object(), moved)).id();
+        app.world_mut().despawn(old);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let other = shared.clone();
+        let worker = std::thread::spawn(move || {
+            let mut world = other.lock();
+            sender.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            other.apply_edits(&mut world);
+            other.publish_view_if_requested(&world);
+        });
+        receiver.recv().unwrap();
+        let started = std::time::Instant::now();
+        app.update();
+        let elapsed = started.elapsed();
+        worker.join().unwrap();
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "scene update waited {elapsed:?}"
+        );
+        let current = shared.view();
+        assert!(current.object_pose(old).is_none());
+        assert!(
+            current
+                .object_pose(new)
+                .unwrap()
+                .translation
+                .distance(moved.translation)
+                < 1e-6
+        );
+        assert!(previous.object_pose(old).is_some());
+        assert!(previous.object_pose(new).is_none());
+        assert!(shared.take_edit_error().is_none());
+    }
+
+    #[test]
+    fn snapshot_motion_pose_matches_robot_observation() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
+        let robot = app
+            .world_mut()
+            .spawn((
+                MjcfObject::from_shared_file(ROBOT_MJCF, "Trunk")
+                    .with_free_joint("world_joint")
+                    .grounded(),
+                Transform::from_xyz(1.0, 0.0, 2.0).with_rotation(Quat::from_rotation_y(0.7)),
+            ))
+            .id();
+        app.update();
+        let physics = app.world().resource::<SharedPhysics>();
+        let expected = {
+            let mut world = physics.lock();
+            let binding = crate::robot_io::RobotBinding::new(
+                world.data(),
+                &format!("object_{}_", robot.to_bits()),
+            )
+            .unwrap();
+            binding.reset_joints(world.data_mut());
+            world.forward();
+            binding.observe(world.data())
+        };
+        let view = physics.view();
+        let (ground, position) = view.motion_pose(robot).unwrap();
+        assert_eq!(ground, expected.ground_to_world);
+        assert_eq!(position.coords, expected.robot_to_world.translation.vector);
+        assert_eq!(view.object_pose(robot), physics.lock().object_pose(robot));
     }
 
     #[test]

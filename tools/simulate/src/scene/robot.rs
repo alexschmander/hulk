@@ -217,7 +217,7 @@ impl RobotAssets {
 pub fn spawn(commands: &mut Commands, assets: &RobotAssets, transform: Transform) -> Entity {
     let owner = commands
         .spawn((
-            MjcfObject::new(ROBOT_MJCF, "Trunk")
+            MjcfObject::from_shared_file(ROBOT_MJCF, "Trunk")
                 .with_free_joint("world_joint")
                 .grounded(),
             transform,

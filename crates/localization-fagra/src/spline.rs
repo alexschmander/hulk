@@ -288,12 +288,26 @@ impl<R: RealField + Copy> PoseSpline<R> {
     }
 }
 
-impl<R: RealField + Copy> LinearizedPoseSpline<'_, R> {
+impl<'a, R: RealField + Copy> LinearizedPoseSpline<'a, R> {
     pub fn pose(&self, tau: R) -> Result<LinearizedPose<R>, EvaluationError> {
         validate_tau(tau)?;
         let basis = Basis::new(tau);
         let increments = self.spline.increments(&basis);
         self.pose_from_increments(tau, &basis, &increments, &self.increment_jacobians(&basis))
+    }
+
+    /// Evaluate once, then project derivatives only if the residual is active.
+    pub fn sample(&self, tau: R) -> Result<PoseSample<'_, 'a, R>, EvaluationError> {
+        validate_tau(tau)?;
+        let basis = Basis::new(tau);
+        let increments = self.spline.increments(&basis);
+        let pose = self.spline.pose_from_increments(tau, &increments)?;
+        Ok(PoseSample {
+            pose,
+            spline: self,
+            basis,
+            increments,
+        })
     }
 
     fn increment_jacobians(&self, basis: &Basis<R>) -> [Matrix3<R>; 3] {
@@ -317,16 +331,7 @@ impl<R: RealField + Copy> LinearizedPoseSpline<'_, R> {
             .to_rotation_matrix()
             .inverse()
             .into_inner();
-        let mut angular = [Matrix3::<R>::zeros(); 4];
-        let mut suffix_inverse = Matrix3::<R>::identity();
-        // Propagate each increment's right-local perturbation through its suffix.
-        for i in (0..3).rev() {
-            let j = suffix_inverse * increment_jacobians[i];
-            angular[i] += j * self.delta_jacobians[i][0];
-            angular[i + 1] += j * self.delta_jacobians[i][1];
-            suffix_inverse *= increments[i].to_rotation_matrix().inverse().into_inner();
-        }
-        angular[0] += suffix_inverse;
+        let angular = self.angular_jacobians(increments, increment_jacobians);
         let jacobians = std::array::from_fn(|i| {
             let mut j = SMatrix::<R, 6, 6>::zeros();
             j.fixed_view_mut::<3, 3>(0, 0).copy_from(&angular[i]);
@@ -337,6 +342,25 @@ impl<R: RealField + Copy> LinearizedPoseSpline<'_, R> {
         });
         finite(jacobians.iter().flat_map(|j| j.iter()))?;
         Ok(LinearizedPose { pose, jacobians })
+    }
+
+    #[inline]
+    fn angular_jacobians(
+        &self,
+        increments: &[UnitQuaternion<R>; 3],
+        increment_jacobians: &[Matrix3<R>; 3],
+    ) -> [Matrix3<R>; 4] {
+        let mut angular = [Matrix3::<R>::zeros(); 4];
+        let mut suffix_inverse = Matrix3::<R>::identity();
+        // Propagate each increment's right-local perturbation through its suffix.
+        for i in (0..3).rev() {
+            let j = suffix_inverse * increment_jacobians[i];
+            angular[i] += j * self.delta_jacobians[i][0];
+            angular[i + 1] += j * self.delta_jacobians[i][1];
+            suffix_inverse *= increments[i].to_rotation_matrix().inverse().into_inner();
+        }
+        angular[0] += suffix_inverse;
+        angular
     }
 
     pub fn velocity(&self, tau: R) -> Result<LinearizedVelocity<R>, EvaluationError> {
@@ -432,7 +456,53 @@ impl<R: RealField + Copy> LinearizedPoseSpline<'_, R> {
     }
 }
 
+/// A pose value with deferred control derivatives from the same spline state.
+#[derive(Debug)]
+pub struct PoseSample<'s, 'a, R: RealField + Copy = f64> {
+    pose: Pose3<Local, R>,
+    spline: &'s LinearizedPoseSpline<'a, R>,
+    basis: Basis<R>,
+    increments: [UnitQuaternion<R>; 3],
+}
+impl<R: RealField + Copy> PoseSample<'_, '_, R> {
+    pub fn pose(&self) -> &Pose3<Local, R> {
+        &self.pose
+    }
+
+    /// Apply a residual's pose Jacobian without constructing four dense 6×6
+    /// matrices. Split-spline control Jacobians are block diagonal.
+    pub fn project_jacobians<const N: usize>(
+        &self,
+        projection: &SMatrix<R, N, 6>,
+    ) -> Result<[SMatrix<R, N, 6>; 4], EvaluationError> {
+        let angular = self.spline.angular_jacobians(
+            &self.increments,
+            &self.spline.increment_jacobians(&self.basis),
+        );
+        finite(angular.iter().flat_map(|j| j.iter()))?;
+        let inverse = self
+            .pose
+            .inner
+            .rotation
+            .to_rotation_matrix()
+            .inverse()
+            .into_inner();
+        let mut jacobians = [SMatrix::<R, N, 6>::zeros(); 4];
+        for (i, j) in jacobians.iter_mut().enumerate() {
+            let translation = inverse * self.spline.control_rotations[i] * self.basis.value[i];
+            finite(translation.iter())?;
+            j.fixed_columns_mut::<3>(0)
+                .copy_from(&(projection.fixed_columns::<3>(0) * angular[i]));
+            j.fixed_columns_mut::<3>(3)
+                .copy_from(&(projection.fixed_columns::<3>(3) * translation));
+        }
+        finite(jacobians.iter().flat_map(|j| j.iter()))?;
+        Ok(jacobians)
+    }
+}
+
 /// Degree-three cardinal basis and normalized-time derivatives.
+#[derive(Debug)]
 struct Basis<R> {
     value: [R; 4],
     first: [R; 4],

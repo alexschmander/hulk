@@ -12,7 +12,7 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     sync::{
-        Arc,
+        Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -70,6 +70,39 @@ enum WriteEvent {
     Checkpoint(Checkpoint, CheckpointReply),
     Finish(Checkpoint),
 }
+// Recorders share an I/O runtime while any recording is alive. A weak cache
+// permits reuse across robots without keeping threads alive after the session.
+struct RecordingRuntime(Option<tokio::runtime::Runtime>);
+impl RecordingRuntime {
+    fn new() -> Result<Self> {
+        Ok(Self(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("simulator-mcap")
+                .on_thread_start(crate::cpu_affinity::worker)
+                .enable_all()
+                .build()?,
+        )))
+    }
+}
+impl Drop for RecordingRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+fn recording_runtime() -> Result<Arc<RecordingRuntime>> {
+    static SHARED: Mutex<Weak<RecordingRuntime>> = Mutex::new(Weak::new());
+    let mut shared = SHARED.lock().unwrap();
+    if let Some(runtime) = shared.upgrade() {
+        return Ok(runtime);
+    }
+    let runtime = Arc::new(RecordingRuntime::new()?);
+    *shared = Arc::downgrade(&runtime);
+    Ok(runtime)
+}
+
 pub struct Recording {
     sender: mpsc::Sender<Ingest>,
     admission: Arc<std::sync::Mutex<Admission>>,
@@ -77,6 +110,7 @@ pub struct Recording {
     stop: tokio_util::sync::CancellationToken,
     task: Option<tokio::task::JoinHandle<Result<()>>>,
     pub dropped: Arc<AtomicU64>,
+    _runtime: Arc<RecordingRuntime>,
 }
 impl Recording {
     pub async fn start(
@@ -86,6 +120,26 @@ impl Recording {
         directory: &std::path::Path,
         parameters: &super::Parameters,
         health: super::Health,
+    ) -> Result<Self> {
+        Self::start_on(
+            context,
+            node,
+            namespace,
+            directory,
+            parameters,
+            health,
+            recording_runtime()?,
+        )
+        .await
+    }
+    async fn start_on(
+        context: &Arc<Context>,
+        node: Arc<Node>,
+        namespace: &str,
+        directory: &std::path::Path,
+        parameters: &super::Parameters,
+        health: super::Health,
+        runtime: Arc<RecordingRuntime>,
     ) -> Result<Self> {
         let local_schemas = LocalSchemaCapture::default();
         let file = File::options()
@@ -158,7 +212,10 @@ impl Recording {
         let closing_admission = admission.clone();
         let closing_clock = clock.clone();
         use tracing::instrument::WithSubscriber;
+        let owner = runtime.clone();
         let work = async move {
+            // Also retain the runtime when startup cleanup drops the recorder.
+            let _runtime = owner;
             let (writer_tx, writer_rx) = mpsc::channel(capacity);
             let writer = tokio::task::spawn_blocking(move || write(file, directory, writer_rx));
             let mut channels = BTreeMap::<String, Arc<Channel>>::new();
@@ -190,29 +247,29 @@ impl Recording {
                         continue;
                     }
                 };
-                let key = envelope.sample.key_expr().to_string();
-                if failed.contains(&key) {
+                let key = envelope.sample.key_expr().as_str();
+                if failed.contains(key) {
                     lost.fetch_add(1, Ordering::Relaxed);
                     unresolved += 1;
                     continue;
                 }
-                let channel = if let Some(channel) = channels.get(&key) {
+                let channel = if let Some(channel) = channels.get(key) {
                     channel.clone()
                 } else {
                     let channel =
-                        match resolve_channel(&node, &key, &prefix, &local_schemas, &mut schemas)
+                        match resolve_channel(&node, key, &prefix, &local_schemas, &mut schemas)
                             .await
                         {
                             Ok(channel) => Arc::new(channel),
                             Err(error) => {
                                 health.error(format!("Cannot record {key}: {error:#}"));
-                                failed.insert(key);
+                                failed.insert(key.to_owned());
                                 lost.fetch_add(1, Ordering::Relaxed);
                                 unresolved += 1;
                                 continue;
                             }
                         };
-                    channels.insert(key, channel.clone());
+                    channels.insert(key.to_owned(), channel.clone());
                     channel
                 };
                 if writer_tx
@@ -244,7 +301,11 @@ impl Recording {
             writer.await??;
             Ok(())
         };
-        let task = tokio::spawn(work.with_subscriber(tracing::Dispatch::none()));
+        let task = runtime
+            .0
+            .as_ref()
+            .unwrap()
+            .spawn(work.with_subscriber(tracing::Dispatch::none()));
         Ok(Self {
             sender,
             admission,
@@ -252,6 +313,7 @@ impl Recording {
             stop,
             task: Some(task),
             dropped,
+            _runtime: runtime,
         })
     }
     /// Serialize a checkpoint behind all samples already admitted to the ingest queue.
@@ -351,6 +413,7 @@ fn write(
     let mut path = directory.join("recording.mcap");
     let mut next_file = file;
     let mut final_checkpoint = Checkpoint::default();
+    let mut receipt_buffer = Vec::new();
     'segments: loop {
         let mut file = BufWriter::new(next_file);
         let mut writer = mcap::WriteOptions::new()
@@ -374,7 +437,7 @@ fn write(
                 ),
             ]),
         )?;
-        let mut channels = BTreeMap::new();
+        let mut channels = BTreeMap::<String, BTreeMap<String, u16>>::new();
         while let Some(event) = receiver.blocking_recv() {
             let WriteEvent::Sample(WriteSample { channel, envelope }) = event else {
                 let (mut checkpoint, reply) = match event {
@@ -399,23 +462,21 @@ fn write(
                 let _ = reply.send(Ok(checkpoint));
                 continue 'segments;
             };
-            let channel_id = if let Some(id) = channels.get(&(
-                channel.topic.clone(),
-                channel.metadata["ros_z.schema_hash"].clone(),
-            )) {
+            let hash = &channel.metadata["ros_z.schema_hash"];
+            let channel_id = if let Some(id) = channels
+                .get(&channel.topic)
+                .and_then(|types| types.get(hash))
+            {
                 *id
             } else {
                 let schema =
                     writer.add_schema(&channel.name, "ros-z-schema-json", &channel.schema)?;
                 let id =
                     writer.add_channel(schema, &channel.topic, "ros-z-cdr", &channel.metadata)?;
-                channels.insert(
-                    (
-                        channel.topic.clone(),
-                        channel.metadata["ros_z.schema_hash"].clone(),
-                    ),
-                    id,
-                );
+                channels
+                    .entry(channel.topic.clone())
+                    .or_default()
+                    .insert(hash.clone(), id);
                 id
             };
             let attachment = envelope
@@ -442,6 +503,7 @@ fn write(
                     ros_z::time::Time::from_wallclock(t.get_time().to_system_time()).as_nanos()
                 }),
             };
+            CdrCodec::<Receipt>::serialize_to_buf(&receipt, &mut receipt_buffer)?;
             writer.write_to_known_channel(
                 &mcap::records::MessageHeader {
                     channel_id: receipt_channel,
@@ -449,7 +511,7 @@ fn write(
                     log_time: envelope.simulation_time,
                     publish_time: envelope.simulation_time,
                 },
-                &CdrCodec::<Receipt>::serialize(&receipt)?,
+                &receipt_buffer,
             )?;
         }
         writer.finish()?;
@@ -473,6 +535,65 @@ impl Drop for Recording {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn dropping_capture_drains_queued_samples_and_releases_its_runtime() {
+        let context = Arc::new(
+            ContextBuilder::default()
+                .with_namespace("/capture_lifetime")
+                .disable_multicast_scouting()
+                .with_connect_endpoints(std::iter::empty::<&str>())
+                .with_listen_endpoints(std::iter::empty::<&str>())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let node = Arc::new(context.create_node("capture").build().await.unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let recording = Recording::start_on(
+            &context,
+            node.clone(),
+            "/capture_lifetime",
+            directory.path(),
+            &super::super::Parameters {
+                mcap_enabled: true,
+                topics: vec!["**".into()],
+                queue_capacity: 8192,
+                capture_level: 3,
+            },
+            super::super::Health::default(),
+            Arc::new(RecordingRuntime::new().unwrap()),
+        )
+        .await
+        .unwrap();
+        let runtime = Arc::downgrade(&recording._runtime);
+        let publisher = node.publisher::<u32>("sample").build().await.unwrap();
+        for value in 0..20 {
+            publisher.publish(&value).await.unwrap();
+        }
+        drop(recording);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while runtime.strong_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("capture runtime must stop after the queued samples drain");
+        let file = File::open(directory.path().join("recording.mcap")).unwrap();
+        let mapping = unsafe { memmap2::Mmap::map(&file).unwrap() };
+        let summary = mcap::Summary::read(&mapping).unwrap().unwrap();
+        let channel = summary
+            .channels
+            .iter()
+            .find(|(_, c)| c.topic == "sample")
+            .unwrap()
+            .0;
+        assert_eq!(
+            summary.stats.as_ref().unwrap().channel_message_counts[channel],
+            20
+        );
+        context.shutdown().unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolves_queued_primitive_and_optional_topics_after_producer_teardown() {

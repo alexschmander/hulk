@@ -99,12 +99,13 @@ fn update_field(
     let transforms = goal_transforms(dimensions);
     for (entity, goal, mut transform) in &mut goals {
         *transform = transforms[goal.0];
-        let mut mujoco = physics.lock();
-        if mujoco.contains_object(entity) {
-            mujoco
-                .set_object_pose(entity, *transform)
-                .unwrap_or_else(|error| log::warn!("failed to move field goal: {error}"));
-        }
+        let pose = *transform;
+        physics.edit(move |mujoco| {
+            if mujoco.contains_object(entity) {
+                mujoco.set_object_pose(entity, pose)?;
+            }
+            Ok(())
+        });
     }
 }
 

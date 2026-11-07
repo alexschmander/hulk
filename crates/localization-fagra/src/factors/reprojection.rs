@@ -140,7 +140,7 @@ where
                 .fixed_view_mut::<3, 3>(0, 3)
                 .set_diagonal(&nalgebra::Vector3::repeat(-R::one()));
             let h_pose = camera * inverse_pose;
-            let jacobians = pose.jacobians.map(|j| h_pose * j);
+            let jacobians = pose.jacobians.each_ref().map(|j| h_pose * j);
             // Right perturbation of alignment: q_local' = Exp(-delta) q_local.
             let alignment = SMatrix::<R, 3, 3>::new(
                 projection.local.y,
