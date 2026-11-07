@@ -124,20 +124,26 @@ impl Startup {
     pub fn advance(&mut self, io: &Robotics) -> Result<bool, String> {
         let started = self.started.get_or_insert_with(Instant::now);
         let primary = io.primary.get_latest().map(|state| *state);
-        if primary
-            .is_some_and(|state| !matches!(state, PrimaryState::Damping | PrimaryState::Prepare))
-        {
-            return Ok(true);
-        }
         if started.elapsed() > Duration::from_secs(10) {
             return Err(format!(
-                "Startup could not reach Initial: primary={primary:?}, safe_pose={:?}",
+                "Startup could not acquire joint control: primary={primary:?}, sdk_mode={:?}, safe_pose={:?}",
+                io.actuator_control().mode,
                 io.safe_pose.get_latest()
             ));
         }
+        if primary
+            .is_some_and(|state| !matches!(state, PrimaryState::Damping | PrimaryState::Prepare))
+        {
+            return Ok(io.actuator_control().supports_standing());
+        }
         if io.safe_pose.get_latest().is_none()
             || (primary == Some(PrimaryState::Prepare)
-                && io.safe_pose.get_latest().is_none_or(|safe| !*safe))
+                && (io.safe_pose.get_latest().is_none_or(|safe| !*safe)
+                    || io.actuator_control().mode != booster::RobotMode::Prepare
+                    || io.posture.get_latest().is_none_or(|posture| {
+                        !posture.is_valid(io.now())
+                            || posture.posture != types::fall_detection::Posture::Upright
+                    })))
             || self
                 .last_press
                 .is_some_and(|last| last.elapsed() < Duration::from_millis(250))

@@ -173,6 +173,40 @@ impl MujocoWorld {
     pub fn data_mut(&mut self) -> &mut MjData<Box<MjModel>> {
         self.data.as_mut().expect("MuJoCo model should be compiled")
     }
+
+    pub(crate) fn forward(&mut self) {
+        self.data.as_mut().unwrap().forward();
+    }
+
+    /// Evaluate dynamics and sensors at the current physics time. Capture all
+    /// observations before `integrate`, so no second forward pass is needed.
+    pub(crate) fn prepare_step(
+        &mut self,
+        control: impl FnOnce(&mut MjData<Box<MjModel>>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let data = self.data.as_mut().unwrap();
+        data.step1();
+        control(data)?;
+        // MuJoCo also clears acceleration-sensor caches in this entry point.
+        data.forward_skip(mujoco_rs::prelude::MjtStage::mjSTAGE_VEL, false);
+        data.check_acc();
+        if data.model_opt().enableflags & mujoco_rs::mujoco_c::mjtEnableBit::mjENBL_FWDINV as i32
+            != 0
+        {
+            data.compare_fwd_inv();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn integrate(&mut self) {
+        let data = self.data.as_mut().unwrap();
+        match data.model_opt().integrator {
+            n if n == mujoco_rs::mujoco_c::mjtIntegrator::mjINT_EULER as i32 => data.euler(),
+            n if n == mujoco_rs::mujoco_c::mjtIntegrator::mjINT_RK4 as i32 => data.runge_kutta(4),
+            _ => data.implicit(),
+        }
+    }
+
     fn add_object(&mut self, entity: Entity, object: &MjcfObject) -> Result<(), String> {
         if self.objects.contains_key(&entity) {
             return Err(format!("physics object {entity:?} already exists"));
@@ -614,6 +648,73 @@ mod tests {
     fn goal_object() -> MjcfObject {
         let dimensions = GoalDimensions::from(&FieldDimensions::SPL_2025);
         MjcfObject::from_factory(move || goal_spec(dimensions), "goal").with_mocap_body("goal")
+    }
+
+    #[test]
+    fn sampled_step_matches_mujoco_integrators_and_capture_time() {
+        use mujoco_rs::mujoco_c::mjtIntegrator;
+        for integrator in [
+            mjtIntegrator::mjINT_EULER,
+            mjtIntegrator::mjINT_IMPLICIT,
+            mjtIntegrator::mjINT_IMPLICITFAST,
+            mjtIntegrator::mjINT_RK4,
+        ] {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
+            app.world_mut().spawn((
+                MjcfObject::new(ROBOT_MJCF, "Trunk")
+                    .with_free_joint("world_joint")
+                    .grounded(),
+                Transform::default(),
+            ));
+            app.update();
+            let mut world = app.world().resource::<SharedPhysics>().lock();
+            // The model is exclusively owned; changing integrators does not resize data.
+            unsafe {
+                world.data_mut().model_mut().opt_mut().integrator = integrator as i32;
+            }
+            let mut reference = world.data().clone();
+            for tick in 0..100 {
+                let control = (tick as f64 * 0.05).sin() * 0.1;
+                reference.ctrl_mut().fill(control);
+                let capture_time = world.data().time();
+                world
+                    .prepare_step(|data| {
+                        data.ctrl_mut().fill(control);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(world.data().time(), capture_time);
+                let sensors = world.data().sensordata().to_vec();
+                world.integrate();
+                reference.step();
+                assert_eq!(world.data().time(), reference.time());
+                for (actual, expected) in world
+                    .data()
+                    .qpos()
+                    .iter()
+                    .chain(world.data().qvel())
+                    .zip(reference.qpos().iter().chain(reference.qvel()))
+                {
+                    assert!(
+                        (actual - expected).abs() < 1e-10,
+                        "{integrator:?} tick {tick}: {actual} != {expected}"
+                    );
+                }
+                // MuJoCo's ordinary step leaves sensors at its pre-integration state.
+                // RK4 also evaluates intermediate sensors during its four stages.
+                if integrator != mjtIntegrator::mjINT_RK4 {
+                    for (index, (actual, expected)) in
+                        sensors.iter().zip(reference.sensordata()).enumerate()
+                    {
+                        assert!(
+                            (actual - expected).abs() < 1e-9,
+                            "{integrator:?} tick {tick} sensor {index}: {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

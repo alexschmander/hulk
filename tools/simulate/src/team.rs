@@ -147,7 +147,14 @@ impl Team {
         self.0.clock.now()
     }
     pub fn advance(&self, period: std::time::Duration) -> Result<()> {
-        self.0.clock.advance(period)?;
+        // Serialize joining a new robot with the clock update, so it cannot
+        // miss a tick between finishing its private startup and being inserted.
+        let members = self.0.members.lock().unwrap();
+        let time = self.0.clock.advance(period)?;
+        for member in members.values() {
+            member.io.synchronize_time(time)?;
+        }
+        drop(members);
         if let Some(sink) = self.0.clock_sink.lock().unwrap().as_ref() {
             sink(self.now().as_nanos());
         }
@@ -236,12 +243,12 @@ impl Team {
                 player,
                 default_away: side.default_away(),
                 scope: transport_scope(id),
-                clock: self.0.clock.clone(),
+                clock: Clock::logical(self.now() - crate::simulation::STARTUP_WARMUP),
                 ports: connection.ports,
             },
         )
         .await?;
-        crate::simulation::bootstrap(&io, &self.0.cancelled)?;
+        crate::simulation::bootstrap(&io, &self.0.clock, &self.0.cancelled)?;
         let member = Member {
             id,
             io,
@@ -252,7 +259,9 @@ impl Team {
         if let Some(controller) = self.0.controller.lock().unwrap().as_ref() {
             controller.add(member.clone());
         }
-        self.0.members.lock().unwrap().insert(id, member);
+        let mut members = self.0.members.lock().unwrap();
+        member.io.synchronize_time(self.now())?;
+        members.insert(id, member);
         Ok(id)
     }
 }
@@ -696,6 +705,25 @@ mod runtime_tests {
         let team = runtime
             .block_on(Team::new(runtime.handle().clone(), configuration))
             .unwrap();
+        for member in team.members() {
+            let control = member.io.actuator_control();
+            assert_eq!(
+                control.mode,
+                booster::RobotMode::Custom,
+                "{} reached Initial without completing the SDK Prepare phase",
+                member.id
+            );
+            let command = control
+                .command
+                .expect("startup must deliver a joint command");
+            assert!(
+                command.motor_commands[10..]
+                    .iter()
+                    .all(|motor| motor.kp > 0.0),
+                "{} has no active leg support at startup",
+                member.id
+            );
+        }
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
         if std::env::var_os("HSL_EXCHANGE").is_some() {
@@ -877,10 +905,11 @@ mod runtime_tests {
                 });
                 physics.lock().mode = SimulationMode::Running;
                 wait(&mut worker, || {
-                    estimates.iter().all(|(estimate, _)| {
+                    estimates.iter().all(|(estimate, truth)| {
                         estimate
                             .get_latest()
                             .is_some_and(|estimate| estimate.robot_to_field.is_some())
+                            && truth.get_latest().is_some()
                     })
                 });
                 for (index, (estimate, truth)) in estimates.iter().enumerate() {
@@ -906,6 +935,20 @@ mod runtime_tests {
                 "{} {profile:?} players ready; running additions: {add_while_running}",
                 members.len()
             );
+            let standing_since = team.now();
+            physics.lock().mode = SimulationMode::Running;
+            wait(&mut worker, || {
+                let world = physics.lock();
+                for member in &members {
+                    let pose = world.object_pose(member.entity.unwrap()).unwrap();
+                    assert!(
+                        pose.translation.y > 0.4 && (pose.rotation * Vec3::Y).dot(Vec3::Y) > 0.5,
+                        "{} fell immediately after startup: {pose:?}",
+                        member.id
+                    );
+                }
+                team.now().duration_since(standing_since) >= Duration::from_secs(2)
+            });
             members[0]
                 .io
                 .button_event(0, booster::ButtonEventType::PressDown)

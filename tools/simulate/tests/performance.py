@@ -86,6 +86,14 @@ def run_case(binary, label, profile, players, repeat, args):
                 **configuration,
             })
             sid = session['session_id']
+            quality_targets = []
+            if args.verify_localization:
+                assert profile == 'localization', 'Localization verification requires the localization profile'
+                quality_targets = [target for target in session['targets'] if target['kind'] == 'robot']
+                for target in quality_targets:
+                    client.begin('rosz_observe', target_id=target['target_id'],
+                                 sources=[{'topic': 'localization/estimate'}],
+                                 retention={'max_samples_per_topic': 1, 'max_bytes': 131072})
             pid = worker_pid(client.process.pid)
             startup = time.monotonic() - started
             print(f'START {label} {profile} {players}v{players} '
@@ -131,6 +139,26 @@ def run_case(binary, label, profile, players, repeat, args):
                       f'cpu/sim={cpu / simulated:.3f}', flush=True)
                 previous, before, wall_start = current, after, wall_end
                 pressure = current_pressure
+            localization = []
+            if quality_targets:
+                client.complete('simulator_control', session_id=sid, command={'kind': 'pause'})
+                end_ns = int(client.call('simulator_status', session_id=sid)['simulation_time_ns'])
+                time.sleep(0.2)
+                for target in quality_targets:
+                    latest = client.call('rosz_read', target_id=target['target_id'],
+                                         sources=[{'topic': 'localization/estimate'}],
+                                         query={'kind': 'latest'})
+                    assert len(latest['samples']) == 1, latest
+                    row = latest['samples'][0]
+                    value = row['value']
+                    stamp = value['time']['duration']
+                    capture_ns = int(stamp['secs']) * 1_000_000_000 + int(stamp['nanos'])
+                    age_ns = max(0, end_ns - int(row['selected_time_ns'])) + max(
+                        0, int(row['source_time_ns']) - capture_ns)
+                    assert age_ns <= 250_000_000, (target['namespace'], age_ns)
+                    localization.append({'namespace': target['namespace'],
+                                         'field_pose_acquired': value['robot_to_field'] is not None,
+                                         'estimate_age_seconds': age_ns / 1e9})
             client.complete('simulator_control', session_id=sid, command={'kind': 'stop'})
         finally:
             client.close()
@@ -157,6 +185,7 @@ def run_case(binary, label, profile, players, repeat, args):
             'log_bytes': sum(p.stat().st_size for p in directory.rglob('logs.jsonl')),
             'dropped_samples': sum(row['dropped_samples'] for row in finished),
             'dropped_logs': sum(row['dropped_logs'] for row in finished),
+            **({'localization': localization} if args.verify_localization else {}),
         }
         print('RESULT ' + json.dumps({k: v for k, v in result.items() if k != 'samples'}),
               flush=True)
@@ -169,6 +198,10 @@ def main():
     parser.add_argument('--recording', action='append', default=[], metavar='LABEL=on|off',
                         help='Override MCAP recording for a variant; robot logs remain enabled')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--require-speedup', nargs=3, metavar=('BEFORE', 'AFTER', 'FACTOR'),
+                        help='Fail unless median session throughput improves by this factor in every selected case')
+    parser.add_argument('--verify-localization', action='store_true',
+                        help='Check fresh estimates on every robot and compare field-pose acquisition')
     parser.add_argument('--profiles', nargs='+', choices=PROFILES, default=list(PROFILES))
     parser.add_argument('--players', nargs='+', type=int, choices=(1, 2, 3, 5),
                         default=[1, 2, 3, 5])
@@ -180,6 +213,8 @@ def main():
     args = parser.parse_args()
     assert args.repeats > 0 and args.samples > 0 and 0 < args.seconds <= 60
     assert args.warmup > 0
+    if args.verify_localization and args.profiles != ['localization']:
+        parser.error('--verify-localization requires --profiles localization')
     args.output = args.output.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     binaries = {}
@@ -194,6 +229,11 @@ def main():
         assert label in binaries and label not in recording and mode in ('on', 'off'), option
         recording[label] = mode
     args.recording = recording
+    if args.require_speedup:
+        before_label, after_label, factor = args.require_speedup
+        assert before_label in binaries and after_label in binaries and before_label != after_label
+        factor = float(factor)
+        assert factor > 0 and factor < float('inf')
     metadata = {
         'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
                                             text=True).strip(),
@@ -204,6 +244,8 @@ def main():
                           'robot_state': 'Initial', 'warmup_simulation_seconds': args.warmup,
                           'sample_wall_seconds': args.seconds, 'samples': args.samples},
     }
+    if args.verify_localization:
+        metadata['configuration']['verify_localization'] = True
     if recording:
         metadata['configuration']['recording'] = {
             label: recording.get(label, 'on') for label in binaries
@@ -230,6 +272,39 @@ def main():
                     temporary.write_text(json.dumps({'metadata': metadata, 'results': results},
                                                     indent=2) + '\n')
                     temporary.replace(args.output)
+
+    if args.require_speedup:
+        failed = []
+        for profile in args.profiles:
+            for players in args.players:
+                speeds = {
+                    label: statistics.median(
+                        row['median_speed'] for row in results
+                        if row['label'] == label and row['profile'] == profile
+                        and row['players_per_team'] == players
+                        and row['repeat'] < args.repeats)
+                    for label in (before_label, after_label)
+                }
+                speedup = speeds[after_label] / speeds[before_label]
+                print(f'COMPARE {profile} {players}v{players} '
+                      f'{before_label}={speeds[before_label]:.3f}x '
+                      f'{after_label}={speeds[after_label]:.3f}x '
+                      f'speedup={speedup:.3f} required={factor:.3f}', flush=True)
+                if speedup < factor:
+                    failed.append((profile, players, speedup))
+                if args.verify_localization:
+                    acquisition = {
+                        label: statistics.median(
+                            sum(robot['field_pose_acquired'] for robot in row['localization'])
+                            for row in results if row['label'] == label and row['profile'] == profile
+                            and row['players_per_team'] == players and row['repeat'] < args.repeats)
+                        for label in (before_label, after_label)
+                    }
+                    print(f'LOCALIZATION {profile} {players}v{players} '
+                          f'{before_label}={acquisition[before_label]} '
+                          f'{after_label}={acquisition[after_label]} acquired field poses', flush=True)
+                    assert acquisition[after_label] >= acquisition[before_label], acquisition
+        assert not failed, f'Throughput improvement below {factor}x: {failed}'
 
 
 if __name__ == '__main__':

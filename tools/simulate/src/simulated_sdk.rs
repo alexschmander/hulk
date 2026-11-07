@@ -28,6 +28,16 @@ impl Default for Control {
 }
 
 impl Control {
+    pub(crate) fn supports_standing(&self) -> bool {
+        self.mode == RobotMode::Custom
+            && self.command.as_ref().is_some_and(|command| {
+                command.motor_commands.len() == 22
+                    && command.motor_commands[10..]
+                        .iter()
+                        .all(|motor| motor.kp > 0.0)
+            })
+    }
+
     fn change_mode(&mut self, mode: RobotMode) {
         if self.mode != mode {
             self.mode = mode;

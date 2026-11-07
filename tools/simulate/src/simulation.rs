@@ -59,9 +59,17 @@ fn spawn_robot(
     }
 }
 
-/// Fill the new robot's sensors and operate its real body buttons at frozen time.
-/// The prepared pose already matches firmware Prepare; no other robot needs to step.
-pub(crate) fn bootstrap(io: &Robotics, cancelled: &AtomicBool) -> color_eyre::Result<()> {
+// Reserve control time before the shared timeline so a new robot can initialize
+// without advancing an existing match or rewinding its own timers at handover.
+pub(crate) const STARTUP_WARMUP: Duration = Duration::from_secs(2);
+
+/// Run the real Damping -> Prepare -> Initial control path against a held pose,
+/// then catch up to the shared clock before adding this robot to the scene.
+pub(crate) fn bootstrap(
+    io: &Robotics,
+    clock: &ros_z::time::Clock,
+    cancelled: &AtomicBool,
+) -> color_eyre::Result<()> {
     thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -94,6 +102,9 @@ pub(crate) fn bootstrap(io: &Robotics, cancelled: &AtomicBool) -> color_eyre::Re
                     observation
                 };
                 let mut startup = crate::buttons::Startup::default();
+                // This observer is only needed during warm-up. A completed
+                // command cycle acknowledges each clock step before catch-up.
+                let commands = io.startup_commands()?;
                 let deadline = Instant::now() + Duration::from_secs(20);
                 loop {
                     color_eyre::eyre::ensure!(
@@ -109,15 +120,28 @@ pub(crate) fn bootstrap(io: &Robotics, cancelled: &AtomicBool) -> color_eyre::Re
                         return Err(color_eyre::eyre::eyre!(error));
                     }
                     io.publish_observation(&observation, io.now())?;
-                    if io.inference.get_latest().is_some_and(|status| {
+                    let initialized = io.inference.get_latest().is_some_and(|status| {
                         matches!(status.state, motion_inference::node::State::Initialized)
-                    }) && startup
-                        .advance(io)
-                        .map_err(|error| color_eyre::eyre::eyre!(error))?
-                    {
+                    });
+                    let complete = initialized
+                        && startup
+                            .advance(io)
+                            .map_err(|error| color_eyre::eyre::eyre!(error))?;
+                    let current = io.now();
+                    let command_current = commands
+                        .latest_stamp()
+                        .is_some_and(|stamp| stamp >= current);
+                    let target = clock.now();
+                    if complete && command_current && current == target {
                         break;
                     }
-                    thread::sleep(Duration::from_millis(10));
+                    if initialized && current < target && (!complete || command_current) {
+                        // After handover, catch up in policy-sized steps, keeping
+                        // sensor and command ages below their production limits.
+                        let period = Duration::from_millis(if complete { 20 } else { 2 });
+                        io.advance_time(period.min(target.duration_since(current)))?;
+                    }
+                    thread::sleep(Duration::from_millis(if initialized { 1 } else { 10 }));
                 }
                 Ok(())
             })
@@ -213,6 +237,78 @@ impl Pacing {
     }
 }
 
+// At most one sample per robot may be in flight. The next tick can compute
+// control-independent physics while it is published, then waits before reading
+// commands. Camera frames follow the completed body-input batch.
+struct SensorPublication {
+    observation: crate::robot_io::Observation,
+    time: ros_z::time::Time,
+}
+
+struct ObservationPublisher {
+    sender: Option<std::sync::mpsc::SyncSender<SensorPublication>>,
+    completion: std::sync::mpsc::Receiver<Result<(), String>>,
+    worker: Option<thread::JoinHandle<()>>,
+    pending: bool,
+}
+impl ObservationPublisher {
+    fn new(io: Robotics) -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<SensorPublication>(1);
+        let (completed, completion) = std::sync::mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            while let Ok(sample) = receiver.recv() {
+                let result = io
+                    .publish_observation(&sample.observation, sample.time)
+                    .map_err(|e| format!("Sensor publication: {e:#}"));
+                if completed.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            completion,
+            worker: Some(worker),
+            pending: false,
+        }
+    }
+    fn send(
+        &mut self,
+        observation: crate::robot_io::Observation,
+        time: ros_z::time::Time,
+    ) -> Result<(), String> {
+        if self.pending {
+            return Err("Previous sensor publication has not completed".into());
+        }
+        self.sender
+            .as_ref()
+            .unwrap()
+            .send(SensorPublication { observation, time })
+            .map_err(|_| "Sensor worker stopped".to_owned())?;
+        self.pending = true;
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        if !self.pending {
+            return Ok(());
+        }
+        let result = self
+            .completion
+            .recv()
+            .map_err(|_| "Sensor worker stopped".to_owned())?;
+        self.pending = false;
+        result
+    }
+}
+impl Drop for ObservationPublisher {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub struct PhysicsWorker {
     playback: Arc<Playback>,
     stop: Arc<AtomicBool>,
@@ -233,6 +329,7 @@ impl PhysicsWorker {
             struct State {
                 binding: RobotBinding,
                 controller: crate::simulated_sdk::Controller,
+                publisher: ObservationPublisher,
             }
             let mut states = std::collections::BTreeMap::<crate::RobotId, State>::new();
             let mut contacts = GroundContacts::default();
@@ -240,6 +337,10 @@ impl PhysicsWorker {
             let mut generation = None;
             let mut last_frame = None;
             let mut sequence = 0;
+            let mut pending_frames = Vec::<(Robotics, crate::observations::Frame)>::new();
+            let mut samples = Vec::new();
+            let mut observations = Vec::new();
+            let mut robot_positions = Vec::new();
             while !stopped.load(Ordering::Acquire) {
                 let started = Instant::now();
                 if let Some(error) = team.poll_controller() {
@@ -251,8 +352,7 @@ impl PhysicsWorker {
                         return Err(format!("Player {}: {error}", member.id));
                     }
                 }
-                let mut period = Duration::from_millis(2);
-                let mut samples = Vec::new();
+                let period;
                 let mut advanced = false;
                 if let Some(mut world) = physics.try_lock() {
                     let rebuilt = generation != Some(world.generation);
@@ -273,14 +373,21 @@ impl PhysicsWorker {
                                     binding.reset_joints(world.data_mut());
                                     world.ground_object(entity, member.pose)?;
                                 }
+                                let previous = previous.remove(&member.id);
+                                let (controller, publisher) = previous
+                                    .map(|state| (state.controller, state.publisher))
+                                    .unwrap_or_else(|| {
+                                        (
+                                            Default::default(),
+                                            ObservationPublisher::new(member.io.clone()),
+                                        )
+                                    });
                                 states.insert(
                                     member.id,
                                     State {
                                         binding,
-                                        controller: previous
-                                            .remove(&member.id)
-                                            .map(|state| state.controller)
-                                            .unwrap_or_default(),
+                                        controller,
+                                        publisher,
                                     },
                                 );
                             }
@@ -289,31 +396,50 @@ impl PhysicsWorker {
                     }
                     period = Duration::from_secs_f64(world.data().model_opt().timestep);
                     let running = world.mode == SimulationMode::Running;
+                    if !running {
+                        for state in states.values_mut() {
+                            state.publisher.finish()?;
+                        }
+                        for (io, frame) in pending_frames.drain(..) {
+                            io.publish_frame(frame);
+                        }
+                    }
                     let ready = states.len() == members.len();
                     initialized.store(ready, Ordering::Release);
                     if running || !ready || rebuilt {
                         let time = team.now();
                         if running {
-                            for member in &members {
-                                if let Some(state) = states.get_mut(&member.id) {
-                                    state.controller.apply(
-                                        &state.binding,
-                                        world.data_mut(),
-                                        &member.io.actuator_control(),
-                                    );
+                            world.prepare_step(|data| {
+                                // Position/velocity work has completed. Join the prior
+                                // sample before accepting this tick's commands.
+                                for state in states.values_mut() {
+                                    state.publisher.finish()?;
                                 }
-                            }
-                            world.data_mut().step();
+                                for (io, frame) in pending_frames.drain(..) {
+                                    io.publish_frame(frame);
+                                }
+                                for member in &members {
+                                    if let Some(state) = states.get_mut(&member.id) {
+                                        state.controller.apply(
+                                            &state.binding,
+                                            data,
+                                            &member.io.actuator_control(),
+                                        );
+                                    }
+                                }
+                                Ok(())
+                            })?;
                             advanced = true;
                         }
-                        world.data_mut().forward();
+                        if !running {
+                            world.forward();
+                        }
                         if running && let Some(referee) = team.referee() {
                             referee.update(&mut world, &members, period)?;
                         }
                         contacts.update(world.data());
-                        let observations: Vec<_> = members
-                            .iter()
-                            .filter_map(|member| {
+                        observations.extend(members.iter().enumerate().filter_map(
+                            |(index, member)| {
                                 let mut observation = states
                                     .get(&member.id)?
                                     .binding
@@ -321,9 +447,9 @@ impl PhysicsWorker {
                                 if !running {
                                     observation.stationary();
                                 }
-                                Some((member, observation))
-                            })
-                            .collect();
+                                Some((index, observation))
+                            },
+                        ));
                         let frame_due = rebuilt
                             || !ready
                             || last_frame.is_none_or(|last| {
@@ -332,23 +458,32 @@ impl PhysicsWorker {
                         if frame_due {
                             sequence += 1;
                             last_frame = Some(time);
+                            robot_positions.clear();
+                            robot_positions.extend(observations.iter().map(
+                                |(index, observation)| {
+                                    let p = observation.ground_to_world.translation.vector;
+                                    (members[*index].id, [p.x, p.y, p.z])
+                                },
+                            ));
                         }
-                        let balls = crate::observations::balls(&world);
-                        for (member, observation) in &observations {
+                        let balls = if frame_due {
+                            crate::observations::balls(&world)
+                        } else {
+                            Vec::new()
+                        };
+                        for (index, observation) in observations.drain(..) {
+                            let member = &members[index];
                             let frame = if frame_due {
-                                let others = observations
+                                let others = robot_positions
                                     .iter()
-                                    .filter(|(other, _)| other.id != member.id)
-                                    .map(|(_, other)| {
-                                        let p = other.ground_to_world.translation.vector;
-                                        [p.x, p.y, p.z]
-                                    })
+                                    .filter(|(id, _)| *id != member.id)
+                                    .map(|(_, position)| *position)
                                     .collect::<Vec<_>>();
                                 let field = member.io.field_dimensions;
                                 let detections = member.io.needs_detections().then(|| {
                                     crate::observations::detect_scene(
                                         world.data_mut(),
-                                        observation,
+                                        &observation,
                                         &balls,
                                         &field,
                                         &others,
@@ -372,10 +507,11 @@ impl PhysicsWorker {
                             } else {
                                 None
                             };
-                            samples.push((member.io.clone(), observation.clone(), time, frame));
+                            samples.push((member.id, member.io.clone(), observation, time, frame));
                         }
                     }
                     if advanced {
+                        world.integrate();
                         team.advance(period)
                             .map_err(|error| format!("Simulation clock: {error:#}"))?;
                         if let Some(remaining) = &mut world.remaining_steps {
@@ -385,17 +521,25 @@ impl PhysicsWorker {
                             }
                         }
                     }
+                } else {
+                    // A scene reader only borrowed the world. Retry promptly rather
+                    // than spending an entire physics tick idle after it releases it.
+                    period = Duration::from_micros(100);
                 }
-                for (io, observation, time, _) in &samples {
-                    io.publish_observation(observation, *time)
-                        .map_err(|error| format!("Sensor publication: {error:#}"))?;
-                }
-                for (io, _, _, frame) in samples {
+                for (id, io, observation, time, frame) in samples.drain(..) {
+                    let state = states.get_mut(&id).unwrap();
+                    state.publisher.send(observation, time)?;
                     if let Some(frame) = frame {
-                        io.publish_frame(frame);
+                        pending_frames.push((io, frame));
                     }
                 }
                 pacing.finish(started, period, advanced, &pacing_settings);
+            }
+            for state in states.values_mut() {
+                state.publisher.finish()?;
+            }
+            for (io, frame) in pending_frames {
+                io.publish_frame(frame);
             }
             Ok(())
         });
@@ -502,12 +646,16 @@ impl PhysicsWorker {
                             && (world.mode == SimulationMode::Running
                                 || !initialized.load(Ordering::Acquire))
                         {
-                            let time = io.now() + period;
+                            let time = io.now();
                             if world.mode == SimulationMode::Running {
-                                controller.apply(robot, world.data_mut(), &io.actuator_control());
-                                world.data_mut().step();
+                                world.prepare_step(|data| {
+                                    controller.apply(robot, data, &io.actuator_control());
+                                    Ok(())
+                                })?;
                             }
-                            world.data_mut().forward();
+                            if world.mode != SimulationMode::Running {
+                                world.forward();
+                            }
                             let mut observation = robot.observe(world.data());
                             if world.mode == SimulationMode::Paused {
                                 observation.stationary();
@@ -546,6 +694,9 @@ impl PhysicsWorker {
                                 });
                             }
                             sample = Some((observation, time));
+                            if world.mode == SimulationMode::Running {
+                                world.integrate();
+                            }
                         }
                     }
                 }
