@@ -12,6 +12,7 @@ pub struct Control {
     pub mode: RobotMode,
     pub command: Option<LowCommand>,
     generation: u64,
+    command_sequence: u64,
     /// None means no active LED override; firmware-owned colors are not simulated.
     pub led: Option<LedColor>,
 }
@@ -22,12 +23,17 @@ impl Default for Control {
             mode: RobotMode::Damping,
             command: None,
             generation: 0,
+            command_sequence: 0,
             led: None,
         }
     }
 }
 
 impl Control {
+    pub(crate) fn command_sequence(&self) -> u64 {
+        self.command_sequence
+    }
+
     pub(crate) fn supports_standing(&self) -> bool {
         self.mode == RobotMode::Custom
             && self.command.as_ref().is_some_and(|command| {
@@ -125,6 +131,7 @@ pub async fn start(
                             Ok(command)
                         }) {
                         Ok(command) => {
+                            control.command_sequence = control.command_sequence.wrapping_add(1);
                             control.command = Some(command);
                             updates.send_replace(control.clone());
                         }
@@ -524,11 +531,21 @@ mod tests {
             control.borrow().command.as_ref().unwrap().motor_commands[0].kp,
             40.0
         );
+        assert_eq!(control.borrow().command_sequence(), 1);
+        control.borrow_and_update();
+        let bytes = cdr::serialize::<_, _, cdr::CdrLe>(&command, cdr::Infinite).unwrap();
+        context.session().put("rt/joint_ctrl", bytes).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), control.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(control.borrow().command_sequence(), 2);
         // RPC retries must not clear an accepted packet or restart a Prepare trajectory.
         let generation = control.borrow().generation;
         assert!(request(&context, 2000, 3).await);
         assert_eq!(control.borrow().generation, generation);
         assert!(control.borrow().command.is_some());
+        assert_eq!(control.borrow().command_sequence(), 2);
         assert!(request(&context, 2000, 0).await);
         assert_eq!(control.borrow().mode, RobotMode::Damping);
         assert!(control.borrow().command.is_none());

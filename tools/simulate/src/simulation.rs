@@ -382,6 +382,7 @@ impl PhysicsWorker {
             struct State {
                 binding: RobotBinding,
                 controller: crate::simulated_sdk::Controller,
+                command_sequence: u64,
                 publisher: ObservationPublisher,
             }
             let mut states = std::collections::BTreeMap::<crate::RobotId, State>::new();
@@ -427,8 +428,10 @@ impl PhysicsWorker {
                                     world.ground_object(entity, member.pose)?;
                                 }
                                 let previous = previous.remove(&member.id);
-                                let (controller, publisher) = previous
-                                    .map(|state| (state.controller, state.publisher))
+                                let (controller, publisher, command_sequence) = previous
+                                    .map(|state| {
+                                        (state.controller, state.publisher, state.command_sequence)
+                                    })
                                     .unwrap_or_else(|| {
                                         (
                                             Default::default(),
@@ -436,6 +439,7 @@ impl PhysicsWorker {
                                                 member.io.clone(),
                                                 &publications,
                                             ),
+                                            0,
                                         )
                                     });
                                 states.insert(
@@ -444,6 +448,7 @@ impl PhysicsWorker {
                                         binding,
                                         controller,
                                         publisher,
+                                        command_sequence,
                                     },
                                 );
                             }
@@ -478,11 +483,16 @@ impl PhysicsWorker {
                                 }
                                 for member in &members {
                                     if let Some(state) = states.get_mut(&member.id) {
-                                        state.controller.apply(
-                                            &state.binding,
-                                            data,
-                                            &member.io.actuator_control_ref(),
-                                        );
+                                        // Every active-motion tick consumes a new motor packet.
+                                        // This backpressure keeps policy/servo delay bounded as
+                                        // physics throughput increases.
+                                        member.io.finish_actuator_cycle(
+                                            state.command_sequence,
+                                            &stopped,
+                                        )?;
+                                        let control = member.io.actuator_control_ref();
+                                        state.controller.apply(&state.binding, data, &control);
+                                        state.command_sequence = control.command_sequence();
                                     }
                                 }
                                 Ok(())
