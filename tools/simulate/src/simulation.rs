@@ -409,6 +409,7 @@ impl PhysicsWorker {
                 let period;
                 let mut advanced = false;
                 if let Some(mut world) = physics.try_lock() {
+                    physics.apply_edits(&mut world);
                     let rebuilt = generation != Some(world.generation);
                     if rebuilt {
                         let mut previous = std::mem::take(&mut states);
@@ -610,6 +611,7 @@ impl PhysicsWorker {
                             }
                         }
                     }
+                    physics.publish_view_if_requested(&world);
                 } else {
                     // A scene reader only borrowed the world. Retry promptly rather
                     // than spending an entire physics tick idle after it releases it.
@@ -695,6 +697,7 @@ impl PhysicsWorker {
                 // Both physics and robotics time stop during a scene rebuild.
                 // Never restamp a frozen observation or catch up elapsed wall time.
                 if let Some(mut world) = physics.try_lock() {
+                    physics.apply_edits(&mut world);
                     if failed {
                         world.mode = SimulationMode::Paused;
                     }
@@ -785,6 +788,7 @@ impl PhysicsWorker {
                             }
                         }
                     }
+                    physics.publish_view_if_requested(&world);
                 }
                 let advanced = sample.is_some();
                 if let Some((sample, time)) = sample {
@@ -833,24 +837,29 @@ impl Drop for PhysicsWorker {
 }
 
 pub fn reset(world: &mut World) {
-    let mut physics = world.resource::<SharedPhysics>().lock();
-    physics.mode = SimulationMode::Paused;
-    if let Some(member) = world.resource::<crate::team::Team>().selected()
-        && let Some(robot) = member.entity
-    {
-        let binding = RobotBinding::new(physics.data(), &format!("object_{}_", robot.to_bits()))
-            .expect("controlled robot joints");
-        binding.reset_joints(physics.data_mut());
-        physics
-            .ground_object(
+    let selected = world.resource::<crate::team::Team>().selected();
+    world.resource::<SharedPhysics>().edit(move |physics| {
+        physics.mode = SimulationMode::Paused;
+        if let Some(member) = selected
+            && let Some(robot) = member.entity
+        {
+            if !physics.contains_object(robot) {
+                return Ok(());
+            }
+            let binding =
+                RobotBinding::new(physics.data(), &format!("object_{}_", robot.to_bits()))
+                    .map_err(|error| format!("Reset robot: {error:#}"))?;
+            binding.reset_joints(physics.data_mut());
+            physics.ground_object(
                 robot,
                 crate::team::on_field_side(
                     member.pose,
                     (member.pose.translation.x > 0.0) != member.io.away(),
                 ),
-            )
-            .expect("reset controlled robot");
-    }
+            )?;
+        }
+        Ok(())
+    });
 }
 
 #[cfg(test)]

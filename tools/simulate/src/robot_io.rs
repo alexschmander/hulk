@@ -102,11 +102,6 @@ impl Observation {
 }
 
 impl RobotBinding {
-    pub fn ground_to_world(&self, data: &Data) -> nalgebra::Isometry3<f32> {
-        let [left, right] = self.feet.map(|id| data.xpos()[id]);
-        ground_pose(body_pose(data, self.trunk), left, right)
-    }
-
     pub fn new(data: &Data, prefix: &str) -> Result<Self> {
         let model = data.model();
         let id = |kind, name: &str| {
@@ -396,13 +391,17 @@ fn quaternion(q: &[f64]) -> UnitQuaternion<f32> {
 }
 
 fn body_pose(data: &Data, id: usize) -> nalgebra::Isometry3<f32> {
+    body_transform(data.xpos()[id], data.xquat()[id])
+}
+
+pub(crate) fn body_transform(position: [f64; 3], rotation: [f64; 4]) -> nalgebra::Isometry3<f32> {
     nalgebra::Isometry3::from_parts(
-        Translation3::from(nalgebra::Vector3::from(data.xpos()[id].map(|v| v as f32))),
-        quaternion(&data.xquat()[id]),
+        Translation3::from(nalgebra::Vector3::from(position.map(|v| v as f32))),
+        quaternion(&rotation),
     )
 }
 
-fn ground_pose(
+pub(crate) fn ground_pose(
     robot_to_world: nalgebra::Isometry3<f32>,
     left: [f64; 3],
     right: [f64; 3],

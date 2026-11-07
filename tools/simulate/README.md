@@ -152,6 +152,9 @@ The speed selector beside Run/Pause offers ¼×, ½×, 1×, 2×, 4×, 8× and 16
 The **8×** button beside it selects 8× speed directly and stays highlighted while selected.
 Speed changes wall pacing, keeping the physics timestep fixed.
 The achieved rate shows simulated seconds per real second; available compute may limit faster targets.
+The panel reads immutable state and pose snapshots without waiting for the physics mutex.
+A busy worker refreshes a requested snapshot at the end of its step; rendering keeps the last completed view meanwhile.
+Pause, reset, gizmo and model edits are queued when physics is busy. Headless scene-edit RPCs still wait for their edits to complete.
 Physics, robotics and all automatic GameController match timers advance together.
 Automatic GameController packets follow simulation time, with a real-time heartbeat retained during pauses and slow playback.
 Pause and scene recompilation freeze simulation time and sensor sampling.
@@ -628,3 +631,23 @@ trace. Rendering and match behavior are checked separately; these measurements
 do not establish 2x GUI or match throughput. Binary hashes, individual timings,
 quality checks and validation details are in the
 [benchmark record](../../docs/tooling/simulator_performance_20261106.json).
+
+### Panel responsiveness under CPU pressure
+
+The panel previously acquired the same mutex as the physics worker for toolbar state,
+pose synchronization and command arrows. At overloaded playback rates the worker
+could repeatedly reacquire it, leaving panel reads waiting for seconds while physics
+continued advancing. State and pose reads now use cached snapshots, refreshed on
+request by the worker. GUI edits hand off without waiting for a busy world.
+
+The deterministic busy-world regression runs in the ordinary unit suite. For the live
+5v5 Localization fixture with full MCAP, run alone with the usual MuJoCo/ONNX environment:
+
+```sh
+cargo test -p simulate --lib panel_snapshots_remain_responsive_at_high_speed -- --ignored --nocapture
+```
+
+The live fixture checks update latency, continuing snapshot refresh, pause and reset.
+It can also run under a process-local CPU affinity limit to reproduce CPU pressure.
+Set `SIMULATOR_PANEL_TEST_OUTPUT` to save timing samples. These CPU-side checks do
+not measure hardware-GPU rendering speed.

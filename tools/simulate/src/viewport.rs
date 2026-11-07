@@ -91,7 +91,6 @@ pub struct Viewport {
     selected: Option<Entity>,
     warp_position: Option<Pos2>,
     drag: Option<Drag>,
-    error: Option<String>,
     /// Player labels painted last frame; clicking one selects that robot in Twix.
     labels: Vec<(Rect, RobotId)>,
     clicked_label: Option<RobotId>,
@@ -235,9 +234,6 @@ impl Viewport {
     pub fn captured(&self) -> bool {
         self.captured.is_some()
     }
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
     fn capture(&mut self, context: &egui::Context, capture: bool) {
         self.warp_position = None;
         context.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if capture {
@@ -343,7 +339,7 @@ impl Viewport {
                 world.get::<ControlledRobot>(entity)?;
                 let pose = world
                     .resource::<SharedPhysics>()
-                    .lock()
+                    .view()
                     .object_pose(entity)?;
                 gizmo(&view, pose)
                     .into_iter()
@@ -371,11 +367,13 @@ impl Viewport {
         if let Some(drag) = &self.drag
             && let Some(pose) = drag.geometry.pose(ray)
         {
-            self.error = world
-                .resource::<SharedPhysics>()
-                .lock()
-                .set_object_pose(drag.entity, pose)
-                .err();
+            let entity = drag.entity;
+            world.resource::<SharedPhysics>().edit(move |physics| {
+                if physics.contains_object(entity) {
+                    physics.set_object_pose(entity, pose)?;
+                }
+                Ok(())
+            });
         }
         if hovered
             && !ui.ctx().text_edit_focused()
@@ -390,7 +388,7 @@ impl Viewport {
         }
     }
     fn start_drag(&mut self, world: &World, entity: Entity, handle: Handle, ray: Ray3d) {
-        let mut physics = world.resource::<SharedPhysics>().lock();
+        let physics = world.resource::<SharedPhysics>().view();
         if let Some(pose) = physics.object_pose(entity)
             && let Some(geometry) = DragGeometry::new(pose, handle, ray)
         {
@@ -399,12 +397,14 @@ impl Viewport {
                 geometry,
                 resume: physics.mode,
             });
-            physics.mode = SimulationMode::Paused;
+            world
+                .resource::<SharedPhysics>()
+                .set_mode(SimulationMode::Paused);
         }
     }
     fn finish_drag(&mut self, world: &World) {
         if let Some(drag) = self.drag.take() {
-            world.resource::<SharedPhysics>().lock().mode = drag.resume;
+            world.resource::<SharedPhysics>().set_mode(drag.resume);
         }
     }
     /// A robot whose scene label was clicked, for Twix to select its namespace.
@@ -534,7 +534,7 @@ impl Viewport {
         let Some(view) = CameraView::new(world, rect) else {
             return;
         };
-        let Some(pose) = world.resource::<SharedPhysics>().lock().object_pose(entity) else {
+        let Some(pose) = world.resource::<SharedPhysics>().view().object_pose(entity) else {
             return;
         };
         let painter = ui.painter().with_clip_rect(rect);

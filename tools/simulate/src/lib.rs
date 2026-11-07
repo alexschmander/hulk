@@ -208,16 +208,11 @@ impl Simulator {
         if self.error.is_some() || !self.physics.ready() {
             return;
         }
-        let mut physics = self
-            .widget
+        self.widget
             .bevy_app
             .world()
             .resource::<SharedPhysics>()
-            .lock();
-        physics.mode = match physics.mode {
-            SimulationMode::Paused => SimulationMode::Running,
-            SimulationMode::Running => SimulationMode::Paused,
-        };
+            .toggle_mode();
     }
 
     /// A player chosen inside the panel, for Twix to select its namespace.
@@ -292,7 +287,7 @@ impl Simulator {
         let world = self.widget.bevy_app.world_mut();
         let team = world.resource::<team::Team>().clone();
         let ready = self.physics.ready();
-        let paused = world.resource::<SharedPhysics>().lock().mode == SimulationMode::Paused;
+        let paused = world.resource::<SharedPhysics>().view().mode == SimulationMode::Paused;
         let (icon, label) = if paused {
             (icons::ICON_PLAY_ARROW.codepoint, "Run")
         } else {
@@ -309,11 +304,7 @@ impl Simulator {
             )
             .clicked()
         {
-            world.resource::<SharedPhysics>().lock().mode = if paused {
-                SimulationMode::Running
-            } else {
-                SimulationMode::Paused
-            };
+            world.resource::<SharedPhysics>().toggle_mode();
         }
         ui.label(RichText::new(clock(team.now().duration_since(self.started))).monospace())
             .on_hover_text("Simulation time since start; it stops while paused");
@@ -406,11 +397,16 @@ impl Simulator {
         });
         if let Some(side) = add_team {
             let occupied = {
-                let physics = world.resource::<SharedPhysics>().lock();
-                physics
-                    .robots
+                let physics = world.resource::<SharedPhysics>().view();
+                // Include members whose model addition is still queued.
+                team.members()
                     .iter()
-                    .filter_map(|entity| physics.object_pose(*entity))
+                    .map(|member| {
+                        member
+                            .entity
+                            .and_then(|entity| physics.object_pose(entity))
+                            .unwrap_or(member.pose)
+                    })
                     .collect::<Vec<_>>()
             };
             let field = world
@@ -532,14 +528,16 @@ impl Simulator {
             .resource::<team::Team>()
             .selected()
             .expect("team always has a selected player");
+        if let Some(error) = world.resource::<SharedPhysics>().take_edit_error() {
+            self.error = Some(error);
+        }
         if let Some(error) = selected.io.poll() {
             self.error = Some(error.to_owned());
-            world.resource::<SharedPhysics>().lock().mode = SimulationMode::Paused;
+            world
+                .resource::<SharedPhysics>()
+                .set_mode(SimulationMode::Paused);
         }
-        for error in [self.error.as_deref(), self.viewport.error()]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(error) = self.error.as_deref() {
             widgets::error_banner(ui, error);
             ui.add_space(4.0);
         }
@@ -569,7 +567,7 @@ impl Simulator {
             .bevy_app
             .world()
             .resource::<SharedPhysics>()
-            .lock()
+            .view()
             .mode
             == SimulationMode::Paused;
         if paused && self.physics.ready() && !self.viewport.captured() {

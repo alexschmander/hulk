@@ -389,6 +389,9 @@ impl Session {
             "add_ball" => {
                 let entity = spawn_ball(&mut self.app, &self.team, parse_pose(&edit["pose"])?);
                 self.app.update();
+                shared
+                    .finish_edits()
+                    .map_err(|error| eyre!("Scene edit: {error}"))?;
                 if let Some(velocity) = edit.get("linear_velocity_m_s") {
                     let velocity: [f64; 3] = serde_json::from_value(velocity.clone())?;
                     shared
@@ -432,6 +435,9 @@ impl Session {
             kind => bail!("Unknown edit {kind}"),
         }
         self.app.update();
+        shared
+            .finish_edits()
+            .map_err(|error| eyre!("Scene edit: {error}"))?;
         self.revision += 1;
         self.scene()
     }
@@ -637,3 +643,7 @@ fn pose_json(pose: Transform) -> Value {
     let q = pose.rotation;
     json!({"frame":"world","position_m":[p.x,-p.z,p.y],"orientation_xyzw":[q.x,-q.z,q.y,q.w]})
 }
+
+#[cfg(test)]
+#[path = "../panel_frame_tests.rs"]
+mod panel_frame_tests;

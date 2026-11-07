@@ -4,7 +4,7 @@ use std::{
     ffi::{CStr, CString},
     path::PathBuf,
     ptr,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::Arc,
 };
 
 use bevy::{platform::cell::SyncCell, prelude::*};
@@ -127,21 +127,9 @@ struct ObjectBinding {
     pose_target: PoseTarget,
 }
 
-#[derive(Resource, Clone, Default)]
-pub struct SharedPhysics(Arc<Mutex<MujocoWorld>>);
-impl SharedPhysics {
-    pub fn try_lock(&self) -> Option<MutexGuard<'_, MujocoWorld>> {
-        match self.0.try_lock() {
-            Ok(world) => Some(world),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-            Err(error) => panic!("physics mutex poisoned: {error}"),
-        }
-    }
-
-    pub fn lock(&self) -> MutexGuard<'_, MujocoWorld> {
-        self.0.lock().unwrap()
-    }
-}
+#[path = "shared_physics.rs"]
+mod shared_physics;
+pub use shared_physics::SharedPhysics;
 
 pub struct MujocoWorld {
     pub mode: SimulationMode,
@@ -519,61 +507,61 @@ fn update_objects(
     objects: Query<(Entity, Ref<MjcfObject>, Option<&Transform>)>,
     physics: Res<SharedPhysics>,
 ) {
-    let mut world = physics.lock();
-    let mut changed = false;
-    for entity in removed.read() {
-        changed |= world
-            .remove_object(entity)
-            .unwrap_or_else(|error| panic!("failed to remove MJCF object: {error}"));
-    }
-
-    let mut poses_to_apply = Vec::new();
-    for (entity, object, transform) in &objects {
-        if !object.is_added() && !object.is_changed() {
-            continue;
-        }
-        if object.is_changed() && !object.is_added() {
-            world
-                .remove_object(entity)
-                .unwrap_or_else(|error| panic!("failed to replace MJCF object: {error}"));
-        }
-        world
-            .add_object(entity, &object)
-            .unwrap_or_else(|error| panic!("failed to add MJCF object: {error}"));
-        if !matches!(object.pose_target, PoseTarget::Fixed)
-            && (object.is_added() || object.reapply_pose_on_change)
-        {
-            poses_to_apply.push((
+    let removed: Vec<_> = removed.read().collect();
+    let changed: Vec<_> = objects
+        .iter()
+        .filter(|(_, object, _)| object.is_changed())
+        .map(|(entity, object, transform)| {
+            (
                 entity,
+                (*object).clone(),
                 transform.copied().unwrap_or_default(),
-                object.is_added() && object.grounded,
-            ));
-        }
-        changed = true;
-    }
-
-    if !changed {
+                object.is_added(),
+            )
+        })
+        .collect();
+    if removed.is_empty() && changed.is_empty() {
         return;
     }
-
-    world.recompile();
-    world.generation += 1;
-
-    for (entity, transform, grounded) in poses_to_apply {
-        let result = if grounded {
-            world.ground_object(entity, transform)
-        } else {
-            world.set_object_pose(entity, transform)
-        };
-        result.unwrap_or_else(|error| panic!("failed to set initial object pose: {error}"));
-    }
+    physics.edit(move |world| {
+        let mut modified = false;
+        for entity in removed {
+            modified |= world.remove_object(entity)?;
+        }
+        let mut poses_to_apply = Vec::new();
+        for (entity, object, transform, added) in changed {
+            if !added {
+                world.remove_object(entity)?;
+            }
+            world.add_object(entity, &object)?;
+            if !matches!(object.pose_target, PoseTarget::Fixed)
+                && (added || object.reapply_pose_on_change)
+            {
+                poses_to_apply.push((entity, transform, added && object.grounded));
+            }
+            modified = true;
+        }
+        if !modified {
+            return Ok(());
+        }
+        world.recompile();
+        world.generation += 1;
+        for (entity, transform, grounded) in poses_to_apply {
+            if grounded {
+                world.ground_object(entity, transform)?;
+            } else {
+                world.set_object_pose(entity, transform)?;
+            }
+        }
+        Ok(())
+    });
 }
 
 fn sync_bodies(
     physics: Res<SharedPhysics>,
     mut bodies: Query<(&MujocoBody, &mut Transform, Option<&mut Visibility>)>,
 ) {
-    let world = physics.lock();
+    let world = physics.view();
     for (body, mut transform, visibility) in &mut bodies {
         if let Some(pose) = world.body_pose(&body.name) {
             *transform = pose;
@@ -959,6 +947,113 @@ mod tests {
                 .body_pose(&ball_body.name)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn panel_pose_update_does_not_wait_for_busy_physics() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
+        let ball = app.world_mut().spawn(ball_object()).id();
+        let visual = app
+            .world_mut()
+            .spawn((MujocoBody::new(ball, "ball"), Transform::default()))
+            .id();
+        app.update();
+        let previous = *app.world().get::<Transform>(visual).unwrap();
+        let shared = app.world().resource::<SharedPhysics>().clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _world = shared.lock();
+            sender.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        });
+        receiver.recv().unwrap();
+        let started = std::time::Instant::now();
+        app.update();
+        let elapsed = started.elapsed();
+        worker.join().unwrap();
+        assert_eq!(*app.world().get::<Transform>(visual).unwrap(), previous);
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "panel update waited {elapsed:?} for physics"
+        );
+    }
+
+    #[test]
+    fn pending_model_changes_survive_a_busy_frame() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
+        let old = app.world_mut().spawn(ball_object()).id();
+        app.update();
+        let shared = app.world().resource::<SharedPhysics>().clone();
+        let previous = shared.view();
+        let moved = Transform::from_xyz(1.0, 0.5, 2.0);
+        let new = app.world_mut().spawn((ball_object(), moved)).id();
+        app.world_mut().despawn(old);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let other = shared.clone();
+        let worker = std::thread::spawn(move || {
+            let mut world = other.lock();
+            sender.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            other.apply_edits(&mut world);
+            other.publish_view_if_requested(&world);
+        });
+        receiver.recv().unwrap();
+        let started = std::time::Instant::now();
+        app.update();
+        let elapsed = started.elapsed();
+        worker.join().unwrap();
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "scene update waited {elapsed:?}"
+        );
+        let current = shared.view();
+        assert!(current.object_pose(old).is_none());
+        assert!(
+            current
+                .object_pose(new)
+                .unwrap()
+                .translation
+                .distance(moved.translation)
+                < 1e-6
+        );
+        assert!(previous.object_pose(old).is_some());
+        assert!(previous.object_pose(new).is_none());
+        assert!(shared.take_edit_error().is_none());
+    }
+
+    #[test]
+    fn snapshot_motion_pose_matches_robot_observation() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, MujocoWorldPlugin));
+        let robot = app
+            .world_mut()
+            .spawn((
+                MjcfObject::from_shared_file(ROBOT_MJCF, "Trunk")
+                    .with_free_joint("world_joint")
+                    .grounded(),
+                Transform::from_xyz(1.0, 0.0, 2.0).with_rotation(Quat::from_rotation_y(0.7)),
+            ))
+            .id();
+        app.update();
+        let physics = app.world().resource::<SharedPhysics>();
+        let expected = {
+            let mut world = physics.lock();
+            let binding = crate::robot_io::RobotBinding::new(
+                world.data(),
+                &format!("object_{}_", robot.to_bits()),
+            )
+            .unwrap();
+            binding.reset_joints(world.data_mut());
+            world.forward();
+            binding.observe(world.data())
+        };
+        let view = physics.view();
+        let (ground, position) = view.motion_pose(robot).unwrap();
+        assert_eq!(ground, expected.ground_to_world);
+        assert_eq!(position.coords, expected.robot_to_world.translation.vector);
+        assert_eq!(view.object_pose(robot), physics.lock().object_pose(robot));
     }
 
     #[test]
