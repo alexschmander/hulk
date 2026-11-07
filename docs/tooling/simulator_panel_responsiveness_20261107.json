@@ -1,0 +1,570 @@
+{
+  "task": "Fix simulator-panel stalls while physics continues at high playback rates",
+  "date_utc": "2026-11-07",
+  "source": {
+    "before_ui": "5e5d5cdc3",
+    "fixed_runtime": "d8ec609e1fcf906ba53757d76f77a1278103c462",
+    "original_throughput_baseline": "acc36dbc70801756ce8102c20a553edad8da955d plus identical 16x ceiling",
+    "headless_before_binary": "Frozen active-servo binary from the preceding hill climb; its runtime matches 0250a8dc5. Later changes through 5e5d5cdc3 only added benchmark/docs and the UI speed shortcut."
+  },
+  "environment": {
+    "cpu": "Ryzen 9 7950X3D, 16 cores / 32 logical CPUs",
+    "pressure_mask": "8-15,24-31: eight physical cores with SMT on the non-V-cache CCD",
+    "note": "CPU pressure on this host is not a hardware emulation of the user's Ryzen 9 5950X.",
+    "build": "Normal optimized dev profile, no custom compiler/CPU flags.",
+    "mujoco": "3.9.0",
+    "onnxruntime": "1.22.1",
+    "execution": "One heavy workstream at a time."
+  },
+  "diagnosis": "Blocking toolbar, Bevy pose/model and command-arrow reads could starve on the physics world mutex while the worker continued stepping.",
+  "fix": [
+    "Immutable state/body-pose snapshots are refreshed on demand. UI readers retain the previous completed view while the worker is busy.",
+    "Panel pause/reset, gizmo and model edits are queued without waiting for the world mutex. Offline/idle edits may apply immediately.",
+    "Headless scene-edit RPCs explicitly finish pending edits before returning.",
+    "Empty command queues and inactive snapshot requests take read-only atomic fast paths.",
+    "Robot nodes, weights, physics settings, sensor publication cadences and recording settings are unchanged."
+  ],
+  "panel_fixture": {
+    "robots": 10,
+    "profile": "Localization, all estimator groups enabled",
+    "referee": "external, Initial",
+    "recording": "full MCAP",
+    "requested_speed": 8,
+    "frame_target_hz": 60,
+    "gpu_rendering": false,
+    "components": "Actual MujocoWorldPlugin update_objects/sync_bodies plus the command-arrow system in the fixed fixture. Toolbar and viewport state access use the production snapshot API.",
+    "before": {
+      "actual_speed": 2.97431383932078,
+      "bevy_ms": {
+        "max": 0.083458,
+        "over_50ms": 0,
+        "p50": 0.057429,
+        "p95": 0.06282900000000001,
+        "p99": 0.083458
+      },
+      "fps": 1.3132074416237651,
+      "frame_ms": {
+        "max": 5420.323359,
+        "over_50ms": 2,
+        "p50": 1.091007,
+        "p95": 4277.279401999999,
+        "p99": 5420.323359
+      },
+      "frames": 13,
+      "header_ms": {
+        "max": 5420.249118,
+        "over_50ms": 2,
+        "p50": 1.023519,
+        "p95": 4277.212345,
+        "p99": 5420.249118
+      },
+      "paused": false,
+      "requested_speed": 8.0,
+      "thread_cpu_ms": {
+        "max": 71.53642500000001,
+        "over_50ms": 2,
+        "p50": 0.07198499999998376,
+        "p95": 57.39450400000004,
+        "p99": 71.53642500000001
+      },
+      "viewport_ms": {
+        "max": 0.008787000000000001,
+        "over_50ms": 0,
+        "p50": 0.005098999999999999,
+        "p95": 0.006332,
+        "p99": 0.008787000000000001
+      },
+      "wake_delay_ms": {
+        "max": 0.068823,
+        "over_50ms": 0,
+        "p50": 0.059253,
+        "p95": 0.062846,
+        "p99": 0.068823
+      },
+      "wall_seconds": 9.899426083
+    },
+    "fixed_final_runtime": {
+      "actual_speed": 3.108599085204455,
+      "frame_max_ms": 0.535545,
+      "frame_p99_ms": 0.087185,
+      "frames": 361,
+      "max_snapshot_age_simulation_ms": 68.0000000000951,
+      "refreshed_frames": 361,
+      "requested_speed": 8,
+      "updates_per_second": 60.165358661741806
+    },
+    "earlier_fixed_trials": {
+      "fixed-pressure-1": {
+        "actual_speed": 3.226929754041827,
+        "frame_max_ms": 0.342028,
+        "frame_p99_ms": 0.099368,
+        "frames": 361,
+        "max_snapshot_age_simulation_ms": 78.00000000007401,
+        "refreshed_frames": 360,
+        "requested_speed": 8,
+        "updates_per_second": 60.1653569470664
+      },
+      "fixed-pressure-2": {
+        "actual_speed": 3.289604158704978,
+        "frame_max_ms": 0.129455,
+        "frame_p99_ms": 0.09001100000000001,
+        "frames": 361,
+        "max_snapshot_age_simulation_ms": 86.00000000004249,
+        "refreshed_frames": 361,
+        "requested_speed": 8,
+        "updates_per_second": 60.16552342144579
+      },
+      "fixed-pressure-3": {
+        "actual_speed": 3.175271470577696,
+        "frame_max_ms": 0.250795,
+        "frame_p99_ms": 0.088688,
+        "frames": 361,
+        "max_snapshot_age_simulation_ms": 78.00000000006958,
+        "refreshed_frames": 360,
+        "requested_speed": 8,
+        "updates_per_second": 60.16549448239283
+      }
+    },
+    "earlier_trials_note": "These preceded the final idle-fast-path change. final-pressure validates the exact final runtime."
+  },
+  "headless_throughput": {
+    "fixture": "10 HULKs, Localization, production field/goals, external referee Initial, full MCAP, 2 ms physics, identical 16x ceiling, 5 simulated seconds warmup + 30 measured. Three fresh trials per binary in alternating execution order.",
+    "summary": {
+      "original": {
+        "speeds": [
+          3.2043141878189854,
+          3.244650545236015,
+          3.273842623501584
+        ],
+        "median_speed": 3.244650545236015,
+        "mean_speed": 3.2409357855188614,
+        "median_worker_cpu_seconds_per_simulated_second": 7.802999999999999,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "maximum_position_error_m": 0.00013890508002977375,
+        "maximum_yaw_error_rad": 1.978662229240591e-05,
+        "maximum_estimate_age_seconds": 0.002,
+        "field_pose_checks": 30
+      },
+      "before": {
+        "speeds": [
+          6.183368743416296,
+          6.734945982878823,
+          6.6928893328293535
+        ],
+        "median_speed": 6.6928893328293535,
+        "mean_speed": 6.537068019708157,
+        "median_worker_cpu_seconds_per_simulated_second": 3.990333333333333,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "maximum_position_error_m": 0.0007779935573725814,
+        "maximum_yaw_error_rad": 5.845664794559348e-05,
+        "maximum_estimate_age_seconds": 0.002,
+        "field_pose_checks": 30
+      },
+      "fixed": {
+        "speeds": [
+          6.489140462119752,
+          6.691207660033957,
+          6.27080597016585
+        ],
+        "median_speed": 6.489140462119752,
+        "mean_speed": 6.483718030773186,
+        "median_worker_cpu_seconds_per_simulated_second": 4.114,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "maximum_position_error_m": 0.0016403734888614763,
+        "maximum_yaw_error_rad": 3.089741607120722e-05,
+        "maximum_estimate_age_seconds": 0.002,
+        "field_pose_checks": 30
+      }
+    },
+    "fixed_vs_original_ratio_of_medians": 1.9999504944060882,
+    "strict_2x_threshold_passed": false,
+    "fixed_vs_before_ratio_of_medians": 0.9695574122658519,
+    "interpretation": "The latest strict 2x assertion did not pass: the ratio of medians was 1.9999504944. The preceding 2.049x hill-climb result remains a historical measurement, not a claim for this run. Fixed/before median speeds are 6.489/6.693x; all samples and their spread are retained.",
+    "metadata": {
+      "revision": "d8ec609e1fcf906ba53757d76f77a1278103c462",
+      "binaries": {
+        "original": {
+          "path": "/tmp/simulator-hillclimb-20261106/baseline",
+          "sha256": "c6eb6f0034bda91365fabda42eb4faf060b483f171605a2e119f0fc166b64fac"
+        },
+        "before": {
+          "path": "/tmp/simulator-hillclimb-20261106/active-servo",
+          "sha256": "4a7f99ea1da17e6e00841b1ba43021ae866ac05f410006d8251427d1bfe10ef0"
+        },
+        "fixed": {
+          "path": "/tmp/simulator-panel-lag-20261107/fixed-simulator-mcp",
+          "sha256": "19e03ad08e80066e17f4508549e4801fd98fe37a9382e57d4f869e208ba7b856"
+        }
+      },
+      "configuration": {
+        "location": "hsl_middle",
+        "referee": "external",
+        "rendering": "disabled",
+        "recording": "all topics",
+        "speed": 16.0,
+        "robot_state": "Initial",
+        "warmup_simulation_seconds": 5.0,
+        "sample_wall_seconds": 3,
+        "samples": 1,
+        "verify_localization": true,
+        "localization_bounds": {
+          "position_m": 0.15,
+          "yaw_rad": 0.1
+        },
+        "sample_simulation_seconds": 30.0
+      }
+    },
+    "trials_in_execution_order": [
+      {
+        "label": "original",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 0,
+        "startup_seconds": 7.786656697280705,
+        "samples": [
+          {
+            "wall_seconds": 9.362377794925123,
+            "simulation_seconds": 30.0,
+            "speed": 3.2043141878189854,
+            "cpu_seconds": 234.99,
+            "cpu_cores": 25.099393033186114,
+            "cpu_seconds_per_simulation_second": 7.833,
+            "rss_bytes": 3264827392,
+            "threads": 185,
+            "host_cpu_stall_fraction": 0.22089238923054372
+          }
+        ],
+        "median_speed": 3.2043141878189854,
+        "median_cpu_per_simulation_second": 7.833,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 932684843,
+        "log_bytes": 2283735,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.00013225579233399102,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      },
+      {
+        "label": "before",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 0,
+        "startup_seconds": 6.774015044327825,
+        "samples": [
+          {
+            "wall_seconds": 4.851724237203598,
+            "simulation_seconds": 30.0,
+            "speed": 6.183368743416296,
+            "cpu_seconds": 127.99,
+            "cpu_cores": 26.38031218232839,
+            "cpu_seconds_per_simulation_second": 4.266333333333333,
+            "rss_bytes": 2096672768,
+            "threads": 169,
+            "host_cpu_stall_fraction": 0.26106327113307615
+          }
+        ],
+        "median_speed": 6.183368743416296,
+        "median_cpu_per_simulation_second": 4.266333333333333,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 782483477,
+        "log_bytes": 2797628,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.0007779935573725814,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      },
+      {
+        "label": "fixed",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 0,
+        "startup_seconds": 7.020352494902909,
+        "samples": [
+          {
+            "wall_seconds": 4.623108434025198,
+            "simulation_seconds": 30.0,
+            "speed": 6.489140462119752,
+            "cpu_seconds": 123.42,
+            "cpu_cores": 26.69632386116066,
+            "cpu_seconds_per_simulation_second": 4.114,
+            "rss_bytes": 2051399680,
+            "threads": 168,
+            "host_cpu_stall_fraction": 0.26432540301375496
+          }
+        ],
+        "median_speed": 6.489140462119752,
+        "median_cpu_per_simulation_second": 4.114,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 774544334,
+        "log_bytes": 2914160,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.0016403734888614763,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      },
+      {
+        "label": "fixed",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 1,
+        "startup_seconds": 6.8593066348694265,
+        "samples": [
+          {
+            "wall_seconds": 4.483495584689081,
+            "simulation_seconds": 30.0,
+            "speed": 6.691207660033957,
+            "cpu_seconds": 119.53,
+            "cpu_cores": 26.660001720128626,
+            "cpu_seconds_per_simulation_second": 3.9843333333333333,
+            "rss_bytes": 2082230272,
+            "threads": 171,
+            "host_cpu_stall_fraction": 0.27203773862634056
+          }
+        ],
+        "median_speed": 6.691207660033957,
+        "median_cpu_per_simulation_second": 3.9843333333333333,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 770403130,
+        "log_bytes": 2995573,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.0005207168219927616,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      },
+      {
+        "label": "before",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 1,
+        "startup_seconds": 6.837255904916674,
+        "samples": [
+          {
+            "wall_seconds": 4.454378710128367,
+            "simulation_seconds": 30.0,
+            "speed": 6.734945982878823,
+            "cpu_seconds": 119.71,
+            "cpu_cores": 26.8746794536808,
+            "cpu_seconds_per_simulation_second": 3.990333333333333,
+            "rss_bytes": 2018365440,
+            "threads": 172,
+            "host_cpu_stall_fraction": 0.2697410970620803
+          }
+        ],
+        "median_speed": 6.734945982878823,
+        "median_cpu_per_simulation_second": 3.990333333333333,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 768878239,
+        "log_bytes": 3030861,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.00045014369148129807,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      },
+      {
+        "label": "original",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 1,
+        "startup_seconds": 7.679748076014221,
+        "samples": [
+          {
+            "wall_seconds": 9.245987998321652,
+            "simulation_seconds": 30.0,
+            "speed": 3.244650545236015,
+            "cpu_seconds": 234.08999999999997,
+            "cpu_cores": 25.318008204476623,
+            "cpu_seconds_per_simulation_second": 7.802999999999999,
+            "rss_bytes": 3273191424,
+            "threads": 192,
+            "host_cpu_stall_fraction": 0.2224018677477483
+          }
+        ],
+        "median_speed": 3.244650545236015,
+        "median_cpu_per_simulation_second": 7.802999999999999,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 935031408,
+        "log_bytes": 2283732,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.00013890508002977375,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      },
+      {
+        "label": "original",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 2,
+        "startup_seconds": 7.600223629269749,
+        "samples": [
+          {
+            "wall_seconds": 9.163543716073036,
+            "simulation_seconds": 30.0,
+            "speed": 3.273842623501584,
+            "cpu_seconds": 232.22999999999996,
+            "cpu_cores": 25.342815748525755,
+            "cpu_seconds_per_simulation_second": 7.740999999999999,
+            "rss_bytes": 3245518848,
+            "threads": 185,
+            "host_cpu_stall_fraction": 0.2243628735457231
+          }
+        ],
+        "median_speed": 3.273842623501584,
+        "median_cpu_per_simulation_second": 7.740999999999999,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 935401569,
+        "log_bytes": 2297745,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.00012913693621650001,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      },
+      {
+        "label": "before",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 2,
+        "startup_seconds": 6.821898104157299,
+        "samples": [
+          {
+            "wall_seconds": 4.4823690499179065,
+            "simulation_seconds": 30.0,
+            "speed": 6.6928893328293535,
+            "cpu_seconds": 119.69000000000001,
+            "cpu_cores": 26.70239747487818,
+            "cpu_seconds_per_simulation_second": 3.989666666666667,
+            "rss_bytes": 2019667968,
+            "threads": 168,
+            "host_cpu_stall_fraction": 0.27005228407557597
+          }
+        ],
+        "median_speed": 6.6928893328293535,
+        "median_cpu_per_simulation_second": 3.989666666666667,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 768335529,
+        "log_bytes": 3015067,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.00031689999330700874,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      },
+      {
+        "label": "fixed",
+        "profile": "localization",
+        "players_per_team": 5,
+        "repeat": 2,
+        "startup_seconds": 7.047955641057342,
+        "samples": [
+          {
+            "wall_seconds": 4.784074031747878,
+            "simulation_seconds": 30.0,
+            "speed": 6.27080597016585,
+            "cpu_seconds": 127.46000000000001,
+            "cpu_cores": 26.642564298577977,
+            "cpu_seconds_per_simulation_second": 4.248666666666667,
+            "rss_bytes": 2012688384,
+            "threads": 172,
+            "host_cpu_stall_fraction": 0.2761483186156562
+          }
+        ],
+        "median_speed": 6.27080597016585,
+        "median_cpu_per_simulation_second": 4.248666666666667,
+        "mcap_enabled": true,
+        "recording_files": 10,
+        "recording_bytes": 781095131,
+        "log_bytes": 2856937,
+        "dropped_samples": 0,
+        "dropped_logs": 0,
+        "quality": {
+          "robots": 10,
+          "acquired": 10,
+          "maximum_position_error_m": 0.0005205362567758516,
+          "maximum_estimate_age_seconds": 0.002
+        }
+      }
+    ]
+  },
+  "validation": {
+    "ordinary_simulator_tests": 114,
+    "simulator_ignored": 6,
+    "twix_simulator_tests": 150,
+    "regressions": [
+      "Held-physics-mutex frame regression failed before the fix at about 150 ms and passes after the fix.",
+      "Queued model changes survive a busy frame and cached views remain immutable.",
+      "Cached command-vector ground/body poses match robot observations exactly.",
+      "Queued edits preserve ordering, report errors, and are not lost with concurrent producers.",
+      "Live CPU-constrained 5v5 test checks responsiveness, continuing pose refresh, pause and reset."
+    ],
+    "integration": [
+      "All eight estimator combinations: startup, pause/resume, scene edits, clocks and producer checks.",
+      "Localization acquisition and moving/head tracking.",
+      "Ten-robot running additions, shared clocks and namespaced communications.",
+      "Automatic referee Playing/return/physical-penalty checks.",
+      "MCP rendering, parameter/service/publication operations, scene edits, cancellation, paused cleanup, history and worker-crash reporting."
+    ],
+    "builds": [
+      "Simulator MCP",
+      "Twix with simulator feature"
+    ],
+    "formatting": "Changed Rust files pass rustfmt; git diff --check passes."
+  },
+  "limitations": [
+    "CPU-side update measurements do not establish hardware-GPU FPS on the user's machine.",
+    "Rendering can retain the previous view until a refresh is completed. GPU/asset-loading costs and structural model recompilation remain separate sources of latency.",
+    "UI edits are handed off when physics is busy; idle/offline edits may execute immediately.",
+    "The final headless 2x threshold is recorded as unmet, despite being only 0.0025% below it."
+  ],
+  "intermediate_measurement": {
+    "runtime_before_idle_fastpaths": "805c2ea41, an unpublished intermediate revision",
+    "raw_results_path": "logs/simulator-performance/panel-lag-20261107/headless-throughput.json",
+    "strict_2x_ratio": 1.9956442695284404,
+    "note": "Retained as an intermediate result; it was not accepted as a 2x pass."
+  },
+  "artifacts": {
+    "raw_logs_and_frozen_binaries": "/tmp/simulator-panel-lag-20261107",
+    "raw_panel_and_throughput_results": "logs/simulator-performance/panel-lag-20261107",
+    "reproduction": "cargo test -p simulate --lib panel_snapshots_remain_responsive_at_high_speed -- --ignored --nocapture; optionally restrict the test process with taskset on a suitable CPU set."
+  }
+}

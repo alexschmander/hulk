@@ -651,3 +651,15 @@ The live fixture checks update latency, continuing snapshot refresh, pause and r
 It can also run under a process-local CPU affinity limit to reproduce CPU pressure.
 Set `SIMULATOR_PANEL_TEST_OUTPUT` to save timing samples. These CPU-side checks do
 not measure hardware-GPU rendering speed.
+
+On the tested 7950X3D restricted to eight physical cores, the blocking fixture
+produced a 5.42-second panel update while physics continued near 3x real time.
+The final snapshot-backed fixture sustained 60 updates/s, refreshed all 361 views,
+and had a 0.536 ms worst update. This is a CPU-side stress test, not a GPU-FPS
+measurement or an exact 5950X hardware reproduction.
+
+Fresh headless medians were 6.693x before and 6.489x after the panel fix. The fixed
+binary measured 1.99995x the original hill-climb baseline in that batch, narrowly
+missing the strict 2x assertion. All runs retained recording without drops and
+fresh localization. Exact samples, hashes, checks and limitations are in the
+[panel responsiveness record](../../docs/tooling/simulator_panel_responsiveness_20261107.json).
