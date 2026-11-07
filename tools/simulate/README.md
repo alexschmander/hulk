@@ -547,16 +547,83 @@ uv run --no-project --with jsonschema python tools/simulate/tests/performance.py
   --binary integrated=/path/to/integrated-simulator-mcp \
   --binary optimized=/path/to/optimized-simulator-mcp \
   --profiles localization --players 5 --repeats 3 --verify-localization \
+  --samples 1 --simulation-seconds 30 --warmup 5 --speed 16 \
   --require-speedup integrated optimized 2 \
   --output logs/simulator-performance/results.json
 ```
 
 The check compares the median session speeds across fresh repeats and fails if any
-selected profile/player count misses the requested factor. `--verify-localization`
-also checks fresh estimates on every robot and rejects a reduction in field-pose
-acquisition across the compared sessions. Walking accuracy remains covered by the
-live acquisition/tracking fixture. Run without concurrent
+selected profile/player count misses the requested factor. Fixed simulated durations
+give both binaries equal work. Use one uninterrupted sample per session: repeated
+short advances pause between samples and can hide sustained scheduling bottlenecks.
+`--verify-localization` requires every robot to acquire a field pose, checks estimate
+age (at most 250 ms), and compares position (under 15 cm) and yaw (under 0.1 rad)
+against the paused scene, accounting for each team's field frame.
+`--motion walking` injects 0.08 m/s forward walking on every robot, checks displacement
+and upright posture, and requires `--simulation-seconds`. Walking accuracy also
+remains covered by the live acquisition/tracking fixture. Run without concurrent
 builds or other benchmarks. Full recording remains enabled for both binaries.
 Logical-clock timers wake at their deadlines rather than on every physics tick.
 Subscriber overflow diagnostics are coalesced to one message per wall-clock second
 per subscription; dropped-sample counters still count every lost sample.
+
+On Linux hosts with at least eight available physical cores, simulator workers
+leave one whole core free for physics, including its SMT sibling. The physics
+thread uses one logical CPU on that core. Selection prefers the largest last-level
+cache, then the highest maximum frequency. Smaller hosts and hosts without a fully
+available core retain OS scheduling. Placement stays within the inherited CPU set
+and affects only simulator-owned threads and MCP processes.
+
+### November 2026 hill climb
+
+The recorded 5v5 HULK Localization standing benchmark improved from **3.229x to
+6.616x real time (2.049x)** against `acc36dbc7`. Both binaries used the same 16x
+ceiling, production field/goals/ball, full MCAP and logs, 2 ms physics, an external
+referee in Initial, five simulated seconds of warmup and one uninterrupted
+30-second simulated sample. Three fresh pairs alternated execution order on an
+otherwise idle Ryzen 7950X3D Linux host, using the ordinary optimized dev build.
+
+| Metric | Baseline | Optimized |
+| --- | ---: | ---: |
+| Median standing simulation / wall time | 3.229x | 6.616x |
+| Standing worker CPU seconds / simulated second | 7.807 | 4.041 |
+| Median walking simulation / wall time | 3.441x | 3.354x |
+| Walking worker CPU seconds / simulated second | 7.545 | 7.145 |
+| Recording / log drops, all sessions | 0 / 0 | 0 / 0 |
+| Maximum standing position error | 0.159 mm | 0.538 mm |
+| Maximum walking position error | 6.13 cm | 4.33 cm |
+| Maximum estimate age at paused sample | 2 ms | 2 ms |
+
+Individual standing speeds were 3.226 / 3.229 / 3.259x before and
+6.669 / 6.616 / 6.594x after; no measured sessions were excluded. Standing CPU cost
+fell 48.2%. A separate three-pair comparison injected 0.08 m/s walking on all ten
+robots before warmup, for 35 simulated seconds total. All robots moved and finished
+upright, with fresh field poses. Walking speeds were 3.441 / 3.424 / 3.490x before
+and 3.354 / 3.361 / 3.331x after.
+
+Walking throughput is **2.5% lower**. At higher physics throughput, asynchronous
+motor delivery increased control delay and degraded walking. The simulator now
+requires a fresh SDK motor packet before every active-motion physics tick, while
+standing, Prepare and Damping retain asynchronous control. Less restrictive
+handoffs were rejected after sustained walking failures. This quality safeguard
+limits moving throughput; the 2x result applies to the standing fixture.
+
+The retained optimizations share immutable K1 meshes, bound publication and camera
+workers, separate recording ingestion from robot computation, place physics on a
+dedicated core, use jemalloc on Linux, and project active foot-contact Jacobians
+without constructing dense pose blocks. Production node wiring, neural weights,
+estimator weights, physical parameters, solver settings and logical publication
+cadences stay the same. Camera visibility queries retain identical results in
+concurrent tests; mesh sharing preserves dynamics and sensors across all four
+MuJoCo integrators.
+
+A separate recording audit retained 100,000 samples per body, IMU and reference-body
+topic in a 20-second source-time window across ten robots. Total motor and motion command
+counts matched. Derived outputs coalesce more at higher throughput: complete-capture
+localization estimate counts were 13,671 before and 8,835 after. Complete HULK output
+traces are not byte-identical. Localization errors and upright posture above are
+checked at the paused end of each continuous run; they are not a complete motion
+trace. Rendering and match behavior are checked separately; these measurements
+do not establish 2x GUI or match throughput. Binary hashes, individual timings,
+quality checks and validation details are in the
+[benchmark record](../../docs/tooling/simulator_performance_20261106.json).
