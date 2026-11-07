@@ -1,0 +1,9 @@
+{
+  tracking: {
+    // Synthetic detections have no pixel noise by default. Keep the full
+    // statistical rival search, but do not publish a winning correspondence
+    // tens of pixels away from the predicted landmark. The hardware limit is
+    // deliberately wider for real image/calibration noise.
+    max_pixel_distance: 20.0,
+  },
+}

@@ -893,3 +893,101 @@ mod tests {
         assert!(reset_delta.is_none());
     }
 }
+
+#[cfg(test)]
+mod tracking_output_gate_tests {
+    use super::*;
+    use coordinate_systems::{Field, Robot};
+    use field_mark_association::{
+        FieldMarkAssociationParameters, TrackingAssociationInput,
+        associate_tracking_visual_features, find_detected_visual_features,
+    };
+    use linear_algebra::Isometry3;
+    use types::visual_localization::AssociationGeometry;
+
+    #[derive(Deserialize)]
+    struct Fixture {
+        geometry: AssociationGeometry,
+        camera: types::camera_geometry::CameraGeometry,
+        time: Time,
+        objects: Vec<Object<Label>>,
+        field_dimensions: FieldDimensions,
+        truth_robot_to_field: Isometry3<Robot, Field, f64>,
+        truth_robot_to_camera: Isometry3<Robot, coordinate_systems::Camera>,
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synthetic_tracking_rejects_recorded_wrong_match_and_keeps_correct_pair() {
+        let fixtures: Vec<Fixture> =
+            serde_json::from_str(include_str!("../tests/fixtures/tracking_output_gate.json"))
+                .unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let context = ContextBuilder::default()
+            .with_namespace("/synthetic_tracking_gate")
+            .with_parameter_layers([
+                root.join("../../etc/parameters/base"),
+                root.join("parameters"),
+            ])
+            .disable_multicast_scouting()
+            .with_connect_endpoints(std::iter::empty::<&str>())
+            .with_listen_endpoints(std::iter::empty::<&str>())
+            .build()
+            .await
+            .unwrap();
+        let node = context.create_node("gate_test").build().await.unwrap();
+        let configured = node
+            .bind_parameter_as::<FieldMarkAssociationParameters>("field_mark_association")
+            .unwrap();
+        let base: FieldMarkAssociationParameters = json5::from_str(include_str!(
+            "../../../etc/parameters/base/field_mark_association.json5"
+        ))
+        .unwrap();
+        for (index, fixture) in fixtures.iter().enumerate() {
+            let geometry = &fixture.geometry;
+            let features = find_detected_visual_features(&fixture.objects);
+            let input = TrackingAssociationInput {
+                visual_features: &features,
+                robot_to_camera: fixture.camera.robot_to_camera,
+                geometry,
+                camera_intrinsic: fixture.camera.intrinsics,
+                field_dimensions: &fixture.field_dimensions,
+                time: fixture.time,
+            };
+            let original = associate_tracking_visual_features(input, &base);
+            assert_eq!(original.associations.len(), 2);
+            let maximum_truth_error = original
+                .associations
+                .iter()
+                .map(|association| {
+                    let robot = fixture.truth_robot_to_field.inverse().inner
+                        * association.field_point.inner.cast::<f64>();
+                    let camera = fixture.truth_robot_to_camera.inner * robot.cast::<f32>();
+                    let pixel = fixture
+                        .camera
+                        .intrinsics
+                        .project(linear_algebra::Vector3::wrap(camera.coords));
+                    (pixel - association.detection).norm()
+                })
+                .fold(0.0_f32, f32::max);
+            let result = associate_tracking_visual_features(input, configured.snapshot().typed());
+            if index == 0 {
+                assert!(
+                    maximum_truth_error > 50.0,
+                    "fixture must reproduce the wrong correspondence"
+                );
+                assert!(
+                    result.associations.is_empty(),
+                    "synthetic output gate admitted the recorded wrong landmark match"
+                );
+            } else {
+                assert!(maximum_truth_error < 0.01);
+                assert_eq!(
+                    result.associations.len(),
+                    2,
+                    "correct sparse tracking must remain usable"
+                );
+            }
+        }
+        context.shutdown().unwrap();
+    }
+}

@@ -614,6 +614,13 @@ controllers without this packet wait. The 6.616x standing result above predates
 that correctness fix and is not the current validated throughput. Less restrictive
 active-motion handoffs were rejected after sustained walking failures.
 
+Synthetic vision has simulator-specific calibration in `parameters/`.
+Tracking retains the full statistical rival search but limits published matches
+to a 20-pixel prediction residual. Synthetic visual odometry is computed from
+physical camera poses, so its uncertainty is 0.01 m/rad rather than the 0.1
+hardware setting. This limits drift during landmark dropouts without changing
+robotics nodes, solver math, sensor rates or the hardware parameter files.
+
 The retained optimizations share immutable K1 meshes, bound publication and camera
 workers, keep recording ingestion on its owning robot runtime, place physics on a
 dedicated core, use jemalloc on Linux, and project active foot-contact Jacobians

@@ -1,0 +1,8 @@
+{
+  model: {
+    // Synthetic visual odometry comes from physical camera poses, not noisy
+    // image tracking. Keep a conservative 1 cm / 0.01 rad uncertainty for
+    // camera/kinematics and spline approximation; the hardware default is 0.1.
+    visual_odometry_sigma: 0.01,
+  },
+}
