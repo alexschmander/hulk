@@ -329,6 +329,13 @@ impl Simulator {
         speed_picker.response.on_hover_text(
             "Physics, robotics and the automatic GameController run at the selected speed. Faster targets depend on available compute.",
         );
+        if ui
+            .add(egui::Button::new("8×").selected(speed == simulation::Speed::Octuple))
+            .on_hover_text("Set simulation speed to 8×")
+            .clicked()
+        {
+            speed = simulation::Speed::Octuple;
+        }
         self.physics.set_speed(speed);
         let actual = self.physics.actual_speed();
         if !paused && actual > 0.0 {

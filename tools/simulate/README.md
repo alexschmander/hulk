@@ -148,7 +148,8 @@ Sensors capture the evaluated state before integration, at that state's physics 
 The next tick can compute position and velocity dynamics while per-robot workers publish
 those samples; it waits for all publications before reading new actuator commands.
 There is at most one sample in flight per robot, including its matching camera frame.
-The speed selector beside Run/Pause offers ¼×, ½×, 1×, 2× and 4×, and can be changed while running or paused.
+The speed selector beside Run/Pause offers ¼×, ½×, 1×, 2×, 4×, 8× and 16×, and can be changed while running or paused.
+The **8×** button beside it selects 8× speed directly and stays highlighted while selected.
 Speed changes wall pacing, keeping the physics timestep fixed.
 The achieved rate shows simulated seconds per real second; available compute may limit faster targets.
 Physics, robotics and all automatic GameController match timers advance together.
