@@ -512,6 +512,7 @@ impl State {
         if let Some(root) = args["configuration"]["recording_root"].as_str() {
             command.env("SIMULATOR_RECORDING_ROOT", root);
         }
+        crate::cpu_affinity::configure_child(&mut command);
         let mut child = command.spawn()?;
         let (stream, _) =
             tokio::time::timeout(Duration::from_secs(10), listener.accept()).await??;

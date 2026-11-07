@@ -1,3 +1,7 @@
+#[cfg(all(feature = "simulator", target_os = "linux"))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::{env::current_dir, path::PathBuf, str::FromStr, sync::Arc};
 
 use clap::{CommandFactory, Parser};

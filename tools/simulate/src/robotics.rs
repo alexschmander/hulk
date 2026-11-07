@@ -574,7 +574,12 @@ impl RobotStack {
     }
 
     pub fn actuator_control(&self) -> crate::simulated_sdk::Control {
-        self.commands.borrow().clone()
+        self.actuator_control_ref().clone()
+    }
+
+    // Keep this guard within synchronous control application; never across an await.
+    pub(crate) fn actuator_control_ref(&self) -> watch::Ref<'_, crate::simulated_sdk::Control> {
+        self.commands.borrow()
     }
 
     pub(crate) fn startup_commands(

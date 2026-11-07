@@ -42,6 +42,9 @@ impl Drop for Session {
     }
 }
 pub(super) fn run(socket: &str) -> Result<()> {
+    // Restore the server's original mask before discovering the same physics core.
+    crate::cpu_affinity::restore_child();
+    crate::cpu_affinity::worker();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

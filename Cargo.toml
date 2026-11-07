@@ -295,6 +295,7 @@ team_ball_filter = { path = "crates/nodes/team_ball_filter" }
 tempfile = "3.17.0"
 thiserror = "2.0.11"
 time_to_reach_kick_position = { path = "crates/nodes/time_to_reach_kick_position" }
+tikv-jemallocator = "0.7"
 tokio = { version = "1.47.1", features = ["full"] }
 tokio-tungstenite = "0.26.1"
 tokio-util = "0.7.13"

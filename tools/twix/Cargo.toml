@@ -50,10 +50,13 @@ uuid = { workspace = true }
 zenoh = { workspace = true }
 
 [features]
-simulator = ["dep:simulate"]
+simulator = ["dep:simulate", "dep:tikv-jemallocator"]
 
 [build-dependencies]
 pkg-config = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { workspace = true, optional = true }

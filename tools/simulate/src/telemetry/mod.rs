@@ -51,6 +51,7 @@ impl RobotRuntime {
                 .thread_name("simulator-robot")
                 .enable_all()
                 .on_thread_start(move || {
+                    crate::cpu_affinity::worker();
                     DISPATCH.with(|guard| {
                         *guard.borrow_mut() = Some(tracing::dispatcher::set_default(&dispatcher))
                     })

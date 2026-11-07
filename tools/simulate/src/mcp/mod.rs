@@ -21,6 +21,7 @@ pub fn run() -> color_eyre::Result<()> {
                 .ok_or_else(|| color_eyre::eyre::eyre!("Missing worker socket"))?,
         );
     }
+    crate::cpu_affinity::worker();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

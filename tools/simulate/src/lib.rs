@@ -1,4 +1,8 @@
 //! Twix's simulator. All hardware substitutes and node wiring live in this tool.
+#[cfg(all(test, target_os = "linux"))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bevy::prelude::*;
@@ -12,6 +16,7 @@ use egui_material_icons::icons;
 use tokio::runtime::Handle;
 
 mod controller;
+mod cpu_affinity;
 mod demand;
 mod field;
 mod network;
