@@ -159,7 +159,8 @@ Physics, robotics and all automatic GameController match timers advance together
 Automatic GameController packets follow simulation time, with a real-time heartbeat retained during pauses and slow playback.
 Pause and scene recompilation freeze simulation time and sensor sampling.
 Resume continues from that time without catching up elapsed wall time; pose resets and scene edits never rewind the clock.
-A new robot initializes against stationary sensor samples on a private logical clock starting two seconds before the current match time.
+A new robot initializes against stationary sensor samples on a private logical clock starting twenty seconds before the current match time.
+Initial players initialize concurrently; dynamic additions serialize player allocation and startup.
 Its control loop completes the startup sequence, then catches up to the match clock before joining the common scene in Initial.
 This warm-up never advances the existing match or rewinds the new robot's time; startup recordings can precede the match's displayed time zero.
 Camera frames use simulation time at approximately 30 Hz.

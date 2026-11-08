@@ -105,18 +105,49 @@ impl Team {
             controller: Mutex::new(None),
             configuration: configuration.clone(),
         }));
+        // Initial players have fixed, distinct identities and a frozen shared clock.
+        // Allocate network endpoints serially, then warm their independent stacks
+        // concurrently. Dynamic additions still serialize allocation and startup.
+        let mut initial = Vec::new();
         for (side, count) in [
             (TeamId::Hulks, configuration.robot_count),
             (TeamId::Opponents, configuration.opponent_count),
         ] {
             for index in 0..count {
-                team.add(
-                    side,
+                let connection = Arc::new(team.0.network.lock().await.add_robot(side).await?);
+                initial.push((
+                    RobotId {
+                        team: side,
+                        number: index + 1,
+                    },
                     on_field_side(spawn_pose(&field.dimensions, index), side.default_away()),
-                )
-                .await?;
+                    connection,
+                ));
             }
         }
+        std::thread::scope(|scope| -> Result<()> {
+            let workers: Vec<_> = initial
+                .into_iter()
+                .map(|(id, pose, connection)| {
+                    let team = &team;
+                    scope.spawn(move || {
+                        let result = team
+                            .runtime()
+                            .block_on(team.add_connected(id, pose, connection));
+                        if result.is_err() {
+                            team.cancel();
+                        }
+                        result
+                    })
+                })
+                .collect();
+            // Join every initializer before releasing the team or its recorder owners.
+            let results: Vec<_> = workers.into_iter().map(|worker| worker.join()).collect();
+            for result in results {
+                result.map_err(|_| eyre!("Robot initialization panicked"))??;
+            }
+            Ok(())
+        })?;
         for member in team.0.members.lock().unwrap().values_mut() {
             if member.io.away() != member.id.team.default_away() {
                 member.pose = on_field_side(member.pose, true);
@@ -222,16 +253,24 @@ impl Team {
             })
             .ok_or_else(|| eyre!("All five player numbers are in use"))?;
         let id = RobotId { team: side, number };
+        let connection = Arc::new(network.add_robot(side).await?);
+        self.add_connected(id, pose, connection).await
+    }
+    async fn add_connected(
+        &self,
+        id: RobotId,
+        pose: Transform,
+        connection: Arc<crate::network::Connection>,
+    ) -> Result<RobotId> {
         let player = [
             hsl_network_messages::PlayerNumber::One,
             hsl_network_messages::PlayerNumber::Two,
             hsl_network_messages::PlayerNumber::Three,
             hsl_network_messages::PlayerNumber::Four,
             hsl_network_messages::PlayerNumber::Five,
-        ][usize::from(number - 1)];
+        ][usize::from(id.number - 1)];
         let mut configuration = self.0.configuration.clone();
         configuration.namespace = robot_namespace(id);
-        let connection = Arc::new(network.add_robot(side).await?);
         let io = Robotics::new_robot(
             configuration,
             RobotSettings {
@@ -241,7 +280,7 @@ impl Team {
                     &robot_namespace(id),
                 ),
                 player,
-                default_away: side.default_away(),
+                default_away: id.team.default_away(),
                 scope: transport_scope(id),
                 clock: Clock::logical(self.now() - crate::simulation::STARTUP_WARMUP),
                 ports: connection.ports,
