@@ -213,33 +213,27 @@ pub(crate) fn is_closest_available_field_player_to_own_goal(
     true
 }
 
+/// Returns unpenalized field players according to the Game Controller.
+/// The regular goalkeeper is always excluded.
 pub(crate) fn calculate_available_field_players(
     blackboard: &Blackboard,
     regular_goalkeeper_number: PlayerNumber,
 ) -> Players<bool> {
-    let own_number = blackboard.player_number;
-    let mut available = Players::new(false); // five entries with false created
+    let mut available = Players::new(false);
 
-    for (number, player_state) in blackboard.world_state.player_states.iter() {
-        if number == regular_goalkeeper_number {
-            continue;
-        }
+    let Some(game_controller_state) =
+        blackboard.world_state.filtered_game_controller_state.as_ref()
+    else {
+        return available;
+    };
 
-        let known_is_penalized = blackboard
-            .world_state
-            .filtered_game_controller_state
-            .as_ref()
-            .is_some_and(|state| state.penalties[number].is_some());
+    for (number, penalty) in game_controller_state.penalties.iter() {
+        available[number] =
+            number != regular_goalkeeper_number && penalty.is_none();
+    }
 
-        if known_is_penalized {
-            continue;
-        }
-
-        available[number] = if number == own_number {
-            blackboard.world_state.robot.primary_state != PrimaryState::Penalized // Unnötig?
-        } else {
-            player_state.is_some()
-        };
+    if blackboard.world_state.robot.primary_state == PrimaryState::Penalized {
+        available[blackboard.player_number] = false;
     }
 
     available
@@ -319,20 +313,24 @@ impl ReplacementGoalkeeperCoordinator {
         self.replacement_needed_since = None;
     }
 
+    fn remember_winner(&mut self, winner: PlayerNumber, own_number: PlayerNumber) {
+        self.clear_election();
+        self.known_replacement_goalkeeper = Some(winner);
+        
+        if winner == own_number {
+            self.state = ReplacementGoalkeeperState::Active;
+        }
+    }
+    
     fn reset(&mut self) {
         self.clear_election();
         self.known_replacement_goalkeeper = None;
     }
 
-    fn remember_winner(&mut self, winner: PlayerNumber, own_number: PlayerNumber) {
-        self.clear_election();
-        self.known_replacement_goalkeeper = Some(winner);
-
-        if winner == own_number {
-            self.state = ReplacementGoalkeeperState::Active;
-        }
+    pub fn replacement_goalkeeper_number(&self) -> Option<PlayerNumber> {
+        self.known_replacement_goalkeeper
     }
-
+    
     /// Validates the remembered replacement goalkeeper and clears invalid roles
     /// or candidacies. Returns whether keeper selection may proceed.
     /// Does not start or advance an election.
@@ -653,6 +651,9 @@ mod tests {
             replacement_goalkeeper_claim: false,
         });
 
+        blackboard.world_state.filtered_game_controller_state =
+            Some(game_controller_state_for_tests());
+
         blackboard.world_state.fall_detection = Some(types::fall_detection::FallDetection {
             time: Time::zero(),
             valid_until: Time::from_nanos(1_000_000_000),
@@ -830,26 +831,112 @@ mod tests {
     }
 
     #[test]
-    fn own_player_is_available_without_own_player_state() {
+    fn availability_uses_game_controller_penalties_in_ready_set_and_playing() {
         let mut blackboard = goal_distance_blackboard();
-        blackboard.player_number = PlayerNumber::Three;
-        blackboard.world_state.robot.primary_state = PrimaryState::Playing;
-        blackboard.world_state.filtered_game_controller_state =
-            Some(game_controller_state_for_tests());
         blackboard.world_state.player_states = Players::new(None);
 
-        let available = calculate_available_field_players(&blackboard, PlayerNumber::One);
+        let mut game_controller_state = game_controller_state_for_tests();
 
-        assert_eq!(
-            available,
-            Players {
-                one: false,
-                two: false,
-                three: true,
-                four: false,
-                five: false,
-            },
-        );
+        // Players four and five are not participating.
+        game_controller_state.penalties.four = Some(Penalty::Substitute {
+            remaining: Duration::ZERO,
+        });
+        game_controller_state.penalties.five = Some(Penalty::Substitute {
+            remaining: Duration::ZERO,
+        });
+
+        blackboard.world_state.filtered_game_controller_state =
+            Some(game_controller_state);
+
+        for primary_state in [
+            PrimaryState::Ready,
+            PrimaryState::Set,
+            PrimaryState::Playing,
+        ] {
+            blackboard.world_state.robot.primary_state = primary_state;
+
+            assert_eq!(
+                calculate_available_field_players(&blackboard, PlayerNumber::One),
+                Players {
+                    one: false,
+                    two: true,
+                    three: true,
+                    four: false,
+                    five: false,
+                },
+                "unexpected availability in {primary_state:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn ready_assignment_survives_phase_changes_until_only_one_field_player_remains() {
+        // Check both the winner's view and a teammate's view.
+        for own_number in [PlayerNumber::Two, PlayerNumber::Three] {
+            let mut blackboard = goal_distance_blackboard();
+            blackboard.player_number = own_number;
+            blackboard.parameters.control.is_simple = false;
+            blackboard.world_state.player_states = Players::new(None);
+            blackboard.world_state.robot.primary_state = PrimaryState::Ready;
+
+            let mut game_controller_state = game_controller_state_for_tests();
+            game_controller_state.penalties.one = Some(Penalty::PickUp {
+                remaining: Duration::from_secs(30),
+            });
+            game_controller_state.penalties.four = Some(Penalty::Substitute {
+                remaining: Duration::ZERO,
+            });
+            game_controller_state.penalties.five = Some(Penalty::Substitute {
+                remaining: Duration::ZERO,
+            });
+            blackboard.world_state.filtered_game_controller_state =
+                Some(game_controller_state);
+
+            refresh_replacement_goalkeeper_role(&mut blackboard);
+            update_replacement_goalkeeper_election(&mut blackboard, false);
+
+            for primary_state in [
+                PrimaryState::Ready,
+                PrimaryState::Set,
+                PrimaryState::Playing,
+            ] {
+                blackboard.world_state.robot.primary_state = primary_state;
+                refresh_replacement_goalkeeper_role(&mut blackboard);
+
+                let coordinator = &blackboard.replacement_goalkeeper_coordinator;
+                assert_eq!(
+                    coordinator.known_replacement_goalkeeper,
+                    Some(PlayerNumber::Two),
+                );
+                assert_eq!(
+                    coordinator.is_active(),
+                    own_number == PlayerNumber::Two,
+                );
+            }
+
+            // Only our own field player remains unpenalized.
+            let other_number = if own_number == PlayerNumber::Two {
+                PlayerNumber::Three
+            } else {
+                PlayerNumber::Two
+            };
+
+            blackboard
+                .world_state
+                .filtered_game_controller_state
+                .as_mut()
+                .expect("test setup must contain game controller state")
+                .penalties[other_number] = Some(Penalty::PickUp {
+                remaining: Duration::from_secs(30),
+            });
+
+            refresh_replacement_goalkeeper_role(&mut blackboard);
+
+            assert_eq!(
+                blackboard.replacement_goalkeeper_coordinator,
+                ReplacementGoalkeeperCoordinator::default(),
+            );
+        }
     }
 
     #[test]
