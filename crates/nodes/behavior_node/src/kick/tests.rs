@@ -44,6 +44,7 @@ fn blackboard(robot_x: f32, robot_y: f32, yaw: f32) -> Blackboard {
         world_state: Default::default(),
         controller_input: None,
         remote_control_enabled: false,
+        replacement_goalkeeper_coordinator: Default::default(),
         path_obstacles_output: Vec::new(),
         time_since_last_switch: Duration::ZERO,
         direction_difference: 0.0,
@@ -206,6 +207,7 @@ fn teammate_pressure_is_transformed_and_excludes_our_own_broadcast() {
             pose: Pose2::from_parts(point![-distance, 1.0], Orientation2::new(0.0)),
             head_yaw: 0.0,
             ball_position: None,
+            replacement_goalkeeper_claim: false,
         };
         blackboard.world_state.player_states[PlayerNumber::Two] = Some(teammate);
         assert_eq!(is_urgent_kick(&mut blackboard), urgent);
@@ -233,6 +235,7 @@ fn each_urgent_trigger_precedes_target_planning_and_interception_in_the_live_tre
                     pose: Pose2::from_parts(point![0.0, 1.5], Orientation2::new(0.0)),
                     head_yaw: 0.0,
                     ball_position: None,
+                    replacement_goalkeeper_claim: false,
                 })
             }
             _ => (),
