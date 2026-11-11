@@ -3,9 +3,9 @@
 use hsl_network_messages::PlayerNumber;
 use linear_algebra::point;
 use ros_z::time::Time;
-use serde::{Deserialize, Serialize}; // was macht das?
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use types::{behavior_tree::Status, players::Players, primary_state::PrimaryState};
+use types::{behavior_tree::Status, parameters::ReplacementGoalkeeperParameters, players::Players, primary_state::PrimaryState};
 
 use crate::{conditions::is_simple, node::Blackboard, penalty_shootout::is_penalty_shootout};
 
@@ -32,27 +32,9 @@ pub struct ReplacementGoalkeeperInput {
 
     pub now: Time,
 }
-
-pub struct ReplacementGoalkeeperParameters {
-    // move to parameters
-    pub election_window: Duration,
-    pub no_claim_timeout: Duration,
-    pub backoff_step: Duration,
-}
-
-impl Default for ReplacementGoalkeeperParameters {
-    fn default() -> Self {
-        Self {
-            election_window: Duration::from_millis(500),
-            no_claim_timeout: Duration::from_secs(2),
-            backoff_step: Duration::from_millis(200),
-        }
-    }
-}
-
-/// Called as a condition in the behavior tree. 
+ 
 /// Returns whether this robot may continue an open replacement goalkeeper election.
-/// The coordinator's role must be refreshed earlier in the tree.
+/// The coordinator's role must have been refreshed earlier in the tree.
 pub fn is_replacement_goalkeeper_election_open(blackboard: &mut Blackboard) -> bool {
     if is_simple(blackboard) || is_penalty_shootout(blackboard) {
         return false;
@@ -98,7 +80,6 @@ pub fn is_replacement_goalkeeper_election_open(blackboard: &mut Blackboard) -> b
             .is_none()
 }
 
-/// Called as an action in the behavior tree (in every loop.).
 /// Validates the stored replacement goalkeeper and clears invalid role state.
 /// Always allows the behavior tree to continue.
 pub fn refresh_replacement_goalkeeper_role(blackboard: &mut Blackboard) -> Status {
@@ -270,7 +251,6 @@ pub(crate) fn find_lowest_numbered_available_other_claiming_player(
         .min()
 }
 
-/// Called as an action in the tree.
 /// Proceeds the election process: starts or ends own claims, handles other players claims
 /// and fallback times and stores the winner
 pub fn update_replacement_goalkeeper_election(
@@ -285,7 +265,7 @@ pub fn update_replacement_goalkeeper_election(
 
     blackboard
         .replacement_goalkeeper_coordinator
-        .update(input, &ReplacementGoalkeeperParameters::default());
+        .update(input, &blackboard.parameters.replacement_goalkeeper);
 
     Status::Success
 }
@@ -348,7 +328,6 @@ impl ReplacementGoalkeeperCoordinator {
             return false;
         }
 
-        // Frage für mich: Notwendig so elaboriert?
         let own_is_available = own_number != input.regular_goalkeeper_number
             && input.available_field_players[own_number]
             && input.primary_state != PrimaryState::Penalized;
@@ -368,7 +347,6 @@ impl ReplacementGoalkeeperCoordinator {
             return false;
         }
 
-        // Eine gültige Besetzung bleibt bestehen, aber muss man das so machen?
         if let Some(winner) = self.known_replacement_goalkeeper {
             self.remember_winner(winner, own_number);
             return false;
@@ -382,8 +360,6 @@ impl ReplacementGoalkeeperCoordinator {
             input.primary_state,
             PrimaryState::Ready | PrimaryState::Playing
         )
-        // true: Auswahl darf weiter geprüft werden.
-        // false: In diesem Update keine Auswahl fortsetzen.
     }
 
     /// Advances the local replacement goalkeeper election.
@@ -413,7 +389,6 @@ impl ReplacementGoalkeeperCoordinator {
         let own_number = input.own_player_number;
 
         match input.primary_state {
-            // Issue: In Ready State roles and claims are lost. Election not possible bc no StateMessages
             PrimaryState::Ready => {
                 self.clear_election();
 
@@ -477,7 +452,6 @@ impl ReplacementGoalkeeperCoordinator {
                     return;
                 };
 
-                // Auch Spieler ohne eigenen Claim beobachten die Wahl.
                 let election_start = *self.election_started_at.get_or_insert(input.now);
 
                 let window_elapsed =
@@ -489,8 +463,6 @@ impl ReplacementGoalkeeperCoordinator {
             }
 
             _ => {
-                // Insbesondere Set und Stop: keine neue Wahl.
-                // Gültige gespeicherte Rollen wurden oben behandelt.
                 self.clear_election();
             }
         }
@@ -498,11 +470,6 @@ impl ReplacementGoalkeeperCoordinator {
 
     pub fn is_active(&self) -> bool {
         matches!(self.state, ReplacementGoalkeeperState::Active)
-        // kompakter als:
-        // match self.state {
-        // ReplacementGoalkeeperState::Active => true,
-        // _ => false,
-        // }
     }
 
     pub fn claims_role(&self) -> bool {
@@ -770,20 +737,20 @@ mod tests {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
         let parameters = parameters();
 
-        // Bei Wahlbeginn: Candidate, noch kein Gewinner.
+        // At begin of election: Candidate, not yet a winner.
         coordinator.update(playing_input(Time::zero()), &parameters);
 
         assert!(coordinator.claims_role());
         assert!(!coordinator.is_active());
         assert_eq!(coordinator.known_replacement_goalkeeper, None);
 
-        // Nach 499 ms: Das Fenster läuft noch.
+        // After 499 ms: Window ist still running
         coordinator.update(playing_input(Time::from_nanos(499_000_000)), &parameters);
 
         assert!(!coordinator.is_active());
         assert_eq!(coordinator.known_replacement_goalkeeper, None);
 
-        // Nach genau 500 ms: Eigener Claim gewinnt ohne Netzwerk-Echo.
+        // After exactly 500 ms: Own claim winns without network echo
         coordinator.update(playing_input(Time::from_nanos(500_000_000)), &parameters);
 
         assert!(coordinator.is_active());
@@ -799,7 +766,7 @@ mod tests {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
         let parameters = parameters();
 
-        // Eigener Spieler 3 und fremder Spieler 2 claimen.
+        // Own Player 3 and other player 2 claim.
         let mut input = playing_input(Time::zero());
         input.lowest_other_claiming_player = Some(PlayerNumber::Two);
         coordinator.update(input, &parameters);
@@ -807,7 +774,7 @@ mod tests {
         assert!(coordinator.claims_role());
         assert!(!coordinator.is_active());
 
-        // Am Wahlende gewinnt Spieler 2.
+        // At the end of the electin Player 2 wins.
         let mut input = playing_input(Time::from_nanos(500_000_000));
         input.lowest_other_claiming_player = Some(PlayerNumber::Two);
         coordinator.update(input, &parameters);
@@ -819,7 +786,7 @@ mod tests {
             Some(PlayerNumber::Two),
         );
 
-        // Ohne frischen Claim bleibt das gespeicherte Ergebnis erhalten.
+        // Without any new claims the saved result is kept.
         coordinator.update(playing_input(Time::from_nanos(600_000_000)), &parameters);
 
         assert!(!coordinator.claims_role());
@@ -834,13 +801,13 @@ mod tests {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
         let parameters = parameters();
 
-        // Zunächst wird Spieler 3 gewählt.
+        // At first, Player 3 i chosen.
         coordinator.update(playing_input(Time::zero()), &parameters);
         coordinator.update(playing_input(Time::from_nanos(500_000_000)), &parameters);
 
         assert!(coordinator.is_active());
 
-        // Anschließend ist Spieler 1 nicht mehr penalized.
+        // Afterwards Player 1 is no longer penalized.
         let mut input = playing_input(Time::from_nanos(600_000_000));
         input.regular_goalkeeper_is_penalized = false;
         coordinator.update(input, &parameters);
@@ -857,13 +824,13 @@ mod tests {
         let mut coordinator = ReplacementGoalkeeperCoordinator::default();
         let parameters = parameters();
 
-        // Spieler 3 gewinnt zunächst die Wahl.
+        // First, Player 3 wins the election.
         coordinator.update(playing_input(Time::zero()), &parameters);
         coordinator.update(playing_input(Time::from_nanos(500_000_000)), &parameters);
 
         assert!(coordinator.is_active());
 
-        // Erst danach claimt Spieler 2.
+        // Afterwards, Player 3 sends a claim..
         let mut input = playing_input(Time::from_nanos(600_000_000));
         input.lowest_other_claiming_player = Some(PlayerNumber::Two);
         coordinator.update(input, &parameters);
@@ -1030,7 +997,7 @@ mod tests {
             available_field_players: input.available_field_players,
         };
 
-        // Wahl beginnen und nach 500 ms gewinnen.
+        // Start election and win after 500 ms.
         coordinator.update(input, &parameters);
         coordinator.update(
             playing_input(Time::from_nanos(500_000_000)), // duration of election window elapsed
@@ -1061,7 +1028,7 @@ mod tests {
         let blackboard = goal_distance_blackboard();
         let available = calculate_available_field_players(&blackboard, PlayerNumber::One);
 
-        // Eigene lokale Pose reicht; kein eigenes Netzwerk-Echo nötig.
+        // Own local Pose is enough; no network echo needed.
         assert!(blackboard.world_state.player_states.three.is_none());
         assert!(is_closest_available_field_player_to_own_goal(
             &blackboard,
@@ -1114,7 +1081,7 @@ mod tests {
             let mut blackboard = goal_distance_blackboard();
             blackboard.world_state.player_states = Players::new(None);
 
-            // Gleiche Position bedeutet exakt gleiche Entfernung.
+            // Same Position means exactly same distance.
             blackboard.world_state.player_states[other_number] = Some(PlayerState {
                 pose: Pose2::new(point!(-4.0, 0.0), 0.0),
                 head_yaw: 0.0,
@@ -1165,8 +1132,8 @@ mod tests {
         let blackboard =
             blackboard_with_claims(&[PlayerNumber::One, PlayerNumber::Three, PlayerNumber::Four]);
 
-        // Bewusst alle verfügbar markieren, damit wir den Ausschluss
-        // von Spieler 1 und uns selbst direkt in der Claim-Funktion testen.
+        // Mark all Players as available, so wie can test exclusion of Player 1 and ourselves
+        // directly in the claim-function.
         let available = Players::new(true);
 
         assert_eq!(
@@ -1241,7 +1208,7 @@ mod tests {
             Some(PlayerNumber::Two),
         );
 
-        // Simuliert das Entfernen eines abgelaufenen PlayerState.
+        // Simulates removing an expired PlayerState.
         blackboard.world_state.player_states.two = None;
 
         assert_eq!(
