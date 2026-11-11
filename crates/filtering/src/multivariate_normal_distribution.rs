@@ -8,11 +8,11 @@ pub struct MultivariateNormalDistribution<const DIMENSION: usize> {
     pub covariance: SMatrix<f32, DIMENSION, DIMENSION>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ros-z"))]
 mod tests {
     use super::*;
     use ros_z::{
-        CdrCodec,
+        CdrCodec, Message,
         message::{WireDecoder, WireEncoder},
     };
 

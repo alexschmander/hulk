@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use coordinate_systems::{Field, Ground, ImuReference, Local, Robot};
 use linear_algebra::{Isometry2, Isometry3, Orientation2, Rotation2};
 
-use crate::multivariate_normal_distribution::MultivariateNormalDistribution;
+use filtering::multivariate_normal_distribution::MultivariateNormalDistribution;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PoseEstimate<From, To> {

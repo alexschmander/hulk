@@ -169,7 +169,7 @@ impl ImageOverlay for ProjectedFieldLinesOverlay {
         Ok(())
     }
 
-    fn paint(&self, painter: &TwixPainter<Pixel>) {
+    fn image_overlay(&self, painter: &TwixPainter<Pixel>) {
         let Some(sample) = &self.sample else {
             return;
         };

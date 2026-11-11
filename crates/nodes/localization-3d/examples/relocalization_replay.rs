@@ -162,19 +162,17 @@ fn main() -> Result<()> {
                                 CdrCodec::<TimeWrapper<CameraGeometry>>::deserialize(&data)?,
                             ))
                         }
-                        "visual_odometry/current_left_camera_to_visual_odometer" => Some(
-                            Event::Vo(CdrCodec::<VisualOdometer>::deserialize(&data)?),
-                        ),
+                        "visual_odometry/current_left_camera_to_visual_odometer" => {
+                            Some(Event::Vo(CdrCodec::<VisualOdometer>::deserialize(&data)?))
+                        }
                         "detected_objects" => Some(Event::Objects(CdrCodec::<
                             TimeWrapper<Vec<Object<RobocupObjectLabel>>>,
                         >::deserialize(
                             &data
                         )?)),
-                        "localization/status" => {
-                            Some(Event::Reset(
-                                CdrCodec::<LocalizationStatus>::deserialize(&data)?,
-                            ))
-                        }
+                        "localization/status" => Some(Event::Reset(
+                            CdrCodec::<LocalizationStatus>::deserialize(&data)?,
+                        )),
                         "debug/solve_diagnostics" => Some(Event::Solve),
                         _ => continue,
                     };
