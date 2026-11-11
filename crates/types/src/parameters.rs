@@ -43,7 +43,7 @@ pub struct BehaviorParameters {
     pub kickoff: KickoffParameters,
     pub voronoi: VoronoiParameters,
     pub network: HslNetworkParameters,
-    pub replacement_goalkeeper: ReplacementGoalkeeperParameters
+    pub replacement_goalkeeper: ReplacementGoalkeeperParameters,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ros_z::Message)]

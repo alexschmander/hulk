@@ -87,10 +87,7 @@ pub fn create_tree() -> Node<Blackboard> {
         Node::Failure
     );
 
-    sequence!(
-        action!(refresh_replacement_goalkeeper_role),
-        behavior,
-    )
+    sequence!(action!(refresh_replacement_goalkeeper_role), behavior,)
 }
 
 fn fall_subtree() -> Node<Blackboard> {
@@ -167,7 +164,7 @@ fn playing_subtree() -> Node<Blackboard> {
                 action!(calculate_voronoi_grid),
             ),
             condition!(is_closest_to_ball),
-            action!(update_replacement_goalkeeper_election, false), 
+            action!(update_replacement_goalkeeper_election, false),
             subtree!(striker_subtree),
         ),
         subtree!(replacement_goalkeeper_decision_subtree),

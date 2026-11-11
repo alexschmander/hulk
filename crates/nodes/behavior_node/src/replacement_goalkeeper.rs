@@ -1,11 +1,13 @@
-// coordinator for decentralized replacement goalkeeper election
+/// coordinator for decentralized replacement goalkeeper election
 
 use hsl_network_messages::PlayerNumber;
 use linear_algebra::point;
 use ros_z::time::Time;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
-use types::{behavior_tree::Status, parameters::ReplacementGoalkeeperParameters, players::Players, primary_state::PrimaryState};
+use types::{
+    behavior_tree::Status, parameters::ReplacementGoalkeeperParameters, players::Players,
+    primary_state::PrimaryState,
+};
 
 use crate::{conditions::is_simple, node::Blackboard, penalty_shootout::is_penalty_shootout};
 
@@ -32,7 +34,7 @@ pub struct ReplacementGoalkeeperInput {
 
     pub now: Time,
 }
- 
+
 /// Returns whether this robot may continue an open replacement goalkeeper election.
 /// The coordinator's role must have been refreshed earlier in the tree.
 pub fn is_replacement_goalkeeper_election_open(blackboard: &mut Blackboard) -> bool {
@@ -47,12 +49,14 @@ pub fn is_replacement_goalkeeper_election_open(blackboard: &mut Blackboard) -> b
         return false;
     }
 
-    let Some(game_controller_state) =
-    blackboard.world_state.filtered_game_controller_state.as_ref()
+    let Some(game_controller_state) = blackboard
+        .world_state
+        .filtered_game_controller_state
+        .as_ref()
     else {
         return false;
     };
-    
+
     let regular_goalkeeper_number = blackboard.parameters.goalkeeper.player_number;
     if game_controller_state.penalties[regular_goalkeeper_number].is_none() {
         return false;
@@ -68,9 +72,7 @@ pub fn is_replacement_goalkeeper_election_open(blackboard: &mut Blackboard) -> b
 
     let available_count = available_field_players
         .iter()
-        .filter(|(number, available)| {
-            *number != regular_goalkeeper_number && **available
-        })
+        .filter(|(number, available)| *number != regular_goalkeeper_number && **available)
         .count();
 
     available_count > 1
@@ -202,15 +204,16 @@ pub(crate) fn calculate_available_field_players(
 ) -> Players<bool> {
     let mut available = Players::new(false);
 
-    let Some(game_controller_state) =
-        blackboard.world_state.filtered_game_controller_state.as_ref()
+    let Some(game_controller_state) = blackboard
+        .world_state
+        .filtered_game_controller_state
+        .as_ref()
     else {
         return available;
     };
 
     for (number, penalty) in game_controller_state.penalties.iter() {
-        available[number] =
-            number != regular_goalkeeper_number && penalty.is_none();
+        available[number] = number != regular_goalkeeper_number && penalty.is_none();
     }
 
     if blackboard.world_state.robot.primary_state == PrimaryState::Penalized {
@@ -296,12 +299,12 @@ impl ReplacementGoalkeeperCoordinator {
     fn remember_winner(&mut self, winner: PlayerNumber, own_number: PlayerNumber) {
         self.clear_election();
         self.known_replacement_goalkeeper = Some(winner);
-        
+
         if winner == own_number {
             self.state = ReplacementGoalkeeperState::Active;
         }
     }
-    
+
     fn reset(&mut self) {
         self.clear_election();
         self.known_replacement_goalkeeper = None;
@@ -310,7 +313,7 @@ impl ReplacementGoalkeeperCoordinator {
     pub fn replacement_goalkeeper_number(&self) -> Option<PlayerNumber> {
         self.known_replacement_goalkeeper
     }
-    
+
     /// Validates the remembered replacement goalkeeper and clears invalid roles
     /// or candidacies. Returns whether keeper selection may proceed.
     /// Does not start or advance an election.
@@ -496,6 +499,7 @@ mod tests {
     use super::*;
     use hsl_network_messages::{GamePhase, HulkMessage, Penalty, Team};
     use linear_algebra::{Isometry2, Pose2};
+    use std::time::Duration;
     use types::{
         field_dimensions::Side,
         filtered_game_controller_state::FilteredGameControllerState,
@@ -504,7 +508,7 @@ mod tests {
         motion_command::BodyMotion,
         world_state::{BallSource, PlayerState, WorldState},
     };
-    
+
     use crate::node::LastBall;
 
     fn assert_stands_at_kickoff_position(blackboard: &mut Blackboard, expected_x: f32) {
@@ -684,14 +688,14 @@ mod tests {
         blackboard.world_state.robot.primary_state = PrimaryState::Ready;
 
         // With a field length of 10 m, these correspond to x = -4.5 and -1.0.
-        blackboard.parameters.kickoff.relative_goalkeeper_position =
-            point!(-0.9, 0.0);
-        blackboard.parameters.kickoff.relative_striker_side_kick_position =
-            point!(-0.2, 0.0);
+        blackboard.parameters.kickoff.relative_goalkeeper_position = point!(-0.9, 0.0);
+        blackboard
+            .parameters
+            .kickoff
+            .relative_striker_side_kick_position = point!(-0.2, 0.0);
 
         // Keep the first support position clearly distinct from the striker position.
-        blackboard.parameters.kickoff.relative_aggressive_positions[0] =
-            point!(-0.4, 0.0);
+        blackboard.parameters.kickoff.relative_aggressive_positions[0] = point!(-0.4, 0.0);
 
         let game_controller_state = blackboard
             .world_state
@@ -858,8 +862,7 @@ mod tests {
             remaining: Duration::ZERO,
         });
 
-        blackboard.world_state.filtered_game_controller_state =
-            Some(game_controller_state);
+        blackboard.world_state.filtered_game_controller_state = Some(game_controller_state);
 
         for primary_state in [
             PrimaryState::Ready,
@@ -902,8 +905,7 @@ mod tests {
             game_controller_state.penalties.five = Some(Penalty::Substitute {
                 remaining: Duration::ZERO,
             });
-            blackboard.world_state.filtered_game_controller_state =
-                Some(game_controller_state);
+            blackboard.world_state.filtered_game_controller_state = Some(game_controller_state);
 
             refresh_replacement_goalkeeper_role(&mut blackboard);
             update_replacement_goalkeeper_election(&mut blackboard, false);
@@ -921,10 +923,7 @@ mod tests {
                     coordinator.known_replacement_goalkeeper,
                     Some(PlayerNumber::Two),
                 );
-                assert_eq!(
-                    coordinator.is_active(),
-                    own_number == PlayerNumber::Two,
-                );
+                assert_eq!(coordinator.is_active(), own_number == PlayerNumber::Two,);
             }
 
             // Only our own field player remains unpenalized.
@@ -1543,7 +1542,8 @@ mod tests {
             .filtered_game_controller_state
             .as_mut()
             .expect("test setup must contain game controller state")
-            .penalties.one = Some(Penalty::PickUp {
+            .penalties
+            .one = Some(Penalty::PickUp {
             remaining: Duration::from_secs(30),
         });
 
@@ -1574,7 +1574,8 @@ mod tests {
                 .filtered_game_controller_state
                 .as_mut()
                 .expect("test setup must contain game controller state")
-                .penalties.one = Some(Penalty::PickUp {
+                .penalties
+                .one = Some(Penalty::PickUp {
                 remaining: Duration::from_secs(30),
             });
 
