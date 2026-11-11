@@ -26,11 +26,11 @@ pub struct ReplacementGoalkeeperInput {
     pub own_player_number: PlayerNumber,
     pub regular_goalkeeper_number: PlayerNumber,
 
-    pub available_field_players: Players<bool>, // Players on field, abgleitet aus gültigen empfangenen PlayerStates
-    pub is_eligible_candidate: bool, // Ich bin verfügbar, meine Pose ist bekannt, ich bin nicht ballzuständig
-    pub is_closest_available_field_player_to_own_goal: bool, // unter allen verfügbaren Robotern mit gültiger Pose bin ich der Tornächste. Deren Ballzuständigkeit kenne ich nicht.
+    pub available_field_players: Players<bool>,
+    pub is_eligible_candidate: bool, // own robot is available, its pose is known and it is not responsible for the ball
+    pub is_closest_available_field_player_to_own_goal: bool,
 
-    pub lowest_other_claiming_player: Option<PlayerNumber>, // current lowest *other* claim received via StateMessage
+    pub lowest_other_claiming_player: Option<PlayerNumber>,
 
     pub now: Time,
 }
