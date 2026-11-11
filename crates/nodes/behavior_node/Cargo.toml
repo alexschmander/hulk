@@ -24,5 +24,6 @@ types = { workspace = true }
 voronoi = { workspace = true }
 
 [dev-dependencies]
+json5 = { workspace = true }
 search_suggestor = { workspace = true }
 tempfile = { workspace = true }
