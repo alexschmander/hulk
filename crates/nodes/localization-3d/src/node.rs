@@ -76,8 +76,14 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let mut active: Option<Localization> = None;
     let mut damping = true;
     let mut epoch_start = status.time;
+    let mut solve_schedule = SolveSchedule::default();
+    let mut ingestion_duration = Duration::ZERO;
     loop {
         let deadline = active.as_ref().and_then(Localization::deadline);
+        let solve_deadline = solve_schedule.deadline(
+            node.clock().now(),
+            updates.borrow().typed().solver.min_solve_interval,
+        );
         let first = tokio::select! {
             biased;
             v = primary.recv() => {
@@ -85,6 +91,8 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 if damping && !next_damping {
                     epoch_start = node.clock().now();
                     active = None;
+                    solve_schedule = SolveSchedule::default();
+                    ingestion_duration = Duration::ZERO;
                     status = LocalizationStatus { time: epoch_start, epoch: status.epoch.wrapping_add(1), generation: 0, state: LocalizationState::Startup, heading: None };
                     statuses.publish(&status).await?;
                 }
@@ -107,12 +115,15 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 }
                 continue;
             }
-            sample = inputs.recv() => sample?,
+            // Before input reception so continuous sensor traffic cannot starve a due solve.
+            _ = async { match solve_deadline { Some(t) => node.clock().sleep_until(t).await, None => pending().await } } => None,
+            sample = inputs.recv() => Some(sample?),
         };
-        let samples = inputs.drain(first).await?;
+        let samples = match first {
+            Some(first) => inputs.drain(first).await?,
+            None => Vec::new(),
+        };
         let now = node.clock().now();
-        let mut needs_solve = false;
-        let mut ingestion_duration = Duration::ZERO;
         for sample in samples {
             let time = sample.time();
             if time < epoch_start || time > now {
@@ -132,7 +143,8 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 );
                 active = None;
                 // Measurements inserted before the reset belonged to the old estimator.
-                needs_solve = false;
+                solve_schedule = SolveSchedule::default();
+                ingestion_duration = Duration::ZERO;
                 epoch_start = time;
                 status = LocalizationStatus {
                     time,
@@ -185,10 +197,11 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
                 localization
             };
             let started = std::time::Instant::now();
-            needs_solve |= inputs.ingest(localization, sample)?;
+            solve_schedule.pending |= inputs.ingest(localization, sample)?;
             ingestion_duration += started.elapsed();
         }
-        if !needs_solve {
+        let started = node.clock().now();
+        if !solve_schedule.take_due(started, updates.borrow().typed().solver.min_solve_interval) {
             continue;
         }
         let Some(localization) = active.as_mut() else {
@@ -196,6 +209,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         };
         let mut output = tokio::task::block_in_place(|| localization.solve(node.clock().now()));
         output.diagnostics.ingestion_duration = ingestion_duration;
+        ingestion_duration = Duration::ZERO;
         // Advance lifecycle after the potentially expensive solve, before publishing.
         localization.advance_time(node.clock().now());
         if status != localization.status() {
@@ -212,10 +226,202 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
     }
 }
 
+/// Coalesces pending work without delaying ingestion or replaying missed timer ticks.
+#[derive(Default)]
+struct SolveSchedule {
+    pending: bool,
+    last_start: Option<ros_z::time::Time>,
+}
+
+impl SolveSchedule {
+    fn deadline(&self, now: ros_z::time::Time, interval: Duration) -> Option<ros_z::time::Time> {
+        self.pending
+            .then(|| self.last_start.map_or(now, |t| t.saturating_add(interval)))
+    }
+
+    fn take_due(&mut self, now: ros_z::time::Time, interval: Duration) -> bool {
+        if self
+            .deadline(now, interval)
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.pending = false;
+            self.last_start = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ros_z::{context::ContextBuilder, time::Time};
+
+    #[test]
+    fn solve_schedule_coalesces_work_without_catch_up_and_applies_live_limits() {
+        let origin = Time::from_nanos(1_000_000_000);
+        let interval = Duration::from_millis(100);
+        let mut schedule = SolveSchedule::default();
+        assert_eq!(schedule.deadline(origin, interval), None);
+        schedule.pending = true;
+        assert!(schedule.take_due(origin, interval));
+        assert!(!schedule.take_due(origin + interval, interval));
+        schedule.pending = true;
+        assert!(!schedule.take_due(origin + interval / 2, interval));
+        assert_eq!(schedule.deadline(origin, interval), Some(origin + interval));
+        // An overdue solve starts a new interval; it does not replay missed ticks.
+        let late = origin + interval * 5;
+        assert!(schedule.take_due(late, interval));
+        schedule.pending = true;
+        assert!(!schedule.take_due(late, interval));
+        // Removing or shortening a live bound makes already pending work due.
+        assert!(schedule.take_due(late, Duration::ZERO));
+        schedule.pending = true;
+        assert!(schedule.take_due(late + interval / 2, interval / 2));
+        // A reset discards both old pending work and the old estimator's deadline.
+        schedule = SolveSchedule::default();
+        assert_eq!(schedule.deadline(late, interval), None);
+        schedule.pending = true;
+        assert!(schedule.take_due(late, interval));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn solve_bound_keeps_ingesting_and_wakes_without_another_input() -> Result<()> {
+        use types::{camera_geometry::CameraGeometry, time_wrapper::TimeWrapper};
+        let root = std::env::temp_dir().join(format!("localization-rate-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let mut config: serde_json::Value = json5::from_str(include_str!(
+            "../../../../etc/parameters/base/localization3d.json5"
+        ))?;
+        config["solver"]["min_solve_interval"] =
+            serde_json::json!({"secs": 0, "nanos": 200_000_000});
+        std::fs::write(root.join("localization3d.json5"), config.to_string())?;
+        let ctx = Arc::new(
+            ContextBuilder::default()
+                .with_namespace("/solve_rate_test")
+                .with_mode("peer")
+                .disable_multicast_scouting()
+                .with_parameter_layers([root.clone()])
+                .build()
+                .await?,
+        );
+        let node = ctx.create_node("rate_test_inputs").build().await?;
+        let field = node
+            .publisher::<FieldDimensions>("field_dimensions")
+            .qos(QosProfile {
+                durability: QosDurability::TransientLocal,
+                ..Default::default()
+            })
+            .build()
+            .await?;
+        let cameras = node
+            .publisher::<TimeWrapper<CameraGeometry>>("camera_geometry")
+            .build()
+            .await?;
+        let feet = node
+            .publisher::<TimeWrapper<kinematics::robot_kinematics::RobotKinematics>>(
+                "robot_kinematics",
+            )
+            .build()
+            .await?;
+        let imu = node
+            .publisher::<booster::ImuState>("inputs/imu_state")
+            .build()
+            .await?;
+        let solves = node
+            .subscriber::<SolveDiagnostics>("debug/solve_diagnostics")
+            .build()
+            .await?;
+        let task = tokio::spawn(run(ctx.clone()));
+        // Wait for the actual node subscriptions, including its startup caches.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if task.is_finished() {
+            task.await??;
+            panic!("localization exited before receiving inputs");
+        }
+        field.publish(&FieldDimensions::SPL_2025).await?;
+        let origin = node.clock().now();
+        cameras
+            .publish(&TimeWrapper {
+                time: origin,
+                inner: CameraGeometry::default(),
+            })
+            .await?;
+        feet.publish(&TimeWrapper {
+            time: origin,
+            inner: Default::default(),
+        })
+        .await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        imu.publish_with_source_time(&Default::default(), origin)
+            .await?;
+        tokio::time::timeout(Duration::from_secs(2), solves.recv()).await??;
+        let first_arrival = std::time::Instant::now();
+        let mut newest = origin;
+        // Keep the node busy at sensor rate, then stop before its next solve is due.
+        for _ in 0..25 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            newest = node.clock().now();
+            imu.publish_with_source_time(&Default::default(), newest)
+                .await?;
+        }
+        assert_eq!(
+            solves.queued_len(),
+            0,
+            "sensor traffic must not bypass the solve bound"
+        );
+        let next = tokio::time::timeout(Duration::from_millis(500), solves.recv()).await??;
+        assert!(first_arrival.elapsed() >= Duration::from_millis(150));
+        assert_eq!(
+            next.time, newest,
+            "the timer must solve the latest ingested input"
+        );
+        tokio::time::sleep(Duration::from_millis(230)).await;
+        assert_eq!(solves.queued_len(), 0, "idle timers must not repeat solves");
+        let latest = node.clock().now();
+        let client = ros_z::parameter::RemoteParameterClient::new(
+            Arc::new(node),
+            "/solve_rate_test/localization3d",
+        )?;
+        let target_layer = root.to_string_lossy().into_owned();
+        assert!(
+            client
+                .set_json(
+                    "solver.min_solve_interval",
+                    &serde_json::json!({"secs": 1, "nanos": 0}),
+                    target_layer.clone(),
+                    None,
+                )
+                .await?
+                .success
+        );
+        imu.publish_with_source_time(&Default::default(), latest)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(solves.queued_len(), 0);
+        assert!(
+            client
+                .set_json(
+                    "solver.min_solve_interval",
+                    &serde_json::json!({"secs": 0, "nanos": 0}),
+                    target_layer,
+                    None,
+                )
+                .await?
+                .success
+        );
+        let resumed = tokio::time::timeout(Duration::from_millis(500), solves.recv()).await??;
+        assert_eq!(
+            resumed.time, latest,
+            "removing a live bound must flush pending work"
+        );
+        task.abort();
+        let _ = task.await;
+        ctx.shutdown()?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn rejected_update_preserves_node_revision_and_running_estimator() -> Result<()> {

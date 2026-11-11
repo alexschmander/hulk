@@ -104,6 +104,9 @@ impl Default for ModelParameters {
 #[derive(Clone, Debug, Deserialize, Serialize, Message, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SolverParameters {
+    /// Minimum time between solve starts. Zero preserves input-driven solving.
+    /// Inputs continue to be ingested while a solve is deferred.
+    pub min_solve_interval: Duration,
     pub max_trials: usize,
     pub max_iterations: usize,
     pub gradient_tolerance: f64,
@@ -113,6 +116,7 @@ pub struct SolverParameters {
 impl Default for SolverParameters {
     fn default() -> Self {
         Self {
+            min_solve_interval: Duration::ZERO,
             max_trials: 8,
             max_iterations: 20,
             gradient_tolerance: 1e-3,
@@ -377,6 +381,9 @@ impl Localization3dParameters {
         let m = &self.model;
         let v = &self.visual;
         let s = &self.solver;
+        if s.min_solve_interval.as_nanos() > i64::MAX as u128 {
+            return Err("solver.min_solve_interval must fit in signed nanoseconds".into());
+        }
         for value in [
             m.huber_threshold,
             m.min_landmark_range,
@@ -551,6 +558,18 @@ mod tests {
         ))
         .unwrap();
         configured.validate().unwrap();
+        let mut old_solver = serde_json::to_value(&configured).unwrap();
+        old_solver["solver"]
+            .as_object_mut()
+            .unwrap()
+            .remove("min_solve_interval");
+        let old_solver: Localization3dParameters = serde_json::from_value(old_solver).unwrap();
+        assert_eq!(old_solver.solver.min_solve_interval, Duration::ZERO);
+        let mut bounded = configured.clone();
+        bounded.solver.min_solve_interval = Duration::from_millis(50);
+        assert!(configured.validate_update(&bounded).is_ok());
+        bounded.solver.min_solve_interval = Duration::MAX;
+        assert!(bounded.validate().is_err());
         let mut legacy = serde_json::to_value(&configured).unwrap();
         for key in ["timing", "model", "solver", "visual", "inputs"] {
             legacy.as_object_mut().unwrap().remove(key);
@@ -562,6 +581,7 @@ mod tests {
         let legacy: Localization3dParameters = serde_json::from_value(legacy).unwrap();
         let mut expected_legacy = configured.clone();
         expected_legacy.timing = TimingParameters::default();
+        expected_legacy.solver = SolverParameters::default();
         assert_eq!(legacy, expected_legacy);
         assert_eq!(legacy.timing.trajectory_spacing, Duration::from_millis(200));
         assert_eq!(

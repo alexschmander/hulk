@@ -30,6 +30,9 @@
     containment_tau: 0.5, // segment sampling fraction, [0, 1]
   },
   solver: {
+    // Minimum time between solve starts. Zero is unbounded; 40 ms caps solves at 25 Hz.
+    // This is live and does not throttle sensor ingestion.
+    min_solve_interval: { secs: 0, nanos: 40000000 },
     max_trials: 8,
     max_iterations: 20, // Allow recovery candidates to converge; normal solves stop early.
     gradient_tolerance: 0.001,
