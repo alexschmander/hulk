@@ -537,8 +537,25 @@ mod tests {
         motion_command::BodyMotion,
         world_state::{BallSource, PlayerState, WorldState},
     };
-
+    
     use crate::node::LastBall;
+
+    fn assert_stands_at_kickoff_position(blackboard: &mut Blackboard, expected_x: f32) {
+        // All test positions lie on the negative x-axis, facing the field center.
+        blackboard.world_state.robot.ground_to_field =
+            Some(Isometry2::from(point!(expected_x, 0.0)));
+        blackboard.body_motion = None;
+
+        assert_eq!(
+            crate::walk::walk_to_kickoff_pose(blackboard),
+            Status::Success,
+        );
+        assert!(
+            matches!(blackboard.body_motion.as_ref(), Some(BodyMotion::Stand)),
+            "robot should stand at its kickoff position; got {:?}",
+            blackboard.body_motion,
+        );
+    }
 
     fn blackboard_with_candidate_or_active_replacement(initially_active: bool) -> Blackboard {
         let mut blackboard = goal_distance_blackboard();
@@ -691,6 +708,35 @@ mod tests {
             lowest_other_claiming_player: None,
             now,
         }
+    }
+
+    fn ready_kickoff_blackboard(own_number: PlayerNumber) -> Blackboard {
+        let mut blackboard = goal_distance_blackboard();
+        blackboard.player_number = own_number;
+        blackboard.parameters.control.is_simple = false;
+        blackboard.world_state.robot.primary_state = PrimaryState::Ready;
+
+        // With a field length of 10 m, these correspond to x = -4.5 and -1.0.
+        blackboard.parameters.kickoff.relative_goalkeeper_position =
+            point!(-0.9, 0.0);
+        blackboard.parameters.kickoff.relative_striker_side_kick_position =
+            point!(-0.2, 0.0);
+
+        // Keep the first support position clearly distinct from the striker position.
+        blackboard.parameters.kickoff.relative_aggressive_positions[0] =
+            point!(-0.4, 0.0);
+
+        let game_controller_state = blackboard
+            .world_state
+            .filtered_game_controller_state
+            .as_mut()
+            .expect("test setup must contain game controller state");
+
+        game_controller_state.game_state = FilteredGameState::Ready;
+        game_controller_state.opponent_game_state = FilteredGameState::Ready;
+        game_controller_state.kicking_team = Some(Team::Hulks);
+
+        blackboard
     }
 
     fn replacement_claim_from_next_state_message(blackboard: &mut Blackboard) -> bool {
@@ -1501,6 +1547,79 @@ mod tests {
             assert!(!coordinator.claims_role());
             assert!(!coordinator.is_active());
             assert_eq!(coordinator.known_replacement_goalkeeper, None);
+        }
+    }
+
+    #[test]
+    fn kickoff_uses_regular_goalkeeper_position_without_replacement() {
+        let mut blackboard = ready_kickoff_blackboard(PlayerNumber::One);
+
+        refresh_replacement_goalkeeper_role(&mut blackboard);
+        update_replacement_goalkeeper_election(&mut blackboard, false);
+
+        assert_eq!(
+            blackboard
+                .replacement_goalkeeper_coordinator
+                .replacement_goalkeeper_number(),
+            None,
+        );
+
+        assert_stands_at_kickoff_position(&mut blackboard, -4.5);
+    }
+
+    #[test]
+    fn kickoff_places_ready_replacement_at_goalkeeper_position() {
+        let mut blackboard = ready_kickoff_blackboard(PlayerNumber::Two);
+
+        blackboard
+            .world_state
+            .filtered_game_controller_state
+            .as_mut()
+            .expect("test setup must contain game controller state")
+            .penalties.one = Some(Penalty::PickUp {
+            remaining: Duration::from_secs(30),
+        });
+
+        refresh_replacement_goalkeeper_role(&mut blackboard);
+        update_replacement_goalkeeper_election(&mut blackboard, false);
+
+        assert_eq!(
+            blackboard
+                .replacement_goalkeeper_coordinator
+                .replacement_goalkeeper_number(),
+            Some(PlayerNumber::Two),
+        );
+        assert!(blackboard.replacement_goalkeeper_coordinator.is_active());
+
+        assert_stands_at_kickoff_position(&mut blackboard, -4.5);
+    }
+
+    #[test]
+    fn kickoff_excludes_replacement_goalkeeper_from_striker_rank() {
+        for (replacement_number, striker_number) in [
+            (PlayerNumber::Two, PlayerNumber::Five),
+            (PlayerNumber::Five, PlayerNumber::Four),
+        ] {
+            let mut blackboard = ready_kickoff_blackboard(striker_number);
+
+            blackboard
+                .world_state
+                .filtered_game_controller_state
+                .as_mut()
+                .expect("test setup must contain game controller state")
+                .penalties.one = Some(Penalty::PickUp {
+                remaining: Duration::from_secs(30),
+            });
+
+            // A previously elected replacement remains assigned when entering Ready.
+            blackboard
+                .replacement_goalkeeper_coordinator
+                .remember_winner(replacement_number, striker_number);
+
+            refresh_replacement_goalkeeper_role(&mut blackboard);
+
+            assert!(!blackboard.replacement_goalkeeper_coordinator.is_active());
+            assert_stands_at_kickoff_position(&mut blackboard, -1.0);
         }
     }
 }
