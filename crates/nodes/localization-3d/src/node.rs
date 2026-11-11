@@ -1,299 +1,520 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
-
-use booster::ImuState;
-use color_eyre::{
-    Result,
-    eyre::{Context as _, bail},
+use crate::{
+    Localization, Localization3dParameters, SolveDiagnostics,
+    inputs::{Inputs, Measurement},
+    pose::initial_robot_to_local_from_imu,
 };
-use coordinate_systems::{Field, Robot};
-use linear_algebra::Isometry3;
-use localization_factrs::{InitialState, initialize};
-use projection::{camera_matrix::CameraMatrix, intrinsic::Intrinsic};
+use color_eyre::{Result, eyre::Context as _};
 use ros_z::{
-    cache::Cache,
     context::Context,
     parameter::NodeParametersExt,
-    qos::{QosDurability, QosProfile},
+    qos::{QosDurability, QosHistory, QosProfile},
 };
-use tokio::select;
+use std::{
+    future::{Future, pending},
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 use types::{
     field_dimensions::FieldDimensions,
+    localization::{LocalizationEstimate, LocalizationState, LocalizationStatus},
     primary_state::PrimaryState,
-    time_wrapper::TimeWrapper,
-    visual_localization::{
-        ASSOCIATION_POSE_HINT_TOPIC, AssociationPoseHint, LOCALIZATION_POSE_3D_TOPIC,
-        VISUAL_LOCALIZATION_TOPIC, VisualLocalizationFrame,
-    },
-    visual_odometry::{VisualOdometer, VisualOdometryDelta as VisualOdometryDeltaMessage},
 };
 
-use crate::{
-    backend_task::spawn_backend_task,
-    damping::{
-        initial_state_for_reset, localization_is_damping, publish_damping_optimization_result,
-        reset_and_publish_startup_prior,
-    },
-    diagnostics::SolveDiagnostics,
-    event_handlers::{handle_optimization_result, handle_visual_odometer, handle_visual_odometry},
-    ingest::ingest_foot_heights,
-    live_odometry::LiveVisualOdometryLocalization,
-    parameters::{
-        Localization3dParameters, backend_configuration_from_parameters_and_field_dimensions,
-    },
-    pose::initial_state_from_camera_matrix,
-    publish::LocalizationPublishers,
-    visual_localization::{GlobalVisualLock, handle_visual_localization_frame},
-};
-
-const VISUAL_ODOMETER_TOPIC: &str = "visual_odometry/current_left_camera_to_visual_odometer";
-
-/// Starts the localization node and erases the concrete future type for node runners.
-///
-/// `ctx` is the ROS-Z context used to create publishers, subscribers, caches, and parameters.
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(run(ctx))
 }
 
-/// Runs the asynchronous 3D localization node until its input streams terminate or fail.
-///
-/// The node consumes IMU, camera matrix, field-mark associations, visual odometry, and kinematics
-/// topics, then publishes the optimized robot pose and debug streams.
 pub async fn run(ctx: Arc<Context>) -> Result<()> {
     let node = ctx.create_node("localization3d").build().await?;
     let parameters = node.bind_parameter_as::<Localization3dParameters>("localization3d")?;
-    parameters.add_validation_hook(Localization3dParameters::validate)?;
-
-    let imu_subscriber = node
-        .subscriber::<ImuState>("inputs/imu_state")
-        .build()
-        .await?;
-
-    let camera_matrix_cache = node
-        .subscriber::<TimeWrapper<CameraMatrix>>("camera_matrix")
-        .cache(128)
-        .with_stamp(|message| message.time)
-        .build()
-        .await?;
-
-    let field_dimensions_cache = node
-        .subscriber::<FieldDimensions>("field_dimensions")
-        .qos(QosProfile {
-            durability: QosDurability::TransientLocal,
-            ..Default::default()
-        })
-        .cache(1)
-        .build()
-        .await?;
-
-    let visual_localization_subscriber = node
-        .subscriber::<TimeWrapper<VisualLocalizationFrame>>(VISUAL_LOCALIZATION_TOPIC)
-        .build()
-        .await?;
-
-    let visual_odometry_subscriber = node
-        .subscriber::<VisualOdometryDeltaMessage>(
-            "visual_odometry/current_left_camera_to_previous_left_camera",
-        )
-        .build()
-        .await?;
-    let visual_odometer_cache = node
-        .subscriber::<VisualOdometer>(VISUAL_ODOMETER_TOPIC)
-        .cache(128)
-        .with_stamp(|message| message.time)
-        .build()
-        .await?;
-    let visual_odometer_subscriber = node
-        .subscriber::<VisualOdometer>(VISUAL_ODOMETER_TOPIC)
-        .build()
-        .await?;
-
-    let robot_kinematics_subscriber = node
-        .subscriber::<TimeWrapper<kinematics::robot_kinematics::RobotKinematics>>(
-            "robot_kinematics",
-        )
-        .build()
-        .await?;
-
-    let primary_state_cache = node
+    let startup = parameters.snapshot().typed().clone();
+    let baseline = startup.clone();
+    // Hooks run under the ROSZ commit lock before storage/publication. Rejection
+    // leaves both the node snapshot and its subscribers at the previous revision.
+    parameters.add_validation_hook(move |candidate| baseline.validate_update(candidate))?;
+    let mut updates = parameters.subscribe();
+    let inputs = Inputs::new(&node, &startup.inputs).await?;
+    let latched = QosProfile {
+        durability: QosDurability::TransientLocal,
+        history: QosHistory::KeepLast(NonZeroUsize::MIN),
+        ..Default::default()
+    };
+    let primary = node
         .subscriber::<PrimaryState>("primary_state")
-        .qos(QosProfile {
-            durability: QosDurability::TransientLocal,
-            ..Default::default()
+        .qos(latched)
+        .build()
+        .await?;
+    let field = node
+        .subscriber::<FieldDimensions>("field_dimensions")
+        .qos(latched)
+        .cache(startup.inputs.field_cache)
+        .build()
+        .await?;
+    let estimates = node
+        .publisher::<LocalizationEstimate>("localization/estimate")
+        .build()
+        .await?;
+    let statuses = node
+        .publisher::<LocalizationStatus>("localization/status")
+        .qos(latched)
+        .build()
+        .await?;
+    let diagnostics = node
+        .publisher::<SolveDiagnostics>("debug/solve_diagnostics")
+        .build()
+        .await?;
+    let mut status = LocalizationStatus {
+        time: node.clock().now(),
+        epoch: 0,
+        generation: 0,
+        state: LocalizationState::Startup,
+        heading: None,
+    };
+    statuses.publish(&status).await?;
+    let mut active: Option<Localization> = None;
+    let mut damping = true;
+    let mut epoch_start = status.time;
+    let mut solve_schedule = SolveSchedule::default();
+    let mut ingestion_duration = Duration::ZERO;
+    loop {
+        let deadline = active.as_ref().and_then(Localization::deadline);
+        let solve_deadline = solve_schedule.deadline(
+            node.clock().now(),
+            updates.borrow().typed().solver.min_solve_interval,
+        );
+        let first = tokio::select! {
+            biased;
+            v = primary.recv() => {
+                let next_damping = v? == PrimaryState::Damping;
+                if damping && !next_damping {
+                    epoch_start = node.clock().now();
+                    active = None;
+                    solve_schedule = SolveSchedule::default();
+                    ingestion_duration = Duration::ZERO;
+                    status = LocalizationStatus { time: epoch_start, epoch: status.epoch.wrapping_add(1), generation: 0, state: LocalizationState::Startup, heading: None };
+                    statuses.publish(&status).await?;
+                }
+                damping = next_damping;
+                continue;
+            }
+            changed = updates.changed() => {
+                changed.wrap_err("localization parameters closed")?;
+                let snapshot = updates.borrow_and_update().clone();
+                if let Some(active) = active.as_mut()
+                    && let Err(error) = active.set_parameters(snapshot.typed()) {
+                    tracing::error!(%error, "parameter update rejected; retaining active localization");
+                }
+                continue;
+            }
+            _ = async { match deadline { Some(t) => node.clock().sleep_until(t).await, None => pending().await } } => {
+                if let Some(active) = active.as_mut() {
+                    active.advance_time(node.clock().now());
+                    if status != active.status() { status = active.status(); statuses.publish(&status).await?; }
+                }
+                continue;
+            }
+            // Before input reception so continuous sensor traffic cannot starve a due solve.
+            _ = async { match solve_deadline { Some(t) => node.clock().sleep_until(t).await, None => pending().await } } => None,
+            sample = inputs.recv() => Some(sample?),
+        };
+        let samples = match first {
+            Some(first) => inputs.drain(first).await?,
+            None => Vec::new(),
+        };
+        let now = node.clock().now();
+        for sample in samples {
+            let time = sample.time();
+            if time < epoch_start || time > now {
+                tracing::warn!(
+                    ?time,
+                    "discarding measurement outside current epoch or in the future"
+                );
+                continue;
+            }
+            if active
+                .as_ref()
+                .is_some_and(|localization| localization.has_measurement_gap(time))
+            {
+                tracing::warn!(
+                    ?time,
+                    "measurement gap exceeds window; resetting localization epoch"
+                );
+                active = None;
+                // Measurements inserted before the reset belonged to the old estimator.
+                solve_schedule = SolveSchedule::default();
+                ingestion_duration = Duration::ZERO;
+                epoch_start = time;
+                status = LocalizationStatus {
+                    time,
+                    epoch: status.epoch.wrapping_add(1),
+                    generation: 0,
+                    state: LocalizationState::Startup,
+                    heading: None,
+                };
+                statuses.publish(&status).await?;
+            }
+            let localization = if let Some(localization) = active.as_mut() {
+                localization
+            } else {
+                let Measurement::Imu(_, imu) = &sample else {
+                    continue;
+                };
+                let Some(camera) = inputs
+                    .cameras
+                    .get_nearest(time)
+                    .filter(|camera| camera.time.abs_diff(time) <= startup.timing.max_camera_gap)
+                else {
+                    continue;
+                };
+                let Some(kinematics) = inputs.robot_kinematics.get_nearest(time) else {
+                    continue;
+                };
+                if kinematics.time.abs_diff(time) > startup.timing.startup_kinematics_freshness {
+                    continue;
+                }
+                let Some(field) = field.get_latest() else {
+                    continue;
+                };
+                let initialized = Localization::new(
+                    time,
+                    status.epoch,
+                    updates.borrow().typed(),
+                    &field,
+                    &camera.inner,
+                    initial_robot_to_local_from_imu(imu, &kinematics.inner),
+                );
+                let localization = match initialized {
+                    Ok(localization) => active.insert(localization),
+                    Err(error) => {
+                        tracing::warn!(%error, "discarding invalid initialization sample");
+                        continue;
+                    }
+                };
+                status = localization.status();
+                statuses.publish(&status).await?;
+                localization
+            };
+            let started = std::time::Instant::now();
+            solve_schedule.pending |= inputs.ingest(localization, sample)?;
+            ingestion_duration += started.elapsed();
+        }
+        let started = node.clock().now();
+        if !solve_schedule.take_due(started, updates.borrow().typed().solver.min_solve_interval) {
+            continue;
+        }
+        let Some(localization) = active.as_mut() else {
+            continue;
+        };
+        let mut output = tokio::task::block_in_place(|| localization.solve(node.clock().now()));
+        output.diagnostics.ingestion_duration = ingestion_duration;
+        ingestion_duration = Duration::ZERO;
+        // Advance lifecycle after the potentially expensive solve, before publishing.
+        localization.advance_time(node.clock().now());
+        if status != localization.status() {
+            status = localization.status();
+            statuses.publish(&status).await?;
+        }
+        if let Some(estimate) = output.estimate {
+            estimates.publish(&estimate).await?;
+        }
+        if let Some(error) = &output.diagnostics.failure {
+            tracing::warn!(%error, "localization solve failed");
+        }
+        diagnostics.publish(&output.diagnostics).await?;
+    }
+}
+
+/// Coalesces pending work without delaying ingestion or replaying missed timer ticks.
+#[derive(Default)]
+struct SolveSchedule {
+    pending: bool,
+    last_start: Option<ros_z::time::Time>,
+}
+
+impl SolveSchedule {
+    fn deadline(&self, now: ros_z::time::Time, interval: Duration) -> Option<ros_z::time::Time> {
+        self.pending
+            .then(|| self.last_start.map_or(now, |t| t.saturating_add(interval)))
+    }
+
+    fn take_due(&mut self, now: ros_z::time::Time, interval: Duration) -> bool {
+        if self
+            .deadline(now, interval)
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.pending = false;
+            self.last_start = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ros_z::{context::ContextBuilder, time::Time};
+
+    #[test]
+    fn solve_schedule_coalesces_work_without_catch_up_and_applies_live_limits() {
+        let origin = Time::from_nanos(1_000_000_000);
+        let interval = Duration::from_millis(100);
+        let mut schedule = SolveSchedule::default();
+        assert_eq!(schedule.deadline(origin, interval), None);
+        schedule.pending = true;
+        assert!(schedule.take_due(origin, interval));
+        assert!(!schedule.take_due(origin + interval, interval));
+        schedule.pending = true;
+        assert!(!schedule.take_due(origin + interval / 2, interval));
+        assert_eq!(schedule.deadline(origin, interval), Some(origin + interval));
+        // An overdue solve starts a new interval; it does not replay missed ticks.
+        let late = origin + interval * 5;
+        assert!(schedule.take_due(late, interval));
+        schedule.pending = true;
+        assert!(!schedule.take_due(late, interval));
+        // Removing or shortening a live bound makes already pending work due.
+        assert!(schedule.take_due(late, Duration::ZERO));
+        schedule.pending = true;
+        assert!(schedule.take_due(late + interval / 2, interval / 2));
+        // A reset discards both old pending work and the old estimator's deadline.
+        schedule = SolveSchedule::default();
+        assert_eq!(schedule.deadline(late, interval), None);
+        schedule.pending = true;
+        assert!(schedule.take_due(late, interval));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn solve_bound_keeps_ingesting_and_wakes_without_another_input() -> Result<()> {
+        use types::{camera_geometry::CameraGeometry, time_wrapper::TimeWrapper};
+        let root = std::env::temp_dir().join(format!("localization-rate-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let mut config: serde_json::Value = json5::from_str(include_str!(
+            "../../../../etc/parameters/base/localization3d.json5"
+        ))?;
+        config["solver"]["min_solve_interval"] =
+            serde_json::json!({"secs": 0, "nanos": 200_000_000});
+        std::fs::write(root.join("localization3d.json5"), config.to_string())?;
+        let ctx = Arc::new(
+            ContextBuilder::default()
+                .with_namespace("/solve_rate_test")
+                .with_mode("peer")
+                .disable_multicast_scouting()
+                .with_parameter_layers([root.clone()])
+                .build()
+                .await?,
+        );
+        let node = ctx.create_node("rate_test_inputs").build().await?;
+        let field = node
+            .publisher::<FieldDimensions>("field_dimensions")
+            .qos(QosProfile {
+                durability: QosDurability::TransientLocal,
+                ..Default::default()
+            })
+            .build()
+            .await?;
+        let cameras = node
+            .publisher::<TimeWrapper<CameraGeometry>>("camera_geometry")
+            .build()
+            .await?;
+        let feet = node
+            .publisher::<TimeWrapper<kinematics::robot_kinematics::RobotKinematics>>(
+                "robot_kinematics",
+            )
+            .build()
+            .await?;
+        let imu = node
+            .publisher::<booster::ImuState>("inputs/imu_state")
+            .build()
+            .await?;
+        let solves = node
+            .subscriber::<SolveDiagnostics>("debug/solve_diagnostics")
+            .build()
+            .await?;
+        let task = tokio::spawn(run(ctx.clone()));
+        // Wait for the actual node subscriptions, including its startup caches.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if task.is_finished() {
+            task.await??;
+            panic!("localization exited before receiving inputs");
+        }
+        field.publish(&FieldDimensions::SPL_2025).await?;
+        let origin = node.clock().now();
+        cameras
+            .publish(&TimeWrapper {
+                time: origin,
+                inner: CameraGeometry::default(),
+            })
+            .await?;
+        feet.publish(&TimeWrapper {
+            time: origin,
+            inner: Default::default(),
         })
-        .cache(1)
-        .build()
         .await?;
-
-    let localization_publisher = node
-        .publisher::<Option<Isometry3<Field, Robot>>>("localization")
-        .build()
-        .await?;
-    let pose_3d_publisher = node
-        .publisher::<TimeWrapper<Option<Isometry3<Field, Robot>>>>(LOCALIZATION_POSE_3D_TOPIC)
-        .build()
-        .await?;
-    let association_pose_hint_publisher = node
-        .publisher::<TimeWrapper<Option<AssociationPoseHint>>>(ASSOCIATION_POSE_HINT_TOPIC)
-        .build()
-        .await?;
-    let calibrated_intrinsics_publisher = node
-        .publisher::<Intrinsic>("debug/calibrated_intrinsics")
-        .build()
-        .await?;
-    let solve_diagnostics_publisher = node
-        .publisher::<TimeWrapper<SolveDiagnostics>>("debug/solve_diagnostics")
-        .build()
-        .await?;
-
-    let field_dimensions = wait_for_field_dimensions(&field_dimensions_cache).await;
-    let initial_state = wait_for_initial_state(&camera_matrix_cache, &field_dimensions).await;
-    let localization_parameters = parameters.snapshot().typed().clone();
-    let (mut frontend, backend) = initialize(
-        backend_configuration_from_parameters_and_field_dimensions(
-            &localization_parameters,
-            &field_dimensions,
-        ),
-        initial_state.clone(),
-    );
-    let mut backend_handle =
-        std::pin::pin!(spawn_backend_task(backend, solve_diagnostics_publisher));
-    let mut live_localization = LiveVisualOdometryLocalization::default();
-    let mut global_visual_lock = GlobalVisualLock::Unlocked;
-    let mut damping_reset_interval = tokio::time::interval(Duration::from_millis(100));
-    let publishers = LocalizationPublishers::new(
-        &localization_publisher,
-        &pose_3d_publisher,
-        &association_pose_hint_publisher,
-    );
-
-    loop {
-        select! {
-            _ = damping_reset_interval.tick() => {
-                if !localization_is_damping(&primary_state_cache) {
-                    continue;
-                }
-
-                let now = node.clock().now();
-                reset_and_publish_startup_prior(
-                    &mut frontend,
-                    &mut live_localization,
-                    &mut global_visual_lock,
-                    initial_state_for_reset(&camera_matrix_cache, &field_dimensions, &initial_state),
-                    now,
-                    &field_dimensions,
-                    publishers,
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        imu.publish_with_source_time(&Default::default(), origin)
+            .await?;
+        tokio::time::timeout(Duration::from_secs(2), solves.recv()).await??;
+        let first_arrival = std::time::Instant::now();
+        let mut newest = origin;
+        // Keep the node busy at sensor rate, then stop before its next solve is due.
+        for _ in 0..25 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            newest = node.clock().now();
+            imu.publish_with_source_time(&Default::default(), newest)
+                .await?;
+        }
+        assert_eq!(
+            solves.queued_len(),
+            0,
+            "sensor traffic must not bypass the solve bound"
+        );
+        let next = tokio::time::timeout(Duration::from_millis(500), solves.recv()).await??;
+        assert!(first_arrival.elapsed() >= Duration::from_millis(150));
+        assert_eq!(
+            next.time, newest,
+            "the timer must solve the latest ingested input"
+        );
+        tokio::time::sleep(Duration::from_millis(230)).await;
+        assert_eq!(solves.queued_len(), 0, "idle timers must not repeat solves");
+        let latest = node.clock().now();
+        let client = ros_z::parameter::RemoteParameterClient::new(
+            Arc::new(node),
+            "/solve_rate_test/localization3d",
+        )?;
+        let target_layer = root.to_string_lossy().into_owned();
+        assert!(
+            client
+                .set_json(
+                    "solver.min_solve_interval",
+                    &serde_json::json!({"secs": 1, "nanos": 0}),
+                    target_layer.clone(),
+                    None,
                 )
-                .await
-                .wrap_err("failed to reset localization while damping")?;
-            }
-            visual_localization = visual_localization_subscriber.recv() => {
-                let visual_localization = visual_localization?;
-                if should_drop_input_while_damping(&primary_state_cache) {
-                    continue;
-                }
-
-                handle_visual_localization_frame(
-                    &mut frontend,
-                    &mut live_localization,
-                    &mut global_visual_lock,
-                    visual_localization,
+                .await?
+                .success
+        );
+        imu.publish_with_source_time(&Default::default(), latest)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(solves.queued_len(), 0);
+        assert!(
+            client
+                .set_json(
+                    "solver.min_solve_interval",
+                    &serde_json::json!({"secs": 0, "nanos": 0}),
+                    target_layer,
+                    None,
                 )
-                .wrap_err("failed to ingest visual localization frame")?;
-            }
-            // IMU payloads have no sensor timestamp; ros-z source time is the aligned clock.
-            imu = imu_subscriber.recv_with_metadata() => {
-                let imu = imu?;
-                if should_drop_input_while_damping(&primary_state_cache) {
-                    continue;
-                }
-                frontend.ingest_imu(imu.source_time.to_wallclock(), imu.message)
-                    .wrap_err("failed to ingest imu measurement into frontend")?;
-            }
-            visual_odometry = visual_odometry_subscriber.recv() => {
-                let visual_odometry = visual_odometry?;
-                if should_drop_input_while_damping(&primary_state_cache) {
-                    continue;
-                }
-                handle_visual_odometry(&mut frontend, visual_odometry, &camera_matrix_cache)?;
-            }
-            visual_odometer = visual_odometer_subscriber.recv() => {
-                let visual_odometer = visual_odometer?;
-                if should_drop_input_while_damping(&primary_state_cache) {
-                    continue;
-                }
-                handle_visual_odometer(
-                    &mut live_localization,
-                    global_visual_lock,
-                    visual_odometer,
-                    &visual_odometer_cache,
-                    &camera_matrix_cache,
-                    publishers,
-                ).await?;
-            }
-            robot_kinematics = robot_kinematics_subscriber.recv() => {
-                let robot_kinematics = robot_kinematics?;
-                if should_drop_input_while_damping(&primary_state_cache) {
-                    continue;
-                }
-                ingest_foot_heights(&mut frontend, robot_kinematics)
-                    .wrap_err("failed to ingest foot height measurement into frontend")?;
-            }
-            result = &mut backend_handle => {
-                result.wrap_err("failed to join")?.wrap_err("solver failed")?;
-                bail!("solver stopped unexpectedly")
-            }
-            result = frontend.wait_for_optimization_result() => {
-                result?;
-                if localization_is_damping(&primary_state_cache) {
-                    publish_damping_optimization_result(
-                        &mut frontend,
-                        &mut live_localization,
-                        &mut global_visual_lock,
-                        node.clock().now(),
-                        &field_dimensions,
-                        publishers,
-                    ).await?;
-                    continue;
-                }
-                handle_optimization_result(
-                    &mut frontend,
-                    &mut live_localization,
-                    &mut global_visual_lock,
-                    &visual_odometer_cache,
-                    &camera_matrix_cache,
-                    publishers,
-                    &calibrated_intrinsics_publisher,
-                ).await?;
-            }
-        }
+                .await?
+                .success
+        );
+        let resumed = tokio::time::timeout(Duration::from_millis(500), solves.recv()).await??;
+        assert_eq!(
+            resumed.time, latest,
+            "removing a live bound must flush pending work"
+        );
+        task.abort();
+        let _ = task.await;
+        ctx.shutdown()?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
-}
 
-fn should_drop_input_while_damping(primary_state_cache: &Cache<PrimaryState>) -> bool {
-    localization_is_damping(primary_state_cache)
-}
-
-async fn wait_for_initial_state(
-    camera_matrix_cache: &Cache<TimeWrapper<CameraMatrix>>,
-    field_dimensions: &FieldDimensions,
-) -> InitialState {
-    let mut interval = tokio::time::interval(Duration::from_millis(10));
-    loop {
-        if let Some(camera_matrix) = camera_matrix_cache.get_latest() {
-            return initial_state_from_camera_matrix(&camera_matrix.inner, field_dimensions);
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn rejected_update_preserves_node_revision_and_running_estimator() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "localization-parameters-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(
+            root.join("localization3d.json5"),
+            include_str!("../../../../etc/parameters/base/localization3d.json5"),
+        )?;
+        let context = ContextBuilder::default()
+            .with_mode("peer")
+            .disable_multicast_scouting()
+            .with_parameter_layers([root.clone()])
+            .build()
+            .await?;
+        let node = context
+            .create_node("localization_parameter_test")
+            .build()
+            .await?;
+        let parameters = node.bind_parameter_as::<Localization3dParameters>("localization3d")?;
+        let original = parameters.snapshot();
+        let baseline = original.typed().clone();
+        parameters.add_validation_hook(move |candidate| baseline.validate_update(candidate))?;
+        let mut updates = parameters.subscribe();
+        let origin = Time::from_nanos(1_000_000_000);
+        let mut active = Localization::new(
+            origin,
+            7,
+            original.typed(),
+            &FieldDimensions::SPL_2025,
+            &types::camera_geometry::CameraGeometry::default(),
+            linear_algebra::Isometry3::identity(),
+        )?;
+        for millis in (0..=100).step_by(2) {
+            active.ingest_imu(
+                origin + Duration::from_millis(millis),
+                booster::ImuState::default(),
+            )?;
         }
-        interval.tick().await;
-    }
-}
-
-async fn wait_for_field_dimensions(
-    field_dimensions_cache: &Cache<FieldDimensions>,
-) -> FieldDimensions {
-    let mut interval = tokio::time::interval(Duration::from_millis(10));
-    loop {
-        if let Some(field_dimensions) = field_dimensions_cache.get_latest() {
-            return *field_dimensions.as_ref();
+        assert!(
+            active
+                .solve(origin + Duration::from_millis(100))
+                .estimate
+                .is_some()
+        );
+        let status = active.status();
+        let incompatible_spacing = original.typed().timing.trajectory_spacing * 2;
+        for (path, value) in [
+            (
+                "timing.trajectory_spacing",
+                serde_json::to_value(incompatible_spacing)?,
+            ),
+            ("model.foot_sigma", serde_json::json!(0.02)),
+            ("inputs.imu_queue", serde_json::json!(1000)),
+            ("visual.min_associations", serde_json::json!(2)),
+        ] {
+            assert!(
+                parameters
+                    .set_json(path, value, root.to_string_lossy().into_owned())
+                    .is_err()
+            );
+            assert_eq!(parameters.snapshot().revision, original.revision);
+            assert_eq!(parameters.snapshot().typed(), original.typed());
+            assert!(!updates.has_changed()?);
         }
-        interval.tick().await;
+        let mut incompatible = original.typed().clone();
+        incompatible.timing.trajectory_spacing = incompatible_spacing;
+        assert!(active.set_parameters(&incompatible).is_err());
+        assert_eq!(active.status(), status);
+        parameters.set_json(
+            "solver.max_iterations",
+            serde_json::json!(12),
+            root.to_string_lossy().into_owned(),
+        )?;
+        updates.changed().await?;
+        active.set_parameters(updates.borrow_and_update().typed())?;
+        assert_eq!(parameters.snapshot().typed().solver.max_iterations, 12);
+        let time = origin + Duration::from_millis(102);
+        active.ingest_imu(time, booster::ImuState::default())?;
+        let estimate = active
+            .solve(time)
+            .estimate
+            .expect("rejected updates must leave motion running");
+        assert_eq!(estimate.time, time);
+        assert_eq!(estimate.epoch, 7);
+        assert_eq!(estimate.generation, status.generation);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
