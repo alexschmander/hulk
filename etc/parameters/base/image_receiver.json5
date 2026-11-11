@@ -1,0 +1,6 @@
+{
+  // Maximum Hz for each of left images, right images, and complete stereo pairs.
+  // Applied at publication; camera reception and capture timestamps are unchanged.
+  // Set to 0 for unlimited. May be changed at runtime.
+  max_frequency: 15,
+}

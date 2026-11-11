@@ -11,6 +11,6 @@ color-eyre = { workspace = true }
 filtering = { workspace = true }
 log = { workspace = true }
 ros-z = { workspace = true }
-rustfft = { workspace = true }
+realfft = { workspace = true }
 tokio = { workspace = true }
 types = { workspace = true }
