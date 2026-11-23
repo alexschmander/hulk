@@ -1748,6 +1748,7 @@ fn draw_hydra_supplement(
                 0.5,
                 color,
                 false,
+                None,
                 show_details,
             );
         }
@@ -1770,10 +1771,11 @@ fn draw_raw_hydra_rows(
         image_rect.height() / image_size.y.max(1.0),
     );
     let painter = ui.painter_at(clip);
-    for raw in supplement
+    for (row_index, raw) in supplement
         .raw_objects
         .iter()
-        .filter(|raw| raw.object.bounding_box.confidence >= object_confidence_filter)
+        .enumerate()
+        .filter(|(_, raw)| raw.object.bounding_box.confidence >= object_confidence_filter)
     {
         let color = label_color(raw.object.label).gamma_multiply(0.65);
         let bounding_box = raw.object.bounding_box;
@@ -1798,7 +1800,7 @@ fn draw_raw_hydra_rows(
             &painter,
             rect.min + vec2(3.0, 15.0),
             format!(
-                "raw {} {:.3}",
+                "raw[{row_index}] {} {:.3}",
                 raw.object.label.as_str(),
                 bounding_box.confidence
             ),
@@ -1833,7 +1835,7 @@ fn draw_raw_hydra_rows(
                 &painter,
                 point + vec2(7.0, if raw.anchor_is_supervised { -13.0 } else { 2.0 }),
                 format!(
-                    "raw anchor x={:.2} y={:.2} p={:.3} {supervision}",
+                    "raw[{row_index}] anchor x={:.2} y={:.2} p={:.3} {supervision}",
                     raw.anchor.point.x(),
                     raw.anchor.point.y(),
                     raw.anchor.confidence
@@ -1844,10 +1846,11 @@ fn draw_raw_hydra_rows(
     }
 
     let color = Color32::from_rgb(255, 170, 55);
-    for line in supplement
+    for (row_index, line) in supplement
         .raw_lines
         .iter()
-        .filter(|line| line.bounding_box.confidence >= line_confidence_filter)
+        .enumerate()
+        .filter(|(_, line)| line.bounding_box.confidence >= line_confidence_filter)
     {
         draw_field_line(
             &painter,
@@ -1857,6 +1860,7 @@ fn draw_raw_hydra_rows(
             0.0,
             color,
             true,
+            Some(row_index),
             show_details,
         );
     }
@@ -1871,6 +1875,7 @@ fn draw_field_line(
     coordinate_shift: f32,
     color: Color32,
     raw: bool,
+    row_index: Option<usize>,
     show_details: bool,
 ) {
     let point_position = |keypoint: Keypoint| {
@@ -1906,11 +1911,17 @@ fn draw_field_line(
     paint_overlay_text(
         painter,
         point_position(line.keypoints[0]) + vec2(4.0, -14.0),
-        format!(
-            "{}FieldLine class=0 score={:.3}",
-            if raw { "raw " } else { "" },
-            line.bounding_box.confidence
-        ),
+        match row_index {
+            Some(row_index) => format!(
+                "raw[{row_index}] FieldLine class=0 score={:.3}",
+                line.bounding_box.confidence
+            ),
+            None => format!(
+                "{}FieldLine class=0 score={:.3}",
+                if raw { "raw " } else { "" },
+                line.bounding_box.confidence
+            ),
+        },
         color,
     );
 }

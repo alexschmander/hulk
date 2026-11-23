@@ -110,20 +110,21 @@ pub fn export(
         .iter()
         .filter(|line| line.bounding_box.confidence >= line_confidence)
     {
-        draw_line(&mut svg, line, 0.5, "#46e6ff", false, details)?;
+        draw_line(&mut svg, line, 0.5, "#46e6ff", false, None, details)?;
     }
 
     if raw {
-        for object in supplement
+        for (row_index, object) in supplement
             .raw_objects
             .iter()
-            .filter(|row| row.object.bounding_box.confidence >= object_confidence)
+            .enumerate()
+            .filter(|(_, row)| row.object.bounding_box.confidence >= object_confidence)
         {
             let area = object.object.bounding_box.area;
             let color = label_color(object.object.label);
             writeln!(
                 svg,
-                r#"<rect class="raw" x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" fill="none" stroke="{color}" stroke-width="1"/><text x="{:.2}" y="{:.2}">raw {} {:.3}</text>"#,
+                r#"<rect class="raw" x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" fill="none" stroke="{color}" stroke-width="1"/><text x="{:.2}" y="{:.2}">raw[{row_index}] {} {:.3}</text>"#,
                 area.min.x(),
                 area.min.y(),
                 area.max.x() - area.min.x(),
@@ -161,7 +162,7 @@ pub fn export(
             if details {
                 writeln!(
                     svg,
-                    r#"<text x="{:.2}" y="{:.2}">raw anchor x={:.2} y={:.2} p={:.3} {}</text>"#,
+                    r#"<text x="{:.2}" y="{:.2}">raw[{row_index}] anchor x={:.2} y={:.2} p={:.3} {}</text>"#,
                     object.anchor.point.x() + 6.0,
                     object.anchor.point.y() + 10.0,
                     object.anchor.point.x(),
@@ -175,12 +176,21 @@ pub fn export(
                 )?;
             }
         }
-        for line in supplement
+        for (row_index, line) in supplement
             .raw_lines
             .iter()
-            .filter(|line| line.bounding_box.confidence >= line_confidence)
+            .enumerate()
+            .filter(|(_, line)| line.bounding_box.confidence >= line_confidence)
         {
-            draw_line(&mut svg, line, 0.0, "#ffaa37", true, details)?;
+            draw_line(
+                &mut svg,
+                line,
+                0.0,
+                "#ffaa37",
+                true,
+                Some(row_index),
+                details,
+            )?;
         }
     }
     writeln!(svg, "</svg>")?;
@@ -194,6 +204,7 @@ fn draw_line(
     shift: f32,
     color: &str,
     raw: bool,
+    row_index: Option<usize>,
     details: bool,
 ) -> Result<()> {
     let points = line
@@ -239,7 +250,11 @@ fn draw_line(
         r#"<text x="{:.2}" y="{:.2}">{}FieldLine class=0 score={:.3}</text>"#,
         first.x() + shift + 4.0,
         first.y() + shift - 6.0,
-        if raw { "raw " } else { "" },
+        match row_index {
+            Some(row_index) => format!("raw[{row_index}] "),
+            None if raw => "raw ".to_string(),
+            None => String::new(),
+        },
         line.bounding_box.confidence,
     )?;
     Ok(())

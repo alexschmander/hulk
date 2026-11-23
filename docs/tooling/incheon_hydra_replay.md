@@ -13,6 +13,7 @@ The delivered model run must satisfy all of the following:
 - FieldLine rows retain all five ordered vertices and all predicted presence scores. The viewer draws four connected segments and ordered points, never a FieldLine bounding box.
 - Normal playback can show object boxes/labels/scores, supervised anchors, and FieldLines together or as separate layers. Raw diagnostic mode exposes pre-threshold and pre-NMS rows with independent per-head filters and is off by default.
 - Detailed mode makes anchor coordinates/presence and every line vertex's index, coordinates, and predicted presence inspectable. Presence is reported as a network score, not occlusion ground truth.
+- Raw labels retain the original top-300 row index, so a filtered diagnostic row can be traced back to either model tensor.
 - `detection-replay verify` successfully decodes every primary and sidecar chunk after relocating the download to a different absolute path with the ONNX unavailable. `detection-replay view` opens the same cache without inference.
 - Combined and detailed screenshots from representative actual Incheon frames demonstrate native-coordinate alignment. Fixture evidence alone is not sufficient.
 
@@ -56,4 +57,6 @@ After extracting the private bundle, verify and open it from this branch with:
 The viewer command does not load the ONNX or repeat inference. The evidence
 directory contains first, quarter, middle, three-quarter, and last-frame
 combined overlays plus separated object and FieldLine detail views for frame
-10,746. FieldLine evidence intentionally contains no detection boxes.
+10,746. Supplemental frame-10,746 evidence records a below-threshold object
+row and a below-threshold FieldLine row by original tensor index. FieldLine
+evidence intentionally contains no detection boxes.
