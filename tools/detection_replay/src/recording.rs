@@ -341,8 +341,20 @@ impl Recording {
                     take,
                     &sender,
                 ),
-                OriginalImageSource::CachedCdr => scan_cached_original_images(
-                    &original_frames_path,
+                OriginalImageSource::CachedCdr if original_frames_path.exists() => {
+                    scan_cached_original_images(
+                        &original_frames_path,
+                        &index.frames,
+                        skip,
+                        take,
+                        &sender,
+                    )
+                }
+                // Download bundles omit the large derived CDR cache. The source MCAP
+                // remains authoritative and can provide the same indexed frames.
+                OriginalImageSource::CachedCdr => scan_linear_original_images(
+                    &path,
+                    image_topic,
                     &index.frames,
                     skip,
                     take,
@@ -1510,7 +1522,9 @@ fn validate_cached_index(
     if proxy_length != expected_offset {
         bail!("proxy length does not match recording cache index");
     }
-    if index.original_image_source == OriginalImageSource::CachedCdr {
+    if index.original_image_source == OriginalImageSource::CachedCdr
+        && original_frames_path.exists()
+    {
         let source_length = original_frames_path
             .metadata()
             .wrap_err_with(|| {

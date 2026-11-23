@@ -10,6 +10,7 @@ name = "detection_replay"
 path = "src/lib.rs"
 
 [dependencies]
+base64 = "0.22"
 bincode = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

@@ -19,17 +19,18 @@ use tempfile::NamedTempFile;
 use types::pose_detection::{FieldFeatureLabel, RobotKeypoints};
 use types::{
     object_detection::{Object, RobocupObjectLabel, YOLOObjectLabel},
-    pose_detection::{FieldFeatureDetection, Pose, RobotPoseDetection},
+    pose_detection::{FieldFeatureDetection, HydraDetectionSupplement, Pose, RobotPoseDetection},
 };
 
 pub const CACHE_VERSION: u32 = 2;
 pub const PREDICTION_CHUNK_SIZE: usize = 128;
 const RECORDING_FINGERPRINT_VERSION: u32 = 1;
-// The original identity captured neither supplemental output; v2 added field features and v3
-// adds robot poses.
-const MODEL_RUN_PAYLOAD_VERSION: u32 = 3;
+// The original identity captured neither supplemental output; v2 added field features, v3 robot
+// poses and v4 the native two-head Hydra supplement.
+const MODEL_RUN_PAYLOAD_VERSION: u32 = 4;
 const FIELD_FEATURE_CACHE_VERSION: u32 = 1;
 const ROBOT_POSE_CACHE_VERSION: u32 = 1;
+const HYDRA_SUPPLEMENT_CACHE_VERSION: u32 = 2;
 
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PREDICTIONS_PER_FRAME: usize = 300;
@@ -48,6 +49,7 @@ const RUN_KEY_REMAPPINGS_LOCK_FILE: &str = ".run-key-remappings.lock";
 const BOOKMARKS_FILE: &str = "bookmarks.bin";
 const FIELD_FEATURE_CHUNK_PREFIX: &str = "field-features-";
 const ROBOT_POSE_CHUNK_PREFIX: &str = "robot-poses-";
+const HYDRA_SUPPLEMENT_CHUNK_PREFIX: &str = "hydra-supplement-";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordingFingerprint {
@@ -317,6 +319,7 @@ enum PredictionStorage {
         frame_start: usize,
         has_field_features: bool,
         has_robot_poses: bool,
+        has_hydra_supplement: bool,
     },
 }
 
@@ -327,6 +330,7 @@ struct CachedPredictionChunk {
     predictions: Vec<Option<Arc<Prediction>>>,
     field_features: Vec<Option<Arc<Vec<FieldFeatureDetection>>>>,
     robot_poses: Vec<Option<Arc<Vec<RobotPoseDetection>>>>,
+    hydra_supplements: Vec<Option<Arc<HydraDetectionSupplement>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -335,6 +339,7 @@ pub struct LoadedPredictionChunk {
     pub predictions: Vec<Option<Arc<Prediction>>>,
     pub field_features: Vec<Option<Arc<Vec<FieldFeatureDetection>>>>,
     pub robot_poses: Vec<Option<Arc<Vec<RobotPoseDetection>>>>,
+    pub hydra_supplements: Vec<Option<Arc<HydraDetectionSupplement>>>,
 }
 
 impl LoadedPredictionRun {
@@ -375,6 +380,7 @@ impl LoadedPredictionRun {
                 predictions: chunk.predictions.clone(),
                 field_features: chunk.field_features.clone(),
                 robot_poses: chunk.robot_poses.clone(),
+                hydra_supplements: chunk.hydra_supplements.clone(),
             })
         })
     }
@@ -602,6 +608,7 @@ pub struct PredictionStore {
     pending: Vec<Prediction>,
     pending_field_features: Option<Vec<Vec<FieldFeatureDetection>>>,
     pending_robot_poses: Option<Vec<Vec<RobotPoseDetection>>>,
+    pending_hydra_supplements: Option<Vec<Vec<HydraDetectionSupplement>>>,
 }
 
 impl PredictionStore {
@@ -684,6 +691,32 @@ impl PredictionStore {
                 return Err(error);
             }
         };
+        let pending_hydra_supplements = match load_contiguous_supplemental_outputs(
+            &run_directory,
+            &manifest,
+            HYDRA_SUPPLEMENT_CHUNK_PREFIX,
+            HYDRA_SUPPLEMENT_CACHE_VERSION,
+            loaded.completed_count,
+            loaded.pending.len(),
+            validate_hydra_supplement_frame,
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                manifest.state = ModelRunState::Failed;
+                manifest.error = Some(format!("invalid Hydra supplement cache: {error:#}"));
+                if let Err(persist_error) = write_bincode_atomic(&manifest_path, &manifest) {
+                    return Err(error.wrap_err(format!(
+                        "failed to persist invalid-cache state: {persist_error:#}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        if let Some(supplements) = &pending_hydra_supplements {
+            for (prediction, values) in loaded.pending.iter().zip(supplements) {
+                validate_hydra_supplement(&values[0], prediction.objects.len())?;
+            }
+        }
         if manifest.completed_frame_count != loaded.completed_count {
             manifest.completed_frame_count = loaded.completed_count;
             write_bincode_atomic(&manifest_path, &manifest)?;
@@ -703,6 +736,7 @@ impl PredictionStore {
             pending: loaded.pending,
             pending_field_features,
             pending_robot_poses,
+            pending_hydra_supplements,
         })
     }
 
@@ -723,7 +757,7 @@ impl PredictionStore {
 
     #[cfg(test)]
     fn append(&mut self, prediction: Prediction) -> Result<()> {
-        self.append_with_optional_outputs(prediction, None, None)
+        self.append_with_optional_outputs(prediction, None, None, None)
     }
 
     pub fn append_with_optional_outputs(
@@ -731,6 +765,7 @@ impl PredictionStore {
         prediction: Prediction,
         field_features: Option<Vec<FieldFeatureDetection>>,
         robot_poses: Option<Vec<RobotPoseDetection>>,
+        hydra_supplement: Option<HydraDetectionSupplement>,
     ) -> Result<()> {
         let expected_frame = self
             .manifest
@@ -751,24 +786,36 @@ impl PredictionStore {
         if let Some(robot_poses) = &robot_poses {
             validate_robot_poses(robot_poses)?;
         }
+        if let Some(hydra_supplement) = &hydra_supplement {
+            validate_hydra_supplement(hydra_supplement, prediction.objects.len())?;
+        }
         if self.completed_count >= self.manifest.target_frame_count()? {
             bail!("prediction exceeds the manifest frame count");
         }
         match (&self.pending_field_features, &field_features) {
             (Some(_), None) => {
-                bail!("field-feature output became unavailable while resuming the model run")
+                bail!("field-feature output became unavailable while resuming the model run");
             }
             (None, Some(_)) if self.completed_count > 0 => {
-                bail!("existing model run does not contain field-feature outputs")
+                bail!("existing model run does not contain field-feature outputs");
             }
             _ => {}
         }
         match (&self.pending_robot_poses, &robot_poses) {
             (Some(_), None) => {
-                bail!("robot-pose output became unavailable while resuming the model run")
+                bail!("robot-pose output became unavailable while resuming the model run");
             }
             (None, Some(_)) if self.completed_count > 0 => {
-                bail!("existing model run does not contain robot-pose outputs")
+                bail!("existing model run does not contain robot-pose outputs");
+            }
+            _ => {}
+        }
+        match (&self.pending_hydra_supplements, &hydra_supplement) {
+            (Some(_), None) => {
+                bail!("Hydra supplement became unavailable while resuming the model run");
+            }
+            (None, Some(_)) if self.completed_count > 0 => {
+                bail!("existing model run does not contain Hydra supplements");
             }
             _ => {}
         }
@@ -784,6 +831,11 @@ impl PredictionStore {
                 .get_or_insert_with(Vec::new)
                 .push(robot_poses);
         }
+        if let Some(hydra_supplement) = hydra_supplement {
+            self.pending_hydra_supplements
+                .get_or_insert_with(Vec::new)
+                .push(vec![hydra_supplement]);
+        }
         self.completed_count += 1;
         if self.pending.len() == PREDICTION_CHUNK_SIZE {
             self.persist_pending()?;
@@ -793,6 +845,9 @@ impl PredictionStore {
             }
             if let Some(robot_poses) = &mut self.pending_robot_poses {
                 robot_poses.clear();
+            }
+            if let Some(hydra_supplements) = &mut self.pending_hydra_supplements {
+                hydra_supplements.clear();
             }
         }
         Ok(())
@@ -863,6 +918,23 @@ impl PredictionStore {
                     cache_version: ROBOT_POSE_CACHE_VERSION,
                     start_frame: chunk.start_frame,
                     values: robot_poses,
+                },
+            )?;
+        }
+        if let Some(hydra_supplements) = &self.pending_hydra_supplements {
+            if hydra_supplements.len() != self.pending.len() {
+                bail!("Hydra supplement cache is not aligned with pending predictions");
+            }
+            write_bincode_atomic(
+                &supplemental_chunk_path(
+                    &self.run_directory,
+                    HYDRA_SUPPLEMENT_CHUNK_PREFIX,
+                    chunk_index,
+                ),
+                &SupplementalChunkRef {
+                    cache_version: HYDRA_SUPPLEMENT_CACHE_VERSION,
+                    start_frame: chunk.start_frame,
+                    values: hydra_supplements,
                 },
             )?;
         }
@@ -1504,7 +1576,7 @@ fn recover_legacy_frame_range(
     bail!(
         "could not recover the selected frame range of legacy run {}",
         manifest.run_key
-    )
+    );
 }
 
 fn legacy_model_run_key(
@@ -1647,6 +1719,7 @@ fn load_model_run(
         Ok((
             !supplemental_chunk_paths(directory, FIELD_FEATURE_CHUNK_PREFIX)?.is_empty(),
             !supplemental_chunk_paths(directory, ROBOT_POSE_CHUNK_PREFIX)?.is_empty(),
+            !supplemental_chunk_paths(directory, HYDRA_SUPPLEMENT_CHUNK_PREFIX)?.is_empty(),
         ))
     } else {
         inspect_model_chunks(directory, &manifest)?;
@@ -1661,11 +1734,21 @@ fn load_model_run(
                 ROBOT_POSE_CHUNK_PREFIX,
                 manifest.completed_frame_count,
             )
-            .map(|has_robot_poses| (has_field_features, has_robot_poses))
+            .and_then(|has_robot_poses| {
+                inspect_optional_supplemental_chunks(
+                    directory,
+                    HYDRA_SUPPLEMENT_CHUNK_PREFIX,
+                    manifest.completed_frame_count,
+                )
+                .map(|has_hydra_supplement| {
+                    (has_field_features, has_robot_poses, has_hydra_supplement)
+                })
+            })
         })
     };
-    let (availability, has_field_features, has_robot_poses) = match inspection {
-        Ok((has_field_features, has_robot_poses)) => {
+    let (availability, has_field_features, has_robot_poses, has_hydra_supplement) = match inspection
+    {
+        Ok((has_field_features, has_robot_poses, has_hydra_supplement)) => {
             if manifest.state == ModelRunState::Running && !active
                 || manifest.state == ModelRunState::Complete
                     && manifest.completed_frame_count != target_count
@@ -1679,12 +1762,13 @@ fn load_model_run(
                 )?,
                 has_field_features,
                 has_robot_poses,
+                has_hydra_supplement,
             )
         }
         Err(error) => {
             manifest.state = ModelRunState::Failed;
             manifest.error = Some(format!("invalid prediction cache: {error:#}"));
-            (PredictionAvailability::default(), false, false)
+            (PredictionAvailability::default(), false, false, false)
         }
     };
     let frame_start = manifest.frame_start;
@@ -1699,6 +1783,7 @@ fn load_model_run(
             frame_start,
             has_field_features,
             has_robot_poses,
+            has_hydra_supplement,
         },
         cached_chunk: Arc::new(Mutex::new(None)),
         failed_chunks: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1919,8 +2004,12 @@ fn validate_model_run_manifest(manifest: &ModelRunManifest) -> Result<()> {
     }
     match (manifest.state, manifest.error.as_deref()) {
         (ModelRunState::Failed, Some(error)) if !error.is_empty() => Ok(()),
-        (ModelRunState::Failed, _) => bail!("failed model run manifest has no error"),
-        (_, Some(_)) => bail!("non-failed model run manifest contains a stale error"),
+        (ModelRunState::Failed, _) => {
+            bail!("failed model run manifest has no error");
+        }
+        (_, Some(_)) => {
+            bail!("non-failed model run manifest contains a stale error");
+        }
         (_, None) => Ok(()),
     }
 }
@@ -2353,6 +2442,73 @@ fn validate_robot_poses(detections: &[RobotPoseDetection]) -> Result<()> {
     Ok(())
 }
 
+fn validate_hydra_supplement_frame(values: &[HydraDetectionSupplement]) -> Result<()> {
+    if values.len() != 1 {
+        bail!("each frame must contain exactly one Hydra supplement");
+    }
+    validate_hydra_supplement_values(&values[0])
+}
+
+fn validate_hydra_supplement(
+    supplement: &HydraDetectionSupplement,
+    object_count: usize,
+) -> Result<()> {
+    validate_hydra_supplement_values(supplement)?;
+    if supplement.object_anchors.len() != object_count {
+        bail!(
+            "Hydra supplement has {} anchors for {object_count} objects",
+            supplement.object_anchors.len()
+        );
+    }
+    Ok(())
+}
+
+fn validate_hydra_supplement_values(supplement: &HydraDetectionSupplement) -> Result<()> {
+    if supplement.lines.len() > MAX_PREDICTIONS_PER_FRAME {
+        bail!("Hydra prediction exceeds the model output capacity");
+    }
+    if supplement.raw_objects.len() != MAX_PREDICTIONS_PER_FRAME
+        || supplement.raw_lines.len() != MAX_PREDICTIONS_PER_FRAME
+    {
+        bail!("Hydra supplement must retain exactly 300 raw rows from each head");
+    }
+    if supplement.object_anchors.iter().flatten().any(|anchor| {
+        !anchor.point.x().is_finite()
+            || !anchor.point.y().is_finite()
+            || !anchor.confidence.is_finite()
+    }) || supplement.raw_objects.iter().any(|raw| {
+        let bounding_box = raw.object.bounding_box;
+        !bounding_box.area.min.x().is_finite()
+            || !bounding_box.area.min.y().is_finite()
+            || !bounding_box.area.max.x().is_finite()
+            || !bounding_box.area.max.y().is_finite()
+            || !bounding_box.confidence.is_finite()
+            || !raw.anchor.point.x().is_finite()
+            || !raw.anchor.point.y().is_finite()
+            || !raw.anchor.confidence.is_finite()
+    }) || supplement
+        .lines
+        .iter()
+        .chain(&supplement.raw_lines)
+        .any(|line| {
+            let bounding_box = line.bounding_box;
+            !bounding_box.area.min.x().is_finite()
+                || !bounding_box.area.min.y().is_finite()
+                || !bounding_box.area.max.x().is_finite()
+                || !bounding_box.area.max.y().is_finite()
+                || !bounding_box.confidence.is_finite()
+                || line.keypoints.iter().any(|keypoint| {
+                    !keypoint.point.x().is_finite()
+                        || !keypoint.point.y().is_finite()
+                        || !keypoint.confidence.is_finite()
+                })
+        })
+    {
+        bail!("Hydra supplement contains non-finite values");
+    }
+    Ok(())
+}
+
 fn load_prediction_chunk(
     path: &Path,
     chunk_index: usize,
@@ -2396,6 +2552,7 @@ fn load_prediction_chunk(
                 start_frame: chunk.start_frame,
                 field_features: vec![None; chunk.predictions.len()],
                 robot_poses: vec![None; chunk.predictions.len()],
+                hydra_supplements: vec![None; chunk.predictions.len()],
                 predictions: chunk
                     .predictions
                     .into_iter()
@@ -2408,6 +2565,7 @@ fn load_prediction_chunk(
             frame_start,
             has_field_features,
             has_robot_poses,
+            has_hydra_supplement,
         } => {
             let chunk: PredictionChunk = read_bincode(path)?;
             let expected_start = frame_start
@@ -2446,11 +2604,33 @@ fn load_prediction_chunk(
             } else {
                 vec![None; chunk.predictions.len()]
             };
+            let hydra_supplements = if *has_hydra_supplement {
+                load_supplemental_chunk(
+                    &supplemental_chunk_path(directory, HYDRA_SUPPLEMENT_CHUNK_PREFIX, chunk_index),
+                    expected_start,
+                    chunk.predictions.len(),
+                    HYDRA_SUPPLEMENT_CACHE_VERSION,
+                    validate_hydra_supplement_frame,
+                )?
+                .into_iter()
+                .zip(&chunk.predictions)
+                .map(|(mut values, prediction)| {
+                    let supplement = values
+                        .pop()
+                        .expect("validated Hydra supplement frame has one value");
+                    validate_hydra_supplement(&supplement, prediction.objects.len())?;
+                    Ok(Some(Arc::new(supplement)))
+                })
+                .collect::<Result<Vec<_>>>()?
+            } else {
+                vec![None; chunk.predictions.len()]
+            };
             Ok(CachedPredictionChunk {
                 index: chunk_index,
                 start_frame: chunk.start_frame,
                 field_features,
                 robot_poses,
+                hydra_supplements,
                 predictions: chunk
                     .predictions
                     .into_iter()
@@ -2499,6 +2679,7 @@ fn baseline_chunk_path(directory: &Path, chunk_index: usize) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use types::pose_detection::{FieldLineDetection, HydraRawObjectDetection, Keypoint};
 
     fn fingerprint() -> RecordingFingerprint {
         RecordingFingerprint {
@@ -2538,6 +2719,31 @@ mod tests {
                 RobocupObjectLabel::Robot as usize as f32,
             ]),
             keypoints: RobotKeypoints::from(&values),
+        }
+    }
+
+    fn empty_hydra_supplement() -> HydraDetectionSupplement {
+        let keypoint = Keypoint {
+            point: Default::default(),
+            confidence: 0.0,
+        };
+        let object = Object::<RobocupObjectLabel>::from([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let line = FieldLineDetection {
+            bounding_box: object.bounding_box,
+            keypoints: [keypoint; 5],
+        };
+        HydraDetectionSupplement {
+            object_anchors: Vec::new(),
+            lines: Vec::new(),
+            raw_objects: vec![
+                HydraRawObjectDetection {
+                    object,
+                    anchor: keypoint,
+                    anchor_is_supervised: true,
+                };
+                MAX_PREDICTIONS_PER_FRAME
+            ],
+            raw_lines: vec![line; MAX_PREDICTIONS_PER_FRAME],
         }
     }
 
@@ -2676,10 +2882,16 @@ mod tests {
                     label: FieldFeatureLabel::TSpot,
                 }]),
                 Some(vec![robot_pose(0.8)]),
+                Some(empty_hydra_supplement()),
             )
             .unwrap();
         store
-            .append_with_optional_outputs(prediction(1), Some(Vec::new()), Some(Vec::new()))
+            .append_with_optional_outputs(
+                prediction(1),
+                Some(Vec::new()),
+                Some(Vec::new()),
+                Some(empty_hydra_supplement()),
+            )
             .unwrap();
         store.finish().unwrap();
         drop(store);
@@ -2700,6 +2912,20 @@ mod tests {
         assert_eq!(first[0].object.label, RobocupObjectLabel::Robot);
         assert_eq!(first[0].object.bounding_box.confidence, 0.8);
         assert!(chunk.robot_poses[1].as_ref().unwrap().is_empty());
+        assert!(
+            chunk.hydra_supplements[0]
+                .as_ref()
+                .unwrap()
+                .object_anchors
+                .is_empty()
+        );
+        assert!(
+            chunk.hydra_supplements[1]
+                .as_ref()
+                .unwrap()
+                .lines
+                .is_empty()
+        );
 
         let cache = tempfile::tempdir().unwrap();
         let mut store = PredictionStore::open(cache.path(), manifest(1)).unwrap();
@@ -2714,6 +2940,7 @@ mod tests {
         let chunk = model.prediction_chunk(0).unwrap();
         assert!(chunk.field_features[0].is_none());
         assert!(chunk.robot_poses[0].is_none());
+        assert!(chunk.hydra_supplements[0].is_none());
     }
 
     #[test]
@@ -2726,6 +2953,7 @@ mod tests {
                     prediction(frame_index),
                     Some(Vec::new()),
                     Some(Vec::new()),
+                    Some(empty_hydra_supplement()),
                 )
                 .unwrap();
         }
@@ -2739,6 +2967,7 @@ mod tests {
                     prediction(frame_index),
                     Some(Vec::new()),
                     Some(Vec::new()),
+                    Some(empty_hydra_supplement()),
                 )
                 .unwrap();
         }
@@ -2766,6 +2995,25 @@ mod tests {
                 .iter()
                 .all(|poses| poses.as_ref().unwrap().is_empty())
         );
+        assert!(
+            final_chunk
+                .hydra_supplements
+                .iter()
+                .all(|supplement| supplement.as_ref().unwrap().lines.is_empty())
+        );
+    }
+
+    #[test]
+    fn hydra_supplement_requires_one_anchor_slot_per_surviving_object() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut store = PredictionStore::open(cache.path(), manifest(1)).unwrap();
+        let mut supplement = empty_hydra_supplement();
+        supplement.object_anchors.push(None);
+        let result =
+            store.append_with_optional_outputs(prediction(0), None, None, Some(supplement));
+
+        assert!(result.is_err());
+        assert_eq!(store.completed_count(), 0);
     }
 
     #[test]
@@ -2954,7 +3202,7 @@ mod tests {
             .clone_from(&field_feature_run_key);
         let mut store = PredictionStore::open(cache.path(), field_feature_manifest).unwrap();
         store
-            .append_with_optional_outputs(prediction(0), Some(Vec::new()), None)
+            .append_with_optional_outputs(prediction(0), Some(Vec::new()), None, None)
             .unwrap();
         store.finish().unwrap();
         drop(store);

@@ -3,7 +3,10 @@ use std::{
     time::Duration,
 };
 
-use color_eyre::{Result, eyre::bail, eyre::eyre};
+use color_eyre::{
+    Result,
+    eyre::{ContextCompat, bail, eyre},
+};
 use ndarray::{ArrayView2, ArrayView3, ArrayViewD, Axis};
 #[cfg(feature = "webgpu-provider")]
 use ort::execution_providers::WebGPUExecutionProvider;
@@ -15,7 +18,7 @@ use ort::{
     },
     inputs,
     session::{Session, SessionOutputs, builder::GraphOptimizationLevel},
-    value::TensorRef,
+    value::{TensorRef, ValueType},
 };
 use ros_z_streams::CreateAnnouncingPublisher;
 use ros2::sensor_msgs::image::Image;
@@ -28,7 +31,8 @@ use types::{
     object_detection::{NUMBER_OF_VALUES_PER_OBJECT, Object, RobocupObjectLabel, YOLOObjectLabel},
     parameters::DetectionParameters,
     pose_detection::{
-        FieldFeatureDetection, FieldFeatureLabel, NUMBER_OF_VALUES_PER_POSE,
+        FieldFeatureDetection, FieldFeatureLabel, FieldLineDetection, HydraDetectionSupplement,
+        HydraRawObjectDetection, Keypoint, NUMBER_OF_LINE_KEYPOINTS, NUMBER_OF_VALUES_PER_POSE,
         NUMBER_OF_VALUES_PER_ROBOT_POSE, Pose, RobotPoseDetection,
     },
     time_wrapper::TimeWrapper,
@@ -36,6 +40,8 @@ use types::{
 
 pub const NUMBER_OF_DETECTIONS: usize = 300;
 const NUMBER_OF_VALUES_PER_FIELD_FEATURE_POSE: usize = 9;
+const NUMBER_OF_VALUES_PER_OBJECT_WITH_ANCHOR: usize = 9;
+const NUMBER_OF_VALUES_PER_LINE: usize = 21;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 /// Selects the ONNX Runtime execution provider used by detection.
@@ -59,6 +65,8 @@ pub struct DetectionModelInfo {
     pub has_pose_output: bool,
     pub has_robot_pose_output: bool,
     pub has_field_feature_output: bool,
+    pub has_object_anchor_output: bool,
+    pub has_line_output: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,6 +76,7 @@ enum TaskHead {
     PersonPose,
     RobotPose,
     FieldFeature,
+    Line,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +91,8 @@ struct ModelOutputContract {
     has_person_pose: bool,
     has_robot_pose: bool,
     has_direct_field_features: bool,
+    object_values_per_detection: usize,
+    has_line_output: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +118,12 @@ struct DetectionOutput {
     detected_poses: Vec<Pose<YOLOObjectLabel>>,
     detected_robot_poses: Vec<RobotPoseDetection>,
     detected_field_features: Vec<FieldFeatureDetection>,
+    hydra_supplement: HydraDetectionSupplement,
+}
+
+struct ObjectCandidate {
+    object: Object<RobocupObjectLabel>,
+    anchor: Option<Keypoint>,
 }
 
 impl TaskHead {
@@ -117,6 +134,7 @@ impl TaskHead {
             TaskHead::PersonPose => "person_pose_output",
             TaskHead::RobotPose => "robot_pose_output",
             TaskHead::FieldFeature => "field_feature_output",
+            TaskHead::Line => "line_output",
         }
     }
 
@@ -128,6 +146,7 @@ impl TaskHead {
             }
             Self::RobotPose => &[1, NUMBER_OF_DETECTIONS, NUMBER_OF_VALUES_PER_ROBOT_POSE],
             Self::FieldFeature => &[1, NUMBER_OF_DETECTIONS, 4],
+            Self::Line => &[1, NUMBER_OF_DETECTIONS, NUMBER_OF_VALUES_PER_LINE],
         }
     }
 }
@@ -140,6 +159,7 @@ struct ModelOutputs<'a> {
     robot_poses: Option<ArrayView2<'a, f32>>,
     field_features: Option<ArrayView2<'a, f32>>,
     field_feature_poses: Option<ArrayView2<'a, f32>>,
+    lines: Option<ArrayView2<'a, f32>>,
 }
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
@@ -195,6 +215,9 @@ async fn run(
     let detected_field_features_pub = node
         .announcing_publisher::<TimeWrapper<Vec<FieldFeatureDetection>>>("detected_field_features")
         .await?;
+    let hydra_supplement_pub = node
+        .announcing_publisher::<TimeWrapper<HydraDetectionSupplement>>("hydra_detection_supplement")
+        .await?;
 
     let initial_parameters_snapshot = node_parameters.snapshot();
     let parameters = initial_parameters_snapshot.typed();
@@ -236,6 +259,7 @@ async fn run(
         let detected_robot_poses_pending = detected_robot_poses_pub.announce(image_time).await?;
         let detected_field_features_pending =
             detected_field_features_pub.announce(image_time).await?;
+        let hydra_supplement_pending = hydra_supplement_pub.announce(image_time).await?;
 
         check_image(&image)?;
 
@@ -260,6 +284,16 @@ async fn run(
                     .object_detection_parameters
                     .minimum_candidate_confidence,
             )?;
+            let raw_hydra_objects = extract_raw_hydra_objects(&outputs)?;
+            let raw_hydra_lines = extract_raw_hydra_lines(&outputs)?;
+            let detected_lines = extract_line_detections(
+                &outputs,
+                parameters
+                    .hydra_line_detection_parameters
+                    .minimum_candidate_confidence,
+                image.width,
+                image.height,
+            )?;
             let candidate_human_poses = extract_candidate_pose_detections(
                 &outputs,
                 parameters
@@ -281,7 +315,7 @@ async fn run(
             );
             let post_processing_duration = post_processing_start.elapsed();
             let non_maximum_suppression_start = Instant::now();
-            let detected_objects = non_maximum_suppression(
+            let detected_object_candidates = non_maximum_suppression(
                 candidate_detections,
                 parameters
                     .object_detection_parameters
@@ -306,6 +340,10 @@ async fn run(
                     .maximum_suppression_distance_in_pixels,
             );
             let non_maximum_suppression_duration = non_maximum_suppression_start.elapsed();
+            let (detected_objects, object_anchors) = detected_object_candidates
+                .into_iter()
+                .map(|candidate| (candidate.object, candidate.anchor))
+                .unzip();
 
             Ok::<_, color_eyre::eyre::Error>(DetectionOutput {
                 inference_duration,
@@ -315,6 +353,12 @@ async fn run(
                 detected_poses,
                 detected_robot_poses,
                 detected_field_features,
+                hydra_supplement: HydraDetectionSupplement {
+                    object_anchors,
+                    lines: detected_lines,
+                    raw_objects: raw_hydra_objects,
+                    raw_lines: raw_hydra_lines,
+                },
             })
         })?;
 
@@ -352,6 +396,12 @@ async fn run(
                 inner: output.detected_field_features,
             })
             .await?;
+        hydra_supplement_pending
+            .publish(&TimeWrapper {
+                time: image_time,
+                inner: output.hydra_supplement,
+            })
+            .await?;
     }
 }
 
@@ -366,16 +416,67 @@ impl ModelOutputContract {
                     self.legacy_pose.as_ref(),
                     Some(LegacyPoseOutput::FieldFeature { .. })
                 ),
+            has_object_anchor_output: self.object_values_per_detection
+                == NUMBER_OF_VALUES_PER_OBJECT_WITH_ANCHOR,
+            has_line_output: self.has_line_output,
         }
     }
 }
 
 fn model_output_contract(session: &Session) -> Result<ModelOutputContract> {
     let branches = session.metadata()?.custom("branches")?;
-    model_output_contract_from_metadata(
+    let contract = model_output_contract_from_metadata(
         session.outputs.iter().map(|output| output.name.as_str()),
         branches.as_deref(),
-    )
+    )?;
+    if let Some(shape) = session_output_shape(session, TaskHead::ObjectDetection.output_name())? {
+        let expected = [
+            1,
+            NUMBER_OF_DETECTIONS,
+            contract.object_values_per_detection,
+        ];
+        validate_static_session_shape(TaskHead::ObjectDetection.output_name(), &shape, &expected)?;
+    }
+    if contract.has_line_output {
+        let shape = session_output_shape(session, TaskHead::Line.output_name())?
+            .wrap_err("line_output disappeared from the session output list")?;
+        let expected = TaskHead::Line.expected_shape();
+        validate_static_session_shape(TaskHead::Line.output_name(), &shape, expected)?;
+    }
+    Ok(contract)
+}
+
+fn session_output_shape(session: &Session, name: &str) -> Result<Option<Vec<Option<usize>>>> {
+    let Some(output) = session.outputs.iter().find(|output| output.name == name) else {
+        return Ok(None);
+    };
+    let ValueType::Tensor { shape, .. } = &output.output_type else {
+        bail!("model output `{name}` is not a tensor");
+    };
+    Ok(Some(
+        shape
+            .iter()
+            .map(|dimension| usize::try_from(*dimension).ok())
+            .collect(),
+    ))
+}
+
+fn validate_static_session_shape(
+    output_name: &str,
+    actual: &[Option<usize>],
+    expected: &[usize],
+) -> Result<()> {
+    if actual.len() != expected.len()
+        || actual
+            .iter()
+            .zip(expected)
+            .any(|(actual, expected)| actual.is_some_and(|actual| actual != *expected))
+    {
+        bail!(
+            "{output_name} not of expected shape. Expected: {expected:?}, got metadata: {actual:?}"
+        );
+    }
+    Ok(())
 }
 
 fn model_output_contract_from_metadata<'a>(
@@ -390,11 +491,18 @@ fn model_output_contract_from_metadata<'a>(
         None
     };
 
+    let has_line_output = has_output(TaskHead::Line.output_name());
     Ok(ModelOutputContract {
         legacy_pose,
         has_person_pose: has_output(TaskHead::PersonPose.output_name()),
         has_robot_pose: has_output(TaskHead::RobotPose.output_name()),
         has_direct_field_features: has_output(TaskHead::FieldFeature.output_name()),
+        object_values_per_detection: if has_line_output {
+            NUMBER_OF_VALUES_PER_OBJECT_WITH_ANCHOR
+        } else {
+            NUMBER_OF_VALUES_PER_OBJECT
+        },
+        has_line_output,
     })
 }
 
@@ -419,7 +527,9 @@ fn legacy_pose_output_from_metadata(branches: Option<&str>) -> Result<Option<Leg
             labels: field_feature_labels(&branch.names)?,
         })),
         Some([17, 3]) | None => Ok(Some(LegacyPoseOutput::Person)),
-        Some(shape) => bail!("unsupported `pose_output` keypoint shape {shape:?}"),
+        Some(shape) => {
+            bail!("unsupported `pose_output` keypoint shape {shape:?}");
+        }
     }
 }
 
@@ -437,7 +547,9 @@ fn field_feature_labels(names: &BTreeMap<usize, String>) -> Result<[FieldFeature
                 "PenaltySpot" => Ok(FieldFeatureLabel::PenaltySpot),
                 "TSpot" => Ok(FieldFeatureLabel::TSpot),
                 "XSpot" => Ok(FieldFeatureLabel::XSpot),
-                _ => bail!("unknown field-pose class `{name}`"),
+                _ => {
+                    bail!("unknown field-pose class `{name}`");
+                }
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -586,6 +698,9 @@ fn extract_outputs<'a>(
         contract,
     )?;
     result.nao_objects = combined.map(|(_, nao)| nao);
+    result.lines = extract_output(outputs, TaskHead::Line)?
+        .map(|output| validate_and_reshape_output(TaskHead::Line, output))
+        .transpose()?;
     Ok(result)
 }
 
@@ -638,7 +753,15 @@ fn model_outputs_from_arrays<'a>(
             TaskHead::ObjectDetection.output_name()
         )
     })?;
-    let objects = validate_and_reshape_output(TaskHead::ObjectDetection, objects_output)?;
+    let objects = validate_and_reshape_named_output(
+        TaskHead::ObjectDetection.output_name(),
+        &[
+            1,
+            NUMBER_OF_DETECTIONS,
+            contract.object_values_per_detection,
+        ],
+        objects_output,
+    )?;
     let mut poses = person_poses_output
         .map(|output| validate_and_reshape_output(TaskHead::PersonPose, output))
         .transpose()?;
@@ -660,7 +783,7 @@ fn model_outputs_from_arrays<'a>(
         }
         (None, None) | (Some(LegacyPoseOutput::Person), Some(_)) => {}
         (None, Some(_)) | (Some(_), None) => {
-            bail!("model output contract does not match `pose_output` availability")
+            bail!("model output contract does not match `pose_output` availability");
         }
     };
     let robot_poses = robot_poses_output
@@ -677,6 +800,7 @@ fn model_outputs_from_arrays<'a>(
         robot_poses,
         field_features,
         field_feature_poses,
+        lines: None,
     })
 }
 
@@ -698,7 +822,7 @@ fn validate_and_reshape_named_output<'a>(
             output_name,
             expected_shape,
             output.shape()
-        )
+        );
     }
 
     Ok(output.squeeze().into_dimensionality()?)
@@ -707,44 +831,220 @@ fn validate_and_reshape_named_output<'a>(
 fn extract_candidate_object_detections(
     outputs: &ModelOutputs,
     confidence_threshold: f32,
-) -> Result<Vec<Object<RobocupObjectLabel>>> {
-    let mut objects: Vec<Object<RobocupObjectLabel>> = outputs
-        .objects
-        .axis_iter(Axis(0))
-        .filter_map(|row| {
-            let confidence = row[4usize];
-            if !confidence.is_finite() || confidence < confidence_threshold {
-                return None;
-            }
-
-            let object_values: [f32; NUMBER_OF_VALUES_PER_OBJECT] = row
-                .as_slice()
-                .expect("slice is not contiguous")
-                .try_into()
-                .unwrap_or_else(|_| {
-                    panic!("slice is not of length {}", NUMBER_OF_VALUES_PER_OBJECT)
-                });
-
-            let object = Object::from(object_values);
-            if outputs.nao_objects.is_some() && matches!(object.label, RobocupObjectLabel::GoalPost)
-            {
-                return None;
-            }
-            Some(object)
-        })
-        .collect();
+) -> Result<Vec<ObjectCandidate>> {
+    let mut objects = extract_candidate_objects(
+        &outputs.objects,
+        confidence_threshold,
+        outputs.nao_objects.is_some(),
+    )?;
     if let Some(nao) = &outputs.nao_objects {
-        objects.extend(nao.axis_iter(Axis(0)).filter_map(|row| {
-            let confidence = row[4];
-            if !confidence.is_finite() || confidence < confidence_threshold {
-                return None;
-            }
-            let values: [f32; NUMBER_OF_VALUES_PER_OBJECT] = row.as_slice()?.try_into().ok()?;
-            let object = Object::from(values);
-            matches!(object.label, RobocupObjectLabel::GoalPost).then_some(object)
-        }));
+        objects.extend(
+            extract_candidate_objects(nao, confidence_threshold, false)?
+                .into_iter()
+                .filter(|candidate| matches!(candidate.object.label, RobocupObjectLabel::GoalPost)),
+        );
     }
     Ok(objects)
+}
+
+fn extract_candidate_objects(
+    output: &ArrayView2<f32>,
+    confidence_threshold: f32,
+    omit_goalposts: bool,
+) -> Result<Vec<ObjectCandidate>> {
+    let mut candidates = Vec::new();
+    for row in output.axis_iter(Axis(0)) {
+        let confidence = row[4];
+        if !confidence.is_finite() || confidence < confidence_threshold {
+            continue;
+        }
+        let label = if row.len() == NUMBER_OF_VALUES_PER_OBJECT_WITH_ANCHOR {
+            robocup_object_label(row[5])?
+        } else {
+            legacy_robocup_object_label(row[5])?
+        };
+        if omit_goalposts && label == RobocupObjectLabel::GoalPost {
+            continue;
+        }
+        let values = row.as_slice().expect("model output row is contiguous");
+        let object_values: [f32; NUMBER_OF_VALUES_PER_OBJECT] = values
+            [..NUMBER_OF_VALUES_PER_OBJECT]
+            .try_into()
+            .expect("validated object output width");
+        if object_values[..5].iter().any(|value| !value.is_finite()) {
+            bail!("object output contains a non-finite box or confidence value");
+        }
+        let anchor = if values.len() == NUMBER_OF_VALUES_PER_OBJECT_WITH_ANCHOR {
+            let [x, y, presence] = [values[6], values[7], values[8]];
+            if [x, y, presence].iter().any(|value| !value.is_finite()) {
+                bail!("object output contains a non-finite anchor value");
+            }
+            (label != RobocupObjectLabel::Robot).then_some(Keypoint {
+                point: linear_algebra::point![x, y],
+                confidence: presence,
+            })
+        } else {
+            None
+        };
+        candidates.push(ObjectCandidate {
+            object: Object::from(object_values),
+            anchor,
+        });
+    }
+    Ok(candidates)
+}
+
+fn robocup_object_label(value: f32) -> Result<RobocupObjectLabel> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=6.0).contains(&value) {
+        bail!("invalid RoboCup object class index {value}");
+    }
+    Ok(match value as usize {
+        0 => RobocupObjectLabel::Ball,
+        1 => RobocupObjectLabel::GoalPost,
+        2 => RobocupObjectLabel::LSpot,
+        3 => RobocupObjectLabel::PenaltySpot,
+        4 => RobocupObjectLabel::Robot,
+        5 => RobocupObjectLabel::TSpot,
+        6 => RobocupObjectLabel::XSpot,
+        _ => unreachable!("class range checked above"),
+    })
+}
+
+fn legacy_robocup_object_label(value: f32) -> Result<RobocupObjectLabel> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=7.0).contains(&value) {
+        bail!("invalid legacy RoboCup object class index {value}");
+    }
+    Ok(match value as usize {
+        0 => RobocupObjectLabel::Ball,
+        1 => RobocupObjectLabel::GoalPost,
+        2 => RobocupObjectLabel::LSpot,
+        3 => RobocupObjectLabel::PenaltySpot,
+        4 => RobocupObjectLabel::Robot,
+        5 => RobocupObjectLabel::TSpot,
+        6 => RobocupObjectLabel::XSpot,
+        7 => RobocupObjectLabel::Person,
+        _ => unreachable!("class range checked above"),
+    })
+}
+
+fn extract_raw_hydra_objects(outputs: &ModelOutputs) -> Result<Vec<HydraRawObjectDetection>> {
+    if outputs.objects.ncols() != NUMBER_OF_VALUES_PER_OBJECT_WITH_ANCHOR {
+        return Ok(Vec::new());
+    }
+    outputs
+        .objects
+        .axis_iter(Axis(0))
+        .map(|row| {
+            let values = row.as_slice().expect("model output row is contiguous");
+            if values.iter().any(|value| !value.is_finite()) {
+                bail!("raw Hydra object output contains a non-finite value");
+            }
+            let label = robocup_object_label(values[5])?;
+            let object_values: [f32; NUMBER_OF_VALUES_PER_OBJECT] = values
+                [..NUMBER_OF_VALUES_PER_OBJECT]
+                .try_into()
+                .expect("validated Hydra object output width");
+            Ok(HydraRawObjectDetection {
+                object: Object::from(object_values),
+                anchor: Keypoint {
+                    point: linear_algebra::point![values[6], values[7]],
+                    confidence: values[8],
+                },
+                anchor_is_supervised: label != RobocupObjectLabel::Robot,
+            })
+        })
+        .collect()
+}
+
+fn extract_raw_hydra_lines(outputs: &ModelOutputs) -> Result<Vec<FieldLineDetection>> {
+    let Some(lines) = &outputs.lines else {
+        return Ok(Vec::new());
+    };
+    lines
+        .axis_iter(Axis(0))
+        .map(|row| {
+            if row.iter().any(|value| !value.is_finite()) {
+                bail!("raw Hydra line output contains a non-finite value");
+            }
+            if row[5] != 0.0 {
+                bail!("line output contains invalid class index {}", row[5]);
+            }
+            let bounding_box = Object::<RobocupObjectLabel>::from([
+                row[0], row[1], row[2], row[3], row[4], row[5],
+            ])
+            .bounding_box;
+            let mut keypoints = [Keypoint {
+                point: linear_algebra::point![0.0, 0.0],
+                confidence: 0.0,
+            }; NUMBER_OF_LINE_KEYPOINTS];
+            for (keypoint, values) in keypoints.iter_mut().zip(
+                row.as_slice().expect("model output row is contiguous")
+                    [NUMBER_OF_VALUES_PER_OBJECT..]
+                    .as_chunks::<3>()
+                    .0,
+            ) {
+                keypoint.point = linear_algebra::point![values[0], values[1]];
+                keypoint.confidence = values[2];
+            }
+            Ok(FieldLineDetection {
+                bounding_box,
+                keypoints,
+            })
+        })
+        .collect()
+}
+
+fn extract_line_detections(
+    outputs: &ModelOutputs,
+    confidence_threshold: f32,
+    image_width: u32,
+    image_height: u32,
+) -> Result<Vec<FieldLineDetection>> {
+    if !confidence_threshold.is_finite() || !(0.0..=1.0).contains(&confidence_threshold) {
+        bail!("line confidence threshold must be finite and between zero and one");
+    }
+    let Some(lines) = &outputs.lines else {
+        return Ok(Vec::new());
+    };
+    let mut detections = Vec::new();
+    for row in lines.axis_iter(Axis(0)) {
+        let confidence = row[4];
+        if !confidence.is_finite() {
+            bail!("line output contains a non-finite confidence");
+        }
+        if confidence < confidence_threshold {
+            continue;
+        }
+        if row[5] != 0.0 {
+            bail!("line output contains invalid class index {}", row[5]);
+        }
+        if row.iter().any(|value| !value.is_finite()) {
+            bail!("line output contains a non-finite retained value");
+        }
+        let bounding_box =
+            Object::<RobocupObjectLabel>::from([row[0], row[1], row[2], row[3], confidence, 0.0])
+                .bounding_box;
+        let mut keypoints = [Keypoint {
+            point: linear_algebra::point![0.0, 0.0],
+            confidence: 0.0,
+        }; NUMBER_OF_LINE_KEYPOINTS];
+        for (keypoint, values) in keypoints.iter_mut().zip(
+            row.as_slice().expect("model output row is contiguous")[NUMBER_OF_VALUES_PER_OBJECT..]
+                .as_chunks::<3>()
+                .0,
+        ) {
+            keypoint.point = linear_algebra::point![
+                values[0].clamp(0.0, image_width as f32) - 0.5,
+                values[1].clamp(0.0, image_height as f32) - 0.5,
+            ];
+            keypoint.confidence = values[2];
+        }
+        detections.push(FieldLineDetection {
+            bounding_box,
+            keypoints,
+        });
+    }
+    Ok(detections)
 }
 
 fn extract_candidate_pose_detections(
@@ -855,6 +1155,12 @@ trait HasBoundingBox {
 impl<T> HasBoundingBox for Object<T> {
     fn bounding_box(&self) -> &BoundingBox {
         &self.bounding_box
+    }
+}
+
+impl HasBoundingBox for ObjectCandidate {
+    fn bounding_box(&self) -> &BoundingBox {
+        &self.object.bounding_box
     }
 }
 
@@ -981,13 +1287,20 @@ mod tests {
             robot_poses: None,
             field_features: None,
             field_feature_poses: None,
+            lines: None,
         };
         let detections = extract_candidate_object_detections(&outputs, 0.5).unwrap();
         assert_eq!(detections.len(), 2);
-        assert!(matches!(detections[0].label, RobocupObjectLabel::Ball));
-        assert_eq!(detections[0].bounding_box.area.min.x(), 1.0);
-        assert!(matches!(detections[1].label, RobocupObjectLabel::GoalPost));
-        assert_eq!(detections[1].bounding_box.area.min.x(), 7.0);
+        assert!(matches!(
+            detections[0].object.label,
+            RobocupObjectLabel::Ball
+        ));
+        assert_eq!(detections[0].object.bounding_box.area.min.x(), 1.0);
+        assert!(matches!(
+            detections[1].object.label,
+            RobocupObjectLabel::GoalPost
+        ));
+        assert_eq!(detections[1].object.bounding_box.area.min.x(), 7.0);
         assert!(
             extract_candidate_object_detections(&outputs, 0.95)
                 .unwrap()
@@ -1008,6 +1321,115 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn six_column_legacy_objects_still_accept_person_class() {
+        let rows = Array2::from_shape_vec(
+            (1, NUMBER_OF_VALUES_PER_OBJECT),
+            vec![0.0, 0.0, 20.0, 30.0, 0.9, 7.0],
+        )
+        .unwrap();
+
+        let detections = extract_candidate_objects(&rows.view(), 0.05, false).unwrap();
+
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].object.label, RobocupObjectLabel::Person);
+        assert!(detections[0].anchor.is_none());
+    }
+
+    #[test]
+    fn native_heads_are_a_paired_contract() {
+        let info = contract(["object_output", "line_output"]).model_info();
+        assert!(info.has_object_anchor_output);
+        assert!(info.has_line_output);
+    }
+
+    #[test]
+    fn hydra_object_anchors_remain_aligned_through_nms_and_mask_robot() {
+        let rows = Array2::from_shape_vec(
+            (3, NUMBER_OF_VALUES_PER_OBJECT_WITH_ANCHOR),
+            vec![
+                0.0, 0.0, 20.0, 20.0, 0.9, 0.0, 3.0, 4.0, 0.1, 1.0, 1.0, 21.0, 21.0, 0.8, 1.0,
+                30.0, 40.0, 0.9, 30.0, 30.0, 40.0, 50.0, 0.95, 4.0, 100.0, 200.0, 1.0,
+            ],
+        )
+        .unwrap();
+        let outputs = ModelOutputs {
+            objects: rows.view(),
+            nao_objects: None,
+            poses: None,
+            robot_poses: None,
+            field_features: None,
+            field_feature_poses: None,
+            lines: None,
+        };
+
+        let candidates = extract_candidate_object_detections(&outputs, 0.05).unwrap();
+        let raw = extract_raw_hydra_objects(&outputs).unwrap();
+        let detections = non_maximum_suppression(candidates, 0.4);
+
+        assert_eq!(raw.len(), 3);
+        assert!(raw[0].anchor_is_supervised);
+        assert!(!raw[2].anchor_is_supervised);
+        assert_eq!(raw[2].anchor.confidence, 1.0);
+        assert_eq!(detections.len(), 2);
+        assert_eq!(detections[0].object.label, RobocupObjectLabel::Robot);
+        assert!(detections[0].anchor.is_none());
+        assert_eq!(detections[1].object.label, RobocupObjectLabel::Ball);
+        let anchor = detections[1].anchor.unwrap();
+        assert_eq!((anchor.point.x(), anchor.point.y()), (3.0, 4.0));
+        assert_eq!(anchor.confidence, 0.1);
+    }
+
+    #[test]
+    fn hydra_object_classes_must_be_finite_integral_and_in_range() {
+        for invalid_class in [f32::NAN, -1.0, 1.5, 7.0] {
+            let rows = Array2::from_shape_vec(
+                (1, NUMBER_OF_VALUES_PER_OBJECT_WITH_ANCHOR),
+                vec![0.0, 0.0, 1.0, 1.0, 0.9, invalid_class, 0.0, 0.0, 0.0],
+            )
+            .unwrap();
+            assert!(extract_candidate_objects(&rows.view(), 0.05, false).is_err());
+        }
+    }
+
+    #[test]
+    fn hydra_lines_keep_ordered_points_without_presence_or_nms_filtering() {
+        let mut rows = Array2::zeros((2, NUMBER_OF_VALUES_PER_LINE));
+        for (row_index, confidence) in [0.39, 0.8].into_iter().enumerate() {
+            let values = [
+                -10.0, -20.0, 600.0, 500.0, confidence, 0.0, -1.0, -2.0, 0.01, 10.0, 20.0, 0.02,
+                30.0, 40.0, 0.03, 50.0, 60.0, 0.04, 600.0, 500.0, 0.05,
+            ];
+            for (column, value) in values.into_iter().enumerate() {
+                rows[[row_index, column]] = value;
+            }
+        }
+        let object_rows = Array2::zeros((1, NUMBER_OF_VALUES_PER_OBJECT));
+        let outputs = ModelOutputs {
+            objects: object_rows.view(),
+            nao_objects: None,
+            poses: None,
+            robot_poses: None,
+            field_features: None,
+            field_feature_poses: None,
+            lines: Some(rows.view()),
+        };
+
+        let lines = extract_line_detections(&outputs, 0.39, 544, 448).unwrap();
+        let raw_lines = extract_raw_hydra_lines(&outputs).unwrap();
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(raw_lines.len(), 2);
+        assert_eq!(raw_lines[0].keypoints[0].point.x(), -1.0);
+        assert_eq!(raw_lines[0].keypoints[4].point.y(), 500.0);
+        assert_eq!(lines[0].keypoints[0].point.x(), -0.5);
+        assert_eq!(lines[0].keypoints[0].point.y(), -0.5);
+        assert_eq!(lines[0].keypoints[4].point.x(), 543.5);
+        assert_eq!(lines[0].keypoints[4].point.y(), 447.5);
+        assert_eq!(lines[0].keypoints[0].confidence, 0.01);
+        assert_eq!(lines[0].keypoints[4].confidence, 0.05);
     }
 
     #[test]
@@ -1043,6 +1465,8 @@ mod tests {
                 has_pose_output: false,
                 has_robot_pose_output: false,
                 has_field_feature_output: false,
+                has_object_anchor_output: false,
+                has_line_output: false,
             }
         );
         assert_eq!(
@@ -1051,6 +1475,8 @@ mod tests {
                 has_pose_output: true,
                 has_robot_pose_output: false,
                 has_field_feature_output: false,
+                has_object_anchor_output: false,
+                has_line_output: false,
             }
         );
         assert_eq!(
@@ -1059,6 +1485,8 @@ mod tests {
                 has_pose_output: true,
                 has_robot_pose_output: false,
                 has_field_feature_output: false,
+                has_object_anchor_output: false,
+                has_line_output: false,
             }
         );
         assert_eq!(
@@ -1067,6 +1495,8 @@ mod tests {
                 has_pose_output: false,
                 has_robot_pose_output: false,
                 has_field_feature_output: true,
+                has_object_anchor_output: false,
+                has_line_output: false,
             }
         );
         assert_eq!(
@@ -1075,6 +1505,8 @@ mod tests {
                 has_pose_output: false,
                 has_robot_pose_output: true,
                 has_field_feature_output: false,
+                has_object_anchor_output: false,
+                has_line_output: false,
             }
         );
         assert_eq!(
@@ -1088,6 +1520,8 @@ mod tests {
                 has_pose_output: false,
                 has_robot_pose_output: true,
                 has_field_feature_output: true,
+                has_object_anchor_output: false,
+                has_line_output: false,
             }
         );
     }
@@ -1237,6 +1671,7 @@ mod tests {
             robot_poses: Some(robot_poses.view()),
             field_features: None,
             field_feature_poses: None,
+            lines: None,
         };
 
         let detections = extract_robot_pose_detections(&outputs, 0.5).unwrap();
@@ -1263,6 +1698,7 @@ mod tests {
             robot_poses: Some(robot_poses.view()),
             field_features: Some(field_features.view()),
             field_feature_poses: None,
+            lines: None,
         };
 
         let detections = extract_field_feature_detections(
@@ -1354,6 +1790,7 @@ mod tests {
             robot_poses: Some(robot_poses.view()),
             field_features: Some(field_features.view()),
             field_feature_poses: None,
+            lines: None,
         };
 
         let detections = extract_field_feature_detections(

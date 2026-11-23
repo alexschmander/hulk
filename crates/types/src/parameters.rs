@@ -351,6 +351,8 @@ pub struct DetectionParameters {
     pub pose_detection_parameters: PoseDetectionParameters,
     pub robot_pose_detection_parameters: PoseDetectionParameters,
     pub field_feature_detection_parameters: FieldFeatureDetectionParameters,
+    #[serde(default)]
+    pub hydra_line_detection_parameters: HydraLineDetectionParameters,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ros_z::Message)]
@@ -369,6 +371,19 @@ pub struct PoseDetectionParameters {
 pub struct FieldFeatureDetectionParameters {
     pub minimum_candidate_confidence: f32,
     pub maximum_suppression_distance_in_pixels: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ros_z::Message)]
+pub struct HydraLineDetectionParameters {
+    pub minimum_candidate_confidence: f32,
+}
+
+impl Default for HydraLineDetectionParameters {
+    fn default() -> Self {
+        Self {
+            minimum_candidate_confidence: 0.39,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ros_z::Message)]

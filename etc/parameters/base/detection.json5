@@ -1,10 +1,10 @@
 {
   enable: true,
   neural_networks_folder: "etc/neural_networks",
-  model_name: "yolo26m-seg=f11+yolo26m~cheek+yolo26m-pose~badge.onnx",
+  model_name: "hydra-native.onnx",
   object_detection_parameters: {
-    maximum_intersection_over_union: 0.5,
-    minimum_candidate_confidence: 0.25,
+    maximum_intersection_over_union: 0.4,
+    minimum_candidate_confidence: 0.05,
   },
   pose_detection_parameters: {
     maximum_intersection_over_union: 0.5,
@@ -17,5 +17,8 @@
   field_feature_detection_parameters: {
     minimum_candidate_confidence: 0.35,
     maximum_suppression_distance_in_pixels: 8.0,
+  },
+  hydra_line_detection_parameters: {
+    minimum_candidate_confidence: 0.39,
   },
 }

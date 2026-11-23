@@ -34,7 +34,11 @@ Use `--limit 10` for a short provider/model compatibility check. CUDA is the def
 
 Models must accept `raw_bytes_input` as a rank-three `uint8` tensor with shape `[height / 2, width / 2, 6]`. Its contiguous bytes are the full-resolution NV12 Y plane followed by the half-height interleaved UV plane; image width and height must be multiples of 32.
 
-Object detections require either `object_output`, or both `hslvision_output` and `nao_output`, as `float32` tensors with shape `[1, 300, 6]`. Each row is `[x_min, y_min, x_max, y_max, confidence, class_index]`; coordinates are full input-image pixel coordinates. Class indices must be integral values from 0 through 6: Ball, GoalPost, LSpot, PenaltySpot, Robot, TSpot, and XSpot. The two-head models use the selection behavior from `hslvision-plus-old-goalposts`: HSLVision supplies all classes except GoalPost, and NAO supplies GoalPost. The combined candidates pass through the existing confidence filtering and NMS and are cached as one detection result per model.
+Object detections require either `object_output`, or both `hslvision_output` and `nao_output`, as `float32` tensors. Legacy object rows use shape `[1, 300, 6]` and contain `[x_min, y_min, x_max, y_max, confidence, class_index]`. The native Hydra contract uses `object_output [1, 300, 9]` and appends `[anchor_x, anchor_y, anchor_presence]`. Coordinates are full input-image pixel coordinates. Class indices must be finite integral values from 0 through 6: Ball, GoalPost, LSpot, PenaltySpot, Robot, TSpot, and XSpot. Anchors are retained without a presence cutoff for every class except Robot, whose anchor is always marked unavailable. The object and its anchor remain paired through the confidence filter and class-agnostic NMS. The legacy two-head models use the selection behavior from `hslvision-plus-old-goalposts`: HSLVision supplies all classes except GoalPost, and NAO supplies GoalPost.
+
+Native Hydra models must provide `line_output [1, 300, 21]` alongside the nine-column object output. A line row contains `[x_min, y_min, x_max, y_max, confidence, class_index]` followed by five ordered `(x, y, presence)` triples. The only valid line class is `0`. Lines with confidence at least `0.39` are retained independently of object filtering, and neither object NMS nor cross-head NMS is applied to them. All five points are retained without a presence cutoff, so each accepted row draws four ordered segments. Published line coordinates are clipped to the inclusive native image bounds and shifted by `-0.5` to the pixel-centre convention. Replay adds the half pixel back when mapping them into the image texture. Object coordinates and anchors are not shifted.
+
+The native supplement also retains all 300 unfiltered rows from each head in model order. Raw object rows keep the network's anchor values even for Robot and explicitly mark that anchor as unsupervised. Raw line rows keep their original vertex coordinates and presences. The viewer's raw-head mode has independent per-head score filters so low-scoring or object-NMS-suppressed rows remain available without making the default view unreadable.
 
 `person_pose_output` is optional and must be `float32 [1, 300, 57]`: six pose-object values followed by 17 `(x, y, confidence)` triples in COCO order: nose, left eye, right eye, left ear, right ear, left shoulder, right shoulder, left elbow, right elbow, left hand, right hand, left hip, right hip, left knee, right knee, left foot, right foot. Pose class indices use the COCO `YOLOObjectLabel` mapping (`0` is Person), not the RoboCup object mapping. Coordinates use the same full-image pixel space. For older human-pose models, `pose_output [1, 300, 57]` remains supported when the model has no `branches` metadata.
 
@@ -60,7 +64,9 @@ The Models tab manages cached runs. Model runs can be renamed, hidden, or perman
 
 Model-run directories may be synced between machines. The recording can live at a different absolute path on the destination, but the sync must preserve its size and modification time so the viewer can safely associate the runs with it.
 
-`Show field features` overlays cached field-feature points and is enabled by default. `Show robot poses` is also enabled by default; `Show person poses` controls the human-pose overlay. Pose bounding boxes use the display-confidence threshold, while skeleton lines and keypoints use the separate keypoint-confidence threshold. The viewport distinguishes unavailable optional outputs from valid empty results in its status line. Older runs remain usable but report uncaptured outputs as unavailable; prerender them again to populate the new overlays.
+`Show field features` overlays cached field-feature points and is enabled by default. `Show object boxes`, `Show object anchors`, and `Show field lines` control the native Hydra layers independently. Object boxes and anchors share the object display-confidence filter; anchor presence uses the keypoint-confidence filter only for display. Lines have an independent display-confidence filter and their point presences never hide segments. FieldLine bounding boxes are intentionally never drawn; only the five ordered vertices and their connected polyline appear. `Show Hydra row details` labels anchor coordinates/presence, line class/score, and each ordered vertex's coordinates/predicted presence. Presence is a network score, not occlusion ground truth. `Show raw Hydra head rows` exposes pre-threshold and pre-NMS rows with separate object and line score filters; it is disabled by default. `Show robot poses` is also enabled by default; `Show person poses` controls the human-pose overlay. Pose bounding boxes use the display-confidence threshold, while skeleton lines and keypoints use the separate keypoint-confidence threshold. The viewport distinguishes an unavailable Hydra supplement from a present but empty result. Older runs remain usable and report uncaptured outputs as unavailable; prerender them again to populate the new overlays.
+
+Hydra anchors and lines are stored in a versioned sidecar beside each primary prediction chunk. The sidecar has one timestamp-matched supplement per frame and one optional anchor slot per surviving object. The primary object cache layout is unchanged, so existing replay caches remain readable.
 
 Useful controls:
 
@@ -73,6 +79,29 @@ Useful controls:
 An unavailable prediction is shown separately from a valid empty detection result.
 
 ## Validation
+
+Force a lazy decode of every primary and supplemental cache chunk without initializing ONNX Runtime:
+
+```bash
+./detection-replay verify /path/to/recording.mcap
+```
+
+`verify` checks each cached prediction's frame ID and timestamp against the recording index, validates object/anchor alignment, and requires every captured native Hydra frame to contain all 300 raw rows from both heads. Its per-run summary separates present Hydra messages, missing messages, empty object/line frames, retained detections, and raw-row totals. This is the preferred integrity check after relocating or downloading a prerender; `view` then provides normal interactive playback without inference.
+
+Use `--run MODEL_KEY_OR_LABEL` to verify a delivered run independently of unrelated legacy caches in the same cache directory.
+
+Export deterministic visual evidence from the same cached viewer data as SVG:
+
+```bash
+./detection-replay snapshot /path/to/recording.mcap \
+  --run candidate --frame 1000 --output frame-1000.svg
+
+./detection-replay snapshot /path/to/recording.mcap \
+  --run candidate --frame 1000 --output frame-1000-raw.svg \
+  --raw --details --object-confidence 0.05 --line-confidence 0.20
+```
+
+The snapshot overlay follows the viewer's native-coordinate and half-pixel conventions and never draws FieldLine boxes. Raw mode is intended for evidence and diagnostics; normal interactive playback keeps it disabled.
 
 Use a short range before prerendering an entire recording:
 

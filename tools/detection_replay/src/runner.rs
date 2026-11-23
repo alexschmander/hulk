@@ -19,10 +19,10 @@ use tokio::task::JoinHandle;
 use types::{
     object_detection::{Object, RobocupObjectLabel, YOLOObjectLabel},
     parameters::{
-        DetectionParameters, FieldFeatureDetectionParameters, ObjectDetectionParameters,
-        PoseDetectionParameters,
+        DetectionParameters, FieldFeatureDetectionParameters, HydraLineDetectionParameters,
+        ObjectDetectionParameters, PoseDetectionParameters,
     },
-    pose_detection::{FieldFeatureDetection, Pose, RobotPoseDetection},
+    pose_detection::{FieldFeatureDetection, HydraDetectionSupplement, Pose, RobotPoseDetection},
     time_wrapper::TimeWrapper,
 };
 
@@ -280,6 +280,11 @@ where
         .build()
         .await
         .wrap_err("failed to subscribe to detected_field_features")?;
+    let hydra_supplement_subscriber = node
+        .subscriber::<TimeWrapper<HydraDetectionSupplement>>("hydra_detection_supplement")
+        .build()
+        .await
+        .wrap_err("failed to subscribe to hydra_detection_supplement")?;
     let inference_subscriber = node
         .subscriber::<Duration>("inference_duration")
         .build()
@@ -300,6 +305,7 @@ where
         poses: pose_subscriber,
         robot_poses: robot_pose_subscriber,
         field_features: field_feature_subscriber,
+        hydra_supplement: hydra_supplement_subscriber,
         inference: inference_subscriber,
         postprocessing: postprocessing_subscriber,
         non_maximum_suppression: nms_subscriber,
@@ -335,11 +341,27 @@ where
             result = detector_task.join() => return Err(detector_stopped(result)),
         }
 
-        let (objects, poses, robot_poses, field_features, inference, postprocessing, nms) = tokio::select! {
+        let (
+            objects,
+            poses,
+            robot_poses,
+            field_features,
+            hydra_supplement,
+            inference,
+            postprocessing,
+            nms,
+        ) = tokio::select! {
             result = receive_outputs(&output_subscribers, config.output_timeout) => result.wrap_err_with(|| format!("failed to receive outputs for frame {}", frame.frame_index))?,
             result = detector_task.join() => return Err(detector_stopped(result)),
         };
-        verify_output_timestamps(&frame, &objects, &poses, &robot_poses, &field_features)?;
+        verify_output_timestamps(
+            &frame,
+            &objects,
+            &poses,
+            &robot_poses,
+            &field_features,
+            &hydra_supplement,
+        )?;
         store.append_with_optional_outputs(
             Prediction {
                 frame_index: frame.frame_index,
@@ -356,6 +378,8 @@ where
             model_info
                 .has_robot_pose_output
                 .then_some(robot_poses.inner),
+            (model_info.has_object_anchor_output && model_info.has_line_output)
+                .then_some(hydra_supplement.inner),
         )?;
         progress(RunProgress {
             label: &config.label,
@@ -377,6 +401,7 @@ struct DetectorOutputSubscribers {
     poses: Subscriber<TimeWrapper<Vec<Pose<YOLOObjectLabel>>>>,
     robot_poses: Subscriber<TimeWrapper<Vec<RobotPoseDetection>>>,
     field_features: Subscriber<TimeWrapper<Vec<FieldFeatureDetection>>>,
+    hydra_supplement: Subscriber<TimeWrapper<HydraDetectionSupplement>>,
     inference: Subscriber<Duration>,
     postprocessing: Subscriber<Duration>,
     non_maximum_suppression: Subscriber<Duration>,
@@ -429,7 +454,9 @@ fn classify_cleanup_join(
     };
     if timed_out {
         match result {
-            Ok(()) => bail!("detection cleanup exceeded its warning threshold"),
+            Ok(()) => {
+                bail!("detection cleanup exceeded its warning threshold");
+            }
             Err(error) => Err(error.wrap_err("detection cleanup exceeded its warning threshold")),
         }
     } else {
@@ -445,6 +472,7 @@ async fn receive_outputs(
     TimeWrapper<Vec<Pose<YOLOObjectLabel>>>,
     TimeWrapper<Vec<RobotPoseDetection>>,
     TimeWrapper<Vec<FieldFeatureDetection>>,
+    TimeWrapper<HydraDetectionSupplement>,
     Duration,
     Duration,
     Duration,
@@ -481,6 +509,13 @@ async fn receive_outputs(
             },
             async {
                 subscribers
+                    .hydra_supplement
+                    .recv()
+                    .await
+                    .wrap_err("failed to receive hydra_detection_supplement")
+            },
+            async {
+                subscribers
                     .inference
                     .recv()
                     .await
@@ -513,24 +548,28 @@ fn verify_output_timestamps(
     poses: &TimeWrapper<Vec<Pose<YOLOObjectLabel>>>,
     robot_poses: &TimeWrapper<Vec<RobotPoseDetection>>,
     field_features: &TimeWrapper<Vec<FieldFeatureDetection>>,
+    hydra_supplement: &TimeWrapper<HydraDetectionSupplement>,
 ) -> Result<()> {
     let object_time = objects.time.as_nanos();
     let pose_time = poses.time.as_nanos();
     let robot_pose_time = robot_poses.time.as_nanos();
     let field_feature_time = field_features.time.as_nanos();
+    let hydra_supplement_time = hydra_supplement.time.as_nanos();
     if object_time != frame.timestamp_nanos
         || pose_time != frame.timestamp_nanos
         || robot_pose_time != frame.timestamp_nanos
         || field_feature_time != frame.timestamp_nanos
+        || hydra_supplement_time != frame.timestamp_nanos
     {
         bail!(
-            "frame {} output timestamps do not match image timestamp {} (objects {}, poses {}, robot poses {}, field features {})",
+            "frame {} output timestamps do not match image timestamp {} (objects {}, poses {}, robot poses {}, field features {}, Hydra supplement {})",
             frame.frame_index,
             frame.timestamp_nanos,
             object_time,
             pose_time,
             robot_pose_time,
             field_feature_time,
+            hydra_supplement_time,
         );
     }
     Ok(())
@@ -569,6 +608,9 @@ fn write_detection_parameters(
         field_feature_detection_parameters: FieldFeatureDetectionParameters {
             minimum_candidate_confidence: thresholds.minimum_candidate_confidence,
             maximum_suppression_distance_in_pixels: 8.0,
+        },
+        hydra_line_detection_parameters: HydraLineDetectionParameters {
+            minimum_candidate_confidence: 0.39,
         },
     };
     let path = directory.join("detection.json5");

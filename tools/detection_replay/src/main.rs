@@ -1,12 +1,16 @@
 use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use clap::{Parser, Subcommand};
-use color_eyre::{Result, eyre::Context};
+use color_eyre::{
+    Result,
+    eyre::{Context, ContextCompat},
+};
 use detection::ExecutionProvider;
-use detection_replay::{DetectionThresholds, ModelRunConfig, Recording, run_model};
+use detection_replay::{DetectionThresholds, ModelRunConfig, ModelRunState, Recording, run_model};
 use tracing_subscriber::EnvFilter;
 
 mod app;
+mod snapshot;
 mod timeline;
 
 #[derive(Debug, Parser)]
@@ -56,6 +60,39 @@ enum Command {
         cache_dir: Option<PathBuf>,
         #[command(flatten)]
         frames: FrameRangeArguments,
+    },
+    /// Decode every cached prediction in the range and verify timestamps and Hydra heads.
+    Verify {
+        recording: PathBuf,
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        /// Verify only the run with this cache key or label.
+        #[arg(long)]
+        run: Option<String>,
+        #[command(flatten)]
+        frames: FrameRangeArguments,
+    },
+    /// Export one cached frame with the same Hydra overlay conventions as the viewer.
+    Snapshot {
+        recording: PathBuf,
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        frame: usize,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        raw: bool,
+        #[arg(long)]
+        details: bool,
+        #[arg(long, default_value_t = 0.25)]
+        object_confidence: f32,
+        #[arg(long, default_value_t = 0.5)]
+        anchor_presence: f32,
+        #[arg(long, default_value_t = 0.39)]
+        line_confidence: f32,
     },
 }
 
@@ -245,6 +282,53 @@ fn main() -> Result<()> {
             let (start_frame, end_frame) = frames.resolve(recording.frame_count())?;
             app::run(recording, start_frame, end_frame)?;
         }
+        Command::Verify {
+            recording,
+            cache_dir,
+            run,
+            frames,
+        } => {
+            let recording_path = resolve_recording(recording);
+            let cache_dir = cache_dir.unwrap_or_else(|| default_cache_dir(&recording_path));
+            let recording = Recording::open(recording_path, cache_dir)?;
+            report_recording_warning(&recording);
+            let (start_frame, end_frame) = frames.resolve(recording.frame_count())?;
+            verify_cached_runs(&recording, start_frame, end_frame, run.as_deref())?;
+        }
+        Command::Snapshot {
+            recording,
+            cache_dir,
+            run,
+            frame,
+            output,
+            raw,
+            details,
+            object_confidence,
+            anchor_presence,
+            line_confidence,
+        } => {
+            let recording_path = resolve_recording(recording);
+            let cache_dir = cache_dir.unwrap_or_else(|| default_cache_dir(&recording_path));
+            let recording = Recording::open(recording_path, cache_dir)?;
+            if frame >= recording.frame_count() {
+                color_eyre::eyre::bail!(
+                    "frame {frame} is out of range for {} frames",
+                    recording.frame_count()
+                );
+            }
+            snapshot::export(
+                &recording,
+                &run,
+                frame,
+                &output,
+                raw,
+                details,
+                object_confidence,
+                anchor_presence,
+                line_confidence,
+            )?;
+            println!("wrote {}", output.display());
+        }
     }
 
     Ok(())
@@ -261,6 +345,171 @@ fn configure_gpu_visibility(command: &Command) {
     // SAFETY: this runs at process startup, before ONNX Runtime initialization or
     // creation of the Tokio worker threads that may load CUDA.
     unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", gpu.to_string()) };
+}
+
+fn verify_cached_runs(
+    recording: &Recording,
+    start_frame: usize,
+    end_frame: usize,
+    selected_run: Option<&str>,
+) -> Result<()> {
+    let (runs, load_errors) = recording.load_runs_with_errors()?;
+    if selected_run.is_none() && !load_errors.is_empty() {
+        color_eyre::eyre::bail!(
+            "{} cached runs failed inspection: {}",
+            load_errors.len(),
+            load_errors.join("; ")
+        );
+    }
+    if selected_run.is_some() {
+        for error in &load_errors {
+            eprintln!("warning: ignored unrelated invalid cached run: {error}");
+        }
+    }
+    let runs = runs
+        .into_iter()
+        .filter(|run| {
+            selected_run.is_none_or(|selected| run.key == selected || run.label == selected)
+        })
+        .collect::<Vec<_>>();
+    if runs.is_empty() {
+        color_eyre::eyre::bail!(
+            "no cached run matched {}",
+            selected_run.unwrap_or("the selection")
+        );
+    }
+    for run in runs {
+        let expected_frames = end_frame - start_frame + 1;
+        if selected_run.is_some() {
+            let manifest = run.manifest.as_ref().wrap_err_with(|| {
+                format!("selected run {} is not a model-run manifest", run.key)
+            })?;
+            if manifest.state != ModelRunState::Complete {
+                color_eyre::eyre::bail!(
+                    "selected run {} is {:?}, not complete",
+                    run.key,
+                    manifest.state
+                );
+            }
+            let available = run.available_count(start_frame..=end_frame);
+            if available != expected_frames {
+                color_eyre::eyre::bail!(
+                    "selected run {} covers {available} of {expected_frames} requested frames",
+                    run.key
+                );
+            }
+        }
+        let mut frame = start_frame;
+        let mut prediction_frames = 0_usize;
+        let mut object_rows = 0_usize;
+        let mut empty_object_frames = 0_usize;
+        let mut hydra_messages = 0_usize;
+        let mut missing_hydra_messages = 0_usize;
+        let mut empty_line_frames = 0_usize;
+        let mut anchors = 0_usize;
+        let mut lines = 0_usize;
+        let mut raw_object_rows = 0_usize;
+        let mut raw_line_rows = 0_usize;
+        while frame <= end_frame {
+            if !run.is_available(frame) {
+                frame += 1;
+                continue;
+            }
+            let chunk = run.prediction_chunk(frame)?;
+            let chunk_end = chunk
+                .start_frame
+                .saturating_add(chunk.predictions.len().saturating_sub(1))
+                .min(end_frame);
+            for current in frame..=chunk_end {
+                let offset = current - chunk.start_frame;
+                let Some(prediction) = &chunk.predictions[offset] else {
+                    continue;
+                };
+                let expected_timestamp = recording.frames()[current].timestamp_nanos;
+                if prediction.frame_index != current
+                    || prediction.timestamp_nanos != expected_timestamp
+                {
+                    color_eyre::eyre::bail!(
+                        "run {} frame {current} disagrees with the recording index",
+                        run.key
+                    );
+                }
+                prediction_frames += 1;
+                object_rows += prediction.objects.len();
+                empty_object_frames += usize::from(prediction.objects.is_empty());
+                match &chunk.hydra_supplements[offset] {
+                    Some(supplement) => {
+                        if supplement.object_anchors.len() != prediction.objects.len() {
+                            color_eyre::eyre::bail!(
+                                "run {} frame {current} has {} anchors for {} objects",
+                                run.key,
+                                supplement.object_anchors.len(),
+                                prediction.objects.len()
+                            );
+                        }
+                        if supplement.raw_objects.len() != 300 || supplement.raw_lines.len() != 300
+                        {
+                            color_eyre::eyre::bail!(
+                                "run {} frame {current} does not contain all 300 raw rows per Hydra head",
+                                run.key
+                            );
+                        }
+                        hydra_messages += 1;
+                        empty_line_frames += usize::from(supplement.lines.is_empty());
+                        anchors += supplement.object_anchors.iter().flatten().count();
+                        lines += supplement.lines.len();
+                        raw_object_rows += supplement.raw_objects.len();
+                        raw_line_rows += supplement.raw_lines.len();
+                    }
+                    None => missing_hydra_messages += 1,
+                }
+            }
+            frame = chunk_end.saturating_add(1);
+        }
+        if selected_run.is_some()
+            && (prediction_frames != expected_frames
+                || hydra_messages != expected_frames
+                || missing_hydra_messages != 0)
+        {
+            color_eyre::eyre::bail!(
+                "selected run {} decoded {prediction_frames}/{expected_frames} predictions and {hydra_messages}/{expected_frames} Hydra messages ({missing_hydra_messages} missing)",
+                run.key
+            );
+        }
+        let model_blake3 = run.manifest.as_ref().map_or_else(
+            || "recorded".to_string(),
+            |manifest| hex_digest(&manifest.model_hash),
+        );
+        println!(
+            "run={} label={:?} model_blake3={} prediction_frames={} object_rows={} empty_object_frames={} hydra_messages={} missing_hydra_messages={} anchors={} line_rows={} empty_line_frames={} raw_object_rows={} raw_line_rows={}",
+            run.key,
+            run.label,
+            model_blake3,
+            prediction_frames,
+            object_rows,
+            empty_object_frames,
+            hydra_messages,
+            missing_hydra_messages,
+            anchors,
+            lines,
+            empty_line_frames,
+            raw_object_rows,
+            raw_line_rows,
+        );
+    }
+    Ok(())
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    bytes.iter().fold(
+        String::with_capacity(bytes.len() * 2),
+        |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to a String cannot fail");
+            output
+        },
+    )
 }
 
 fn report_recording_warning(recording: &Recording) {

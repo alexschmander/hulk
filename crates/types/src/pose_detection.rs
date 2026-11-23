@@ -6,7 +6,12 @@ use coordinate_systems::Pixel;
 use hsl_network_messages::Team;
 use linear_algebra::{Point2, point};
 
-use crate::object_detection::{LabelIndex, NUMBER_OF_VALUES_PER_OBJECT, Object, YOLOObjectLabel};
+use crate::{
+    bounding_box::BoundingBox,
+    object_detection::{
+        LabelIndex, NUMBER_OF_VALUES_PER_OBJECT, Object, RobocupObjectLabel, YOLOObjectLabel,
+    },
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ros_z::Message)]
 pub enum DetectionRegion {
@@ -19,6 +24,7 @@ pub const OVERALL_KEYPOINT_INDEX_MASK: [usize; 15] =
 pub const VISUAL_REFEREE_KEYPOINT_INDEX_MASK: [usize; 8] = [5, 6, 7, 8, 9, 10, 15, 16];
 pub const NUMBER_OF_VALUES_PER_POSE: usize = 57;
 pub const NUMBER_OF_VALUES_PER_ROBOT_POSE: usize = 48;
+pub const NUMBER_OF_LINE_KEYPOINTS: usize = 5;
 pub const POSE_KEYPOINT_OFFSET: usize = NUMBER_OF_VALUES_PER_OBJECT;
 pub const POSE_SKELETON_EDGES: [(usize, usize); 16] = [
     (2, 0),
@@ -58,6 +64,30 @@ pub const ROBOT_POSE_SKELETON_EDGES: [(usize, usize); 13] = [
 pub struct Keypoint {
     pub point: Point2<Pixel>,
     pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ros_z::Message)]
+pub struct FieldLineDetection {
+    pub bounding_box: BoundingBox,
+    pub keypoints: [Keypoint; NUMBER_OF_LINE_KEYPOINTS],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ros_z::Message)]
+pub struct HydraRawObjectDetection {
+    pub object: Object<RobocupObjectLabel>,
+    pub anchor: Keypoint,
+    pub anchor_is_supervised: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ros_z::Message)]
+pub struct HydraDetectionSupplement {
+    /// Anchor entries are aligned with the post-NMS `detected_objects` message.
+    pub object_anchors: Vec<Option<Keypoint>>,
+    pub lines: Vec<FieldLineDetection>,
+    /// Unfiltered rows from the native object head, in model output order.
+    pub raw_objects: Vec<HydraRawObjectDetection>,
+    /// Unfiltered rows from the native line head, in model output order.
+    pub raw_lines: Vec<FieldLineDetection>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ros_z::Message)]

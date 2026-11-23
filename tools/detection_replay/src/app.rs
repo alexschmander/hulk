@@ -21,8 +21,8 @@ use egui_dock::{DockArea, DockState, Node, Split, TabViewer};
 use types::{
     object_detection::{Object, RobocupObjectLabel, YOLOObjectLabel},
     pose_detection::{
-        FieldFeatureDetection, FieldFeatureLabel, Keypoint, POSE_SKELETON_EDGES, Pose,
-        ROBOT_POSE_SKELETON_EDGES, RobotPoseDetection,
+        FieldFeatureDetection, FieldFeatureLabel, HydraDetectionSupplement, Keypoint,
+        POSE_SKELETON_EDGES, Pose, ROBOT_POSE_SKELETON_EDGES, RobotPoseDetection,
     },
 };
 
@@ -158,9 +158,17 @@ struct ReplayApp {
     playback_accumulator: f64,
     last_playback_update: Instant,
     confidence_filter: f32,
+    line_confidence_filter: f32,
+    raw_object_confidence_filter: f32,
+    raw_line_confidence_filter: f32,
+    show_objects: bool,
     show_person_poses: bool,
     show_robot_poses: bool,
     show_field_features: bool,
+    show_object_anchors: bool,
+    show_field_lines: bool,
+    show_raw_hydra_rows: bool,
+    show_hydra_details: bool,
     keypoint_confidence_filter: f32,
     camera_zoom: f32,
     camera_pan: Vec2,
@@ -204,6 +212,7 @@ struct LoadedFramePrediction {
     prediction: Arc<Prediction>,
     field_features: Option<Arc<Vec<FieldFeatureDetection>>>,
     robot_poses: Option<Arc<Vec<RobotPoseDetection>>>,
+    hydra_supplement: Option<Arc<HydraDetectionSupplement>>,
 }
 
 impl ReplayApp {
@@ -282,10 +291,18 @@ impl ReplayApp {
             playback_speed: 1.0,
             playback_accumulator: 0.0,
             last_playback_update: Instant::now(),
-            confidence_filter: 0.5,
+            confidence_filter: 0.25,
+            line_confidence_filter: 0.39,
+            raw_object_confidence_filter: 0.25,
+            raw_line_confidence_filter: 0.39,
+            show_objects: true,
             show_person_poses: false,
             show_robot_poses: true,
             show_field_features: true,
+            show_object_anchors: true,
+            show_field_lines: true,
+            show_raw_hydra_rows: false,
+            show_hydra_details: false,
             keypoint_confidence_filter: 0.5,
             camera_zoom: 1.0,
             camera_pan: Vec2::ZERO,
@@ -348,6 +365,7 @@ impl ReplayApp {
                     self.prediction_errors.remove(&key);
                     if chunk.predictions.len() != chunk.field_features.len()
                         || chunk.predictions.len() != chunk.robot_poses.len()
+                        || chunk.predictions.len() != chunk.hydra_supplements.len()
                     {
                         self.prediction_errors.insert(
                             key,
@@ -360,13 +378,17 @@ impl ReplayApp {
                         .into_iter()
                         .zip(chunk.field_features)
                         .zip(chunk.robot_poses)
-                        .map(|((prediction, field_features), robot_poses)| {
-                            prediction.map(|prediction| LoadedFramePrediction {
-                                prediction,
-                                field_features,
-                                robot_poses,
-                            })
-                        })
+                        .zip(chunk.hydra_supplements)
+                        .map(
+                            |(((prediction, field_features), robot_poses), hydra_supplement)| {
+                                prediction.map(|prediction| LoadedFramePrediction {
+                                    prediction,
+                                    field_features,
+                                    robot_poses,
+                                    hydra_supplement,
+                                })
+                            },
+                        )
                         .collect();
                     self.loaded_prediction_chunks.insert(key, predictions);
                 }
@@ -623,11 +645,30 @@ impl ReplayApp {
         ui.add(
             egui::Slider::new(&mut self.confidence_filter, 0.0..=1.0).text("display confidence"),
         );
+        ui.checkbox(&mut self.show_objects, "Show object boxes");
         ui.checkbox(&mut self.show_field_features, "Show field features");
+        ui.checkbox(&mut self.show_object_anchors, "Show object anchors");
+        ui.checkbox(&mut self.show_field_lines, "Show field lines");
+        ui.add_enabled(
+            self.show_field_lines,
+            egui::Slider::new(&mut self.line_confidence_filter, 0.0..=1.0).text("line confidence"),
+        );
+        ui.checkbox(&mut self.show_hydra_details, "Show Hydra row details");
+        ui.checkbox(&mut self.show_raw_hydra_rows, "Show raw Hydra head rows");
+        ui.add_enabled(
+            self.show_raw_hydra_rows,
+            egui::Slider::new(&mut self.raw_object_confidence_filter, 0.0..=1.0)
+                .text("raw object confidence"),
+        );
+        ui.add_enabled(
+            self.show_raw_hydra_rows,
+            egui::Slider::new(&mut self.raw_line_confidence_filter, 0.0..=1.0)
+                .text("raw line confidence"),
+        );
         ui.checkbox(&mut self.show_robot_poses, "Show robot poses");
         ui.checkbox(&mut self.show_person_poses, "Show person poses");
         ui.add_enabled(
-            self.show_person_poses || self.show_robot_poses,
+            self.show_person_poses || self.show_robot_poses || self.show_object_anchors,
             egui::Slider::new(&mut self.keypoint_confidence_filter, 0.0..=1.0)
                 .text("keypoint confidence"),
         );
@@ -992,14 +1033,44 @@ impl ReplayApp {
         match prediction {
             PredictionDisplay::Ready(loaded) => {
                 let prediction = &loaded.prediction;
-                draw_objects(
-                    ui,
-                    viewport,
-                    image_rect,
-                    image_size,
-                    &prediction.objects,
-                    self.confidence_filter,
-                );
+                if self.show_objects {
+                    draw_objects(
+                        ui,
+                        viewport,
+                        image_rect,
+                        image_size,
+                        &prediction.objects,
+                        self.confidence_filter,
+                    );
+                }
+                if let Some(supplement) = &loaded.hydra_supplement {
+                    draw_hydra_supplement(
+                        ui,
+                        viewport,
+                        image_rect,
+                        image_size,
+                        &prediction.objects,
+                        supplement,
+                        self.show_object_anchors,
+                        self.show_field_lines,
+                        self.confidence_filter,
+                        self.keypoint_confidence_filter,
+                        self.line_confidence_filter,
+                        self.show_hydra_details,
+                    );
+                    if self.show_raw_hydra_rows {
+                        draw_raw_hydra_rows(
+                            ui,
+                            viewport,
+                            image_rect,
+                            image_size,
+                            supplement,
+                            self.raw_object_confidence_filter,
+                            self.raw_line_confidence_filter,
+                            self.show_hydra_details,
+                        );
+                    }
+                }
                 if self.show_field_features
                     && let Some(field_features) = &loaded.field_features
                 {
@@ -1091,8 +1162,36 @@ impl ReplayApp {
                         format!("{count} robot poses")
                     },
                 );
+                let hydra_status = loaded.hydra_supplement.as_ref().map_or_else(
+                    || "Hydra anchors/lines unavailable".to_string(),
+                    |supplement| {
+                        let anchors = prediction
+                            .objects
+                            .iter()
+                            .zip(&supplement.object_anchors)
+                            .filter(|(object, anchor)| {
+                                object.bounding_box.confidence >= self.confidence_filter
+                                    && anchor.as_ref().is_some_and(|anchor| {
+                                        anchor.confidence >= self.keypoint_confidence_filter
+                                    })
+                            })
+                            .count();
+                        let lines = supplement
+                            .lines
+                            .iter()
+                            .filter(|line| {
+                                line.bounding_box.confidence >= self.line_confidence_filter
+                            })
+                            .count();
+                        format!(
+                            "{anchors} object anchors, {lines} field lines, {}+{} raw rows",
+                            supplement.raw_objects.len(),
+                            supplement.raw_lines.len()
+                        )
+                    },
+                );
                 ui.label(format!(
-                    "{object_count} detections, {field_feature_status}, {robot_pose_status}, {person_pose_status}, {timing}"
+                    "{object_count} detections, {hydra_status}, {field_feature_status}, {robot_pose_status}, {person_pose_status}, {timing}"
                 ));
             }
             PredictionDisplay::Loading => {
@@ -1573,6 +1672,257 @@ fn draw_objects(
         );
         painter.galley(position, galley, Color32::WHITE);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_hydra_supplement(
+    ui: &Ui,
+    clip: Rect,
+    image_rect: Rect,
+    image_size: Vec2,
+    objects: &[Object<RobocupObjectLabel>],
+    supplement: &HydraDetectionSupplement,
+    show_object_anchors: bool,
+    show_field_lines: bool,
+    object_confidence_filter: f32,
+    anchor_confidence_filter: f32,
+    line_confidence_filter: f32,
+    show_details: bool,
+) {
+    let scale = vec2(
+        image_rect.width() / image_size.x.max(1.0),
+        image_rect.height() / image_size.y.max(1.0),
+    );
+    let painter = ui.painter_at(clip);
+
+    if show_object_anchors {
+        for (object, anchor) in objects.iter().zip(&supplement.object_anchors) {
+            let Some(anchor) = anchor else {
+                continue;
+            };
+            if object.bounding_box.confidence < object_confidence_filter
+                || anchor.confidence < anchor_confidence_filter
+            {
+                continue;
+            }
+            let color = label_color(object.label);
+            let point = pose_point(image_rect, scale, *anchor);
+            let box_center = object.bounding_box.area.center();
+            let box_center =
+                image_rect.min + vec2(box_center.x() * scale.x, box_center.y() * scale.y);
+            painter.line_segment(
+                [box_center, point],
+                Stroke::new(1.5_f32, color.gamma_multiply(0.7)),
+            );
+            painter.circle_filled(point, 4.0, color);
+            painter.circle_stroke(point, 7.0, Stroke::new(1.5_f32, Color32::WHITE));
+            if show_details {
+                paint_overlay_text(
+                    &painter,
+                    point + vec2(8.0, 5.0),
+                    format!(
+                        "{} anchor x={:.2} y={:.2} p={:.3}",
+                        object.label.as_str(),
+                        anchor.point.x(),
+                        anchor.point.y(),
+                        anchor.confidence
+                    ),
+                    color,
+                );
+            }
+        }
+    }
+
+    if show_field_lines {
+        let color = Color32::from_rgb(70, 230, 255);
+        for line in supplement
+            .lines
+            .iter()
+            .filter(|line| line.bounding_box.confidence >= line_confidence_filter)
+        {
+            draw_field_line(
+                &painter,
+                image_rect,
+                scale,
+                line,
+                0.5,
+                color,
+                false,
+                show_details,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_raw_hydra_rows(
+    ui: &Ui,
+    clip: Rect,
+    image_rect: Rect,
+    image_size: Vec2,
+    supplement: &HydraDetectionSupplement,
+    object_confidence_filter: f32,
+    line_confidence_filter: f32,
+    show_details: bool,
+) {
+    let scale = vec2(
+        image_rect.width() / image_size.x.max(1.0),
+        image_rect.height() / image_size.y.max(1.0),
+    );
+    let painter = ui.painter_at(clip);
+    for raw in supplement
+        .raw_objects
+        .iter()
+        .filter(|raw| raw.object.bounding_box.confidence >= object_confidence_filter)
+    {
+        let color = label_color(raw.object.label).gamma_multiply(0.65);
+        let bounding_box = raw.object.bounding_box;
+        let min = image_rect.min
+            + vec2(
+                bounding_box.area.min.x() * scale.x,
+                bounding_box.area.min.y() * scale.y,
+            );
+        let max = image_rect.min
+            + vec2(
+                bounding_box.area.max.x() * scale.x,
+                bounding_box.area.max.y() * scale.y,
+            );
+        let rect = Rect::from_min_max(min, max).intersect(clip);
+        painter.rect_stroke(
+            rect,
+            egui::CornerRadius::same(2),
+            Stroke::new(1.0_f32, color),
+            StrokeKind::Inside,
+        );
+        paint_overlay_text(
+            &painter,
+            rect.min + vec2(3.0, 15.0),
+            format!(
+                "raw {} {:.3}",
+                raw.object.label.as_str(),
+                bounding_box.confidence
+            ),
+            color,
+        );
+        let point = pose_point(image_rect, scale, raw.anchor);
+        if raw.anchor_is_supervised {
+            painter.circle_stroke(point, 5.0, Stroke::new(1.0_f32, color));
+        } else {
+            painter.line_segment(
+                [point - vec2(5.0, 5.0), point + vec2(5.0, 5.0)],
+                Stroke::new(1.5_f32, Color32::LIGHT_RED),
+            );
+            painter.line_segment(
+                [point - vec2(5.0, -5.0), point + vec2(5.0, -5.0)],
+                Stroke::new(1.5_f32, Color32::LIGHT_RED),
+            );
+            paint_overlay_text(
+                &painter,
+                point + vec2(7.0, -13.0),
+                "UNSUPERVISED anchor".to_string(),
+                Color32::LIGHT_RED,
+            );
+        }
+        if show_details {
+            let supervision = if raw.anchor_is_supervised {
+                "supervised"
+            } else {
+                "UNSUPERVISED"
+            };
+            paint_overlay_text(
+                &painter,
+                point + vec2(7.0, if raw.anchor_is_supervised { -13.0 } else { 2.0 }),
+                format!(
+                    "raw anchor x={:.2} y={:.2} p={:.3} {supervision}",
+                    raw.anchor.point.x(),
+                    raw.anchor.point.y(),
+                    raw.anchor.confidence
+                ),
+                color,
+            );
+        }
+    }
+
+    let color = Color32::from_rgb(255, 170, 55);
+    for line in supplement
+        .raw_lines
+        .iter()
+        .filter(|line| line.bounding_box.confidence >= line_confidence_filter)
+    {
+        draw_field_line(
+            &painter,
+            image_rect,
+            scale,
+            line,
+            0.0,
+            color,
+            true,
+            show_details,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_field_line(
+    painter: &egui::Painter,
+    image_rect: Rect,
+    scale: Vec2,
+    line: &types::pose_detection::FieldLineDetection,
+    coordinate_shift: f32,
+    color: Color32,
+    raw: bool,
+    show_details: bool,
+) {
+    let point_position = |keypoint: Keypoint| {
+        image_rect.min
+            + vec2(
+                (keypoint.point.x() + coordinate_shift) * scale.x,
+                (keypoint.point.y() + coordinate_shift) * scale.y,
+            )
+    };
+    for points in line.keypoints.windows(2) {
+        painter.line_segment(
+            [point_position(points[0]), point_position(points[1])],
+            Stroke::new(if raw { 1.0_f32 } else { 2.5_f32 }, color),
+        );
+    }
+    for (index, keypoint) in line.keypoints.iter().copied().enumerate() {
+        let point = point_position(keypoint);
+        painter.circle_filled(point, if raw { 2.0 } else { 3.0 }, color);
+        if show_details {
+            paint_overlay_text(
+                painter,
+                point + vec2(5.0, 5.0),
+                format!(
+                    "v{index} x={:.2} y={:.2} p={:.3}",
+                    keypoint.point.x(),
+                    keypoint.point.y(),
+                    keypoint.confidence
+                ),
+                color,
+            );
+        }
+    }
+    paint_overlay_text(
+        painter,
+        point_position(line.keypoints[0]) + vec2(4.0, -14.0),
+        format!(
+            "{}FieldLine class=0 score={:.3}",
+            if raw { "raw " } else { "" },
+            line.bounding_box.confidence
+        ),
+        color,
+    );
+}
+
+fn paint_overlay_text(painter: &egui::Painter, position: Pos2, text: String, color: Color32) {
+    let galley = painter.layout_no_wrap(text, FontId::monospace(10.0), Color32::WHITE);
+    painter.rect_filled(
+        Rect::from_min_size(position - vec2(2.0, 1.0), galley.size() + vec2(4.0, 2.0)),
+        1.0,
+        color.gamma_multiply(0.75),
+    );
+    painter.galley(position, galley, Color32::WHITE);
 }
 
 fn draw_field_features(
