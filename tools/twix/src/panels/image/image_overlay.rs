@@ -1,6 +1,6 @@
 use super::{
     inputs::{OverlayInput, OverlayInputs},
-    overlays::{HorizonOverlay, ObjectDetectionOverlay, PoseDetectionOverlay},
+    overlays::{HorizonOverlay, PoseDetectionOverlay, feature_points, field_lines, object_boxes},
 };
 use color_eyre::Report;
 use coordinate_systems::Pixel;
@@ -64,11 +64,9 @@ impl ImageOverlays {
     pub(super) fn new(value: Option<&Value>) -> Self {
         let mut entries = vec![
             OverlayEntry::new("horizon", "Horizon", HorizonOverlay::default()),
-            OverlayEntry::new(
-                "object_detection",
-                "Object Detection",
-                ObjectDetectionOverlay::default(),
-            ),
+            OverlayEntry::new("object_detection", "Object Detection", object_boxes()),
+            OverlayEntry::new("feature_points", "Feature Points", feature_points()),
+            OverlayEntry::new("field_lines", "Field Lines", field_lines()),
             OverlayEntry::new(
                 "pose_detection",
                 "Pose Detection",

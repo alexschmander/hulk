@@ -27,6 +27,12 @@ pub struct Keypoint {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ros_z::Message)]
+pub struct FieldLine {
+    pub confidence: f32,
+    pub keypoints: [Keypoint; 5],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ros_z::Message)]
 pub struct Keypoints {
     pub left_eye: Keypoint,
     pub right_eye: Keypoint,

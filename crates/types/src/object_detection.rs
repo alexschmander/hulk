@@ -30,6 +30,13 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ros_z::Message)]
+pub struct ObjectFeature {
+    pub label: RobocupObjectLabel,
+    pub confidence: f32,
+    pub anchor: crate::pose_detection::Keypoint,
+}
+
 pub trait LabelIndex {
     fn from_index(index: usize) -> Self;
 }

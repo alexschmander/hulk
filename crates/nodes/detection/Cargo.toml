@@ -8,7 +8,7 @@ homepage.workspace = true
 
 [dependencies]
 color-eyre = { workspace = true }
-ndarray = { workspace = true }
+linear_algebra = { workspace = true }
 ort = { workspace = true, features = ["cuda", "tensorrt"] }
 ros-z = { workspace = true }
 ros-z-streams = { workspace = true }

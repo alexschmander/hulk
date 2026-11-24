@@ -96,13 +96,18 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         VisualOdometryPipeline::new(&parameters.typed().neural_network, stereo_camera_info)?;
     let mut previous_image_time: Option<ros_z::time::Time> = None;
     let mut odometer_epoch = 0;
+    let mut next_start = tokio::time::Instant::now();
+    const FRAME_INTERVAL: Duration = Duration::from_nanos(33_333_334);
 
     loop {
         parameters_receiver
             .wait_for(|parameters| parameters.typed().enable)
             .await?;
 
+        // Depth one keeps the latest pair while the detector shares the GPU.
+        tokio::time::sleep_until(next_start).await;
         let stereo_image_pair = stereo_image_pair_sub.recv().await?;
+        next_start = tokio::time::Instant::now() + FRAME_INTERVAL;
         let current_image_time = stereo_image_pair.left.header.stamp.into();
         let parameters = node_parameters.snapshot();
         let parameters = parameters.typed();

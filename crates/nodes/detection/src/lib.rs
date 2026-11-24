@@ -1,7 +1,10 @@
 use std::{boxed::Box, future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use color_eyre::{Result, eyre::bail};
-use ndarray::{ArrayView2, ArrayViewD, Axis, IxDyn};
+use color_eyre::{
+    Result,
+    eyre::{bail, eyre},
+};
+use linear_algebra::point;
 use ort::{
     ep::{CUDA, TensorRT},
     inputs,
@@ -14,49 +17,26 @@ use ros2::sensor_msgs::image::Image;
 use ros_z::{prelude::*, qos::QosHistory};
 use tokio::{task::block_in_place, time::Instant};
 use types::{
-    bounding_box::BoundingBox,
-    object_detection::{LabelIndex, NUMBER_OF_VALUES_PER_OBJECT, Object, RobocupObjectLabel},
+    object_detection::{Object, ObjectFeature, RobocupObjectLabel},
     parameters::DetectionParameters,
+    pose_detection::{FieldLine, Keypoint},
     time_wrapper::TimeWrapper,
 };
 
 pub const NUMBER_OF_DETECTIONS: usize = 300;
-
-#[derive(Clone, Copy, Debug)]
-enum TaskHead {
-    HSLVisionObjectDetection,
-    NaoObjectDetection,
-}
 
 struct DetectionOutput {
     inference_duration: Duration,
     post_processing_duration: Duration,
     non_maximum_suppression_duration: Duration,
     detected_objects: Vec<Object<RobocupObjectLabel>>,
+    detected_features: Vec<ObjectFeature>,
+    detected_lines: Vec<FieldLine>,
 }
 
-impl TaskHead {
-    fn output_name(self) -> &'static str {
-        match self {
-            TaskHead::HSLVisionObjectDetection => "hslvision_output",
-            TaskHead::NaoObjectDetection => "nao_output",
-        }
-    }
-
-    fn expected_shape(self) -> [usize; 3] {
-        match self {
-            Self::HSLVisionObjectDetection => {
-                [1, NUMBER_OF_DETECTIONS, NUMBER_OF_VALUES_PER_OBJECT]
-            }
-            Self::NaoObjectDetection => [1, NUMBER_OF_DETECTIONS, NUMBER_OF_VALUES_PER_OBJECT],
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ModelOutputs<'a> {
-    hslvision_objects: ArrayView2<'a, f32>,
-    nao_objects: ArrayView2<'a, f32>,
+struct ObjectCandidate {
+    object: Object<RobocupObjectLabel>,
+    anchor: Keypoint,
 }
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
@@ -91,6 +71,13 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .await?;
     let detected_objects_pub = node
         .announcing_publisher::<TimeWrapper<Vec<Object<RobocupObjectLabel>>>>("detected_objects")
+        .await?;
+
+    let detected_features_pub = node
+        .announcing_publisher::<TimeWrapper<Vec<ObjectFeature>>>("detected_features")
+        .await?;
+    let detected_lines_pub = node
+        .announcing_publisher::<TimeWrapper<Vec<FieldLine>>>("detected_lines")
         .await?;
 
     let initial_parameters_snapshot = node_parameters.snapshot();
@@ -133,6 +120,8 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         let image_time = image.header.stamp.into();
         let detected_objects_pending = detected_objects_pub.announce(image_time).await?;
 
+        let detected_features_pending = detected_features_pub.announce(image_time).await?;
+        let detected_lines_pending = detected_lines_pub.announce(image_time).await?;
         check_image(&image)?;
 
         let output = block_in_place(|| {
@@ -148,28 +137,47 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
 
             let post_processing_start = Instant::now();
 
-            let outputs = extract_outputs(&outputs)?;
-            let candidate_detections = extract_candidate_detections(
-                &outputs,
-                parameters
-                    .object_detection_parameters
-                    .minimum_candidate_confidence,
-            )?;
+            let threshold = parameters
+                .object_detection_parameters
+                .minimum_candidate_confidence;
+            let candidates = output_rows::<9>(&outputs, "object_output")?
+                .iter()
+                .filter_map(|row| object_candidate(row, threshold))
+                .collect();
+            let detected_lines = output_rows::<21>(&outputs, "line_output")?
+                .iter()
+                .filter_map(|row| field_line(row, threshold, image.width, image.height))
+                .collect();
             let post_processing_duration = post_processing_start.elapsed();
             let non_maximum_suppression_start = Instant::now();
-            let detected_objects = non_maximum_suppression(
-                candidate_detections,
+            let retained = non_maximum_suppression(
+                candidates,
                 parameters
                     .object_detection_parameters
                     .maximum_intersection_over_union,
             );
             let non_maximum_suppression_duration = non_maximum_suppression_start.elapsed();
+            let detected_features = retained
+                .iter()
+                .filter(|candidate| candidate.object.label != RobocupObjectLabel::Robot)
+                .map(|candidate| ObjectFeature {
+                    label: candidate.object.label,
+                    confidence: candidate.object.bounding_box.confidence,
+                    anchor: candidate.anchor,
+                })
+                .collect();
+            let detected_objects = retained
+                .into_iter()
+                .map(|candidate| candidate.object)
+                .collect();
 
             Ok::<_, color_eyre::eyre::Error>(DetectionOutput {
                 inference_duration,
                 post_processing_duration,
                 non_maximum_suppression_duration,
                 detected_objects,
+                detected_features,
+                detected_lines,
             })
         })?;
 
@@ -187,6 +195,18 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             .publish(&TimeWrapper {
                 time: image_time,
                 inner: output.detected_objects,
+            })
+            .await?;
+        detected_features_pending
+            .publish(&TimeWrapper {
+                time: image_time,
+                inner: output.detected_features,
+            })
+            .await?;
+        detected_lines_pending
+            .publish(&TimeWrapper {
+                time: image_time,
+                inner: output.detected_lines,
             })
             .await?;
     }
@@ -208,120 +228,69 @@ fn check_image(image: &Image) -> Result<()> {
     Ok(())
 }
 
-fn extract_outputs<'a>(outputs: &'a SessionOutputs<'_>) -> Result<ModelOutputs<'a>> {
-    let hslvision_objects_output = extract_output(outputs, TaskHead::HSLVisionObjectDetection)?;
-    if hslvision_objects_output.shape() != TaskHead::HSLVisionObjectDetection.expected_shape() {
-        bail!(
-            "hslvision object detection output not of expected shape. Expected: {:?}, got: {:?}",
-            TaskHead::HSLVisionObjectDetection.expected_shape(),
-            hslvision_objects_output.shape()
-        )
-    }
-    let reshaped_hslvision_objects_output =
-        hslvision_objects_output.squeeze().into_dimensionality()?;
-
-    let nao_objects_output = extract_output(outputs, TaskHead::NaoObjectDetection)?;
-    if nao_objects_output.shape() != TaskHead::NaoObjectDetection.expected_shape() {
-        bail!(
-            "nao object detection output not of expected shape. Expected: {:?}, got: {:?}",
-            TaskHead::NaoObjectDetection.expected_shape(),
-            nao_objects_output.shape()
-        )
-    }
-    let reshaped_nao_objects_output = nao_objects_output.squeeze().into_dimensionality()?;
-
-    Ok(ModelOutputs {
-        hslvision_objects: reshaped_hslvision_objects_output,
-        nao_objects: reshaped_nao_objects_output,
-    })
-}
-
-fn extract_output<'a>(
+fn output_rows<'a, const N: usize>(
     outputs: &'a SessionOutputs<'_>,
-    task_head: TaskHead,
-) -> Result<ArrayViewD<'a, f32>> {
-    let (shape, data) = outputs[task_head.output_name()].try_extract_tensor::<f32>()?;
-    let dimensions = shape
-        .iter()
-        .map(|&dimension| usize::try_from(dimension))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ArrayViewD::from_shape(IxDyn(&dimensions), data)?)
+    name: &str,
+) -> Result<&'a [[f32; N]]> {
+    let tensor = outputs
+        .get(name)
+        .ok_or_else(|| eyre!("model has no {name} output"))?;
+    let (shape, data) = tensor.try_extract_tensor::<f32>()?;
+    if **shape != [1, NUMBER_OF_DETECTIONS as i64, N as i64] {
+        bail!("expected {name} shape [1, {NUMBER_OF_DETECTIONS}, {N}], got {shape:?}");
+    }
+    Ok(data.as_chunks::<N>().0)
 }
 
-fn extract_candidate_detections(
-    outputs: &ModelOutputs,
-    confidence_threshold: f32,
-) -> Result<Vec<Object<RobocupObjectLabel>>> {
-    let hslvision_labels = [
-        RobocupObjectLabel::Ball,
-        RobocupObjectLabel::LSpot,
-        RobocupObjectLabel::PenaltySpot,
-        RobocupObjectLabel::Robot,
-        RobocupObjectLabel::TSpot,
-        RobocupObjectLabel::XSpot,
-    ];
-    let mut object_detections: Vec<Object<RobocupObjectLabel>> = extract_candidate_objects(
-        &outputs.hslvision_objects,
-        confidence_threshold,
-        &hslvision_labels,
-    )
-    .collect();
-
-    let nao_labels = [RobocupObjectLabel::GoalPost, RobocupObjectLabel::Ball];
-    object_detections.extend(extract_candidate_objects(
-        &outputs.nao_objects,
-        confidence_threshold,
-        &nao_labels,
-    ));
-
-    Ok(object_detections)
-}
-
-fn extract_candidate_objects(
-    output: &ArrayView2<f32>,
-    confidence_threshold: f32,
-    accepted_labels: &[RobocupObjectLabel],
-) -> impl Iterator<Item = Object<RobocupObjectLabel>> {
-    output.axis_iter(Axis(0)).filter_map(move |row| {
-        let label = RobocupObjectLabel::from_index(row[5] as usize);
-        if !accepted_labels.contains(&label) {
-            return None;
-        }
-
-        let confidence = row[4usize];
-        if confidence < confidence_threshold {
-            return None;
-        }
-
-        let object_values: [f32; NUMBER_OF_VALUES_PER_OBJECT] = row
-            .as_slice()
-            .expect("slice is not contiguous")
-            .try_into()
-            .unwrap_or_else(|_| panic!("slice is not of length {}", NUMBER_OF_VALUES_PER_OBJECT));
-
-        Some(Object::from(object_values))
+fn object_candidate(row: &[f32; 9], threshold: f32) -> Option<ObjectCandidate> {
+    let &[left, top, right, bottom, score, class, x, y, presence] = row;
+    if score < threshold
+        || !row.iter().all(|v| v.is_finite())
+        || class.fract() != 0.0
+        || !(0.0..=6.0).contains(&class)
+    {
+        return None;
+    }
+    Some(ObjectCandidate {
+        object: Object::from([left, top, right, bottom, score, class]),
+        anchor: Keypoint {
+            point: point![x, y],
+            confidence: presence,
+        },
     })
 }
 
-trait HasBoundingBox {
-    fn bounding_box(&self) -> &BoundingBox;
-}
-
-impl<T> HasBoundingBox for Object<T> {
-    fn bounding_box(&self) -> &BoundingBox {
-        &self.bounding_box
+fn field_line(row: &[f32; 21], threshold: f32, width: u32, height: u32) -> Option<FieldLine> {
+    if row[4] < threshold || row[5] != 0.0 || !row.iter().all(|v| v.is_finite()) {
+        return None;
     }
+    // Convert exported edge coordinates to the pixel centers used by the line evaluator.
+    let keypoints = std::array::from_fn(|index| {
+        let offset = 6 + index * 3;
+        Keypoint {
+            point: point![
+                row[offset].clamp(0.0, width as f32) - 0.5,
+                row[offset + 1].clamp(0.0, height as f32) - 0.5
+            ],
+            confidence: row[offset + 2],
+        }
+    });
+    Some(FieldLine {
+        confidence: row[4],
+        keypoints,
+    })
 }
 
-fn non_maximum_suppression<T: HasBoundingBox>(
-    mut sorted_candidate_detections: Vec<T>,
+fn non_maximum_suppression(
+    mut sorted_candidate_detections: Vec<ObjectCandidate>,
     maximum_intersection_over_union: f32,
-) -> Vec<T> {
+) -> Vec<ObjectCandidate> {
     sorted_candidate_detections.sort_by(|detection1, detection2| {
         detection1
-            .bounding_box()
+            .object
+            .bounding_box
             .confidence
-            .total_cmp(&detection2.bounding_box().confidence)
+            .total_cmp(&detection2.object.bounding_box.confidence)
     });
 
     let mut remaining_detections = Vec::new();
@@ -329,8 +298,9 @@ fn non_maximum_suppression<T: HasBoundingBox>(
     while let Some(detection) = sorted_candidate_detections.pop() {
         sorted_candidate_detections.retain(|detection_candidate| {
             detection
-                .bounding_box()
-                .intersection_over_union(detection_candidate.bounding_box())
+                .object
+                .bounding_box
+                .intersection_over_union(&detection_candidate.object.bounding_box)
                 < maximum_intersection_over_union
         });
 
@@ -338,4 +308,44 @@ fn non_maximum_suppression<T: HasBoundingBox>(
     }
 
     remaining_detections
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_objects_keep_the_winning_anchor() {
+        let high = [1., 2., 20., 30., 0.9, 1., 10., 29., 0.75];
+        let mut low = high;
+        low[4] = 0.8;
+        low[6] = 15.;
+        let objects = [low, high]
+            .iter()
+            .filter_map(|row| object_candidate(row, 0.05))
+            .collect();
+        let retained = non_maximum_suppression(objects, 0.4);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].object.label, RobocupObjectLabel::GoalPost);
+        assert_eq!(retained[0].anchor.point, point![10., 29.]);
+        assert_eq!(retained[0].anchor.confidence, 0.75);
+    }
+
+    #[test]
+    fn line_vertices_keep_order_and_presence_in_native_pixels() {
+        let row = [
+            0., 0., 1., 1., 0.39, 0., -1., 2., 0.1, 100., 5., 0.2, 300., 9., 0.3, 600., 15., 0.4,
+            1285., 16., 0.5,
+        ];
+        assert!(field_line(&row, 0.4, 1280, 1088).is_none());
+        let line = field_line(&row, 0.39, 1280, 1088).unwrap();
+        assert_eq!(
+            line.keypoints.map(|p| p.point.x()),
+            [-0.5, 99.5, 299.5, 599.5, 1279.5]
+        );
+        assert_eq!(
+            line.keypoints.map(|p| p.confidence),
+            [0.1, 0.2, 0.3, 0.4, 0.5]
+        );
+    }
 }

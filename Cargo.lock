@@ -3138,7 +3138,7 @@ name = "detection"
 version = "0.1.0"
 dependencies = [
  "color-eyre",
- "ndarray 0.16.1",
+ "linear_algebra",
  "ort",
  "ros-z",
  "ros-z-streams",

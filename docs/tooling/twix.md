@@ -172,8 +172,15 @@ The Horizon overlay interpolates compatible camera matrices over brackets spanni
 
 Live ingestion is independent of the UI frame rate. Shared histories are bounded by sample count and bytes; observations report when retention limits their coverage. Replay uses server-side indexes instead of accumulating panel histories. Image and overlay timestamp projections are developer-owned query declarations; legacy saved projection overrides are ignored. The Text panel always uses source time, as do other observations unless explicitly configured by code.
 
-The Image panel's Overlays menu offers confidence controls for object and pose detections.
-Bounding boxes default to `0.5` confidence and pose keypoints to `0.8`.
+In the Image panel’s **Overlays** menu, each Hydra overlay has its own detection confidence control.
+
+| Overlay | Display | Default confidence |
+|---|---|---|
+| Object Detection | Boxes for balls, goal posts, robots and field marks | 0.5 |
+| Feature Points | Ball centers, post bases and field-mark anchors, colored by class | 0.5 |
+| Field Lines | Five ordered vertices joined by four segments | 0.39 |
+
+The separate Pose Detection overlay defaults to `0.5` for boxes and `0.8` for skeleton keypoints.
 Values range from `0` to `1` and reset to their defaults when the overlay is toggled off and on or Twix is reopened.
 These controls only filter the visualization; they do not change the detector or its published results.
 
