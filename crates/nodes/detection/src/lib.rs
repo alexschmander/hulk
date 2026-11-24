@@ -117,12 +117,12 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             continue;
         }
 
+        check_image(&image)?;
         let image_time = image.header.stamp.into();
         let detected_objects_pending = detected_objects_pub.announce(image_time).await?;
 
         let detected_features_pending = detected_features_pub.announce(image_time).await?;
         let detected_lines_pending = detected_lines_pub.announce(image_time).await?;
-        check_image(&image)?;
 
         let output = block_in_place(|| {
             let inference_start = Instant::now();

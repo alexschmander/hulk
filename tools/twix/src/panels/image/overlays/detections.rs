@@ -130,3 +130,73 @@ pub(in crate::panels::image) fn field_lines() -> impl ImageOverlay {
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::panels::image::tests::raw_sample;
+    use eframe::egui::{Context, RawInput, Rect, Shape, pos2};
+    use linear_algebra::point;
+    use ros_z_debug::query::plan::State;
+    use types::pose_detection::Keypoint;
+
+    #[test]
+    fn field_line_overlay_draws_only_the_five_vertices_and_four_segments_above_threshold() {
+        let line = FieldLine {
+            confidence: 0.39,
+            keypoints: std::array::from_fn(|i| Keypoint {
+                point: point![10.0 * i as f32 + 5.0, 20.0],
+                confidence: 1.0,
+            }),
+        };
+        let time = Time::from_nanos(7);
+        let sample = raw_sample(
+            "/detected_lines",
+            1,
+            7,
+            7,
+            &TimeWrapper {
+                time,
+                inner: vec![
+                    line,
+                    FieldLine {
+                        confidence: 0.38,
+                        ..line
+                    },
+                ],
+            },
+        );
+        let mut inputs = OverlayInputs::default();
+        inputs.update(&[State::Ready(vec![sample])]);
+        let mut overlay = field_lines();
+        overlay.prepare(time, &mut inputs).unwrap();
+        let output = Context::default().run_ui(RawInput::default(), |ui| {
+            let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(64.0, 64.0));
+            overlay.image_overlay(&TwixPainter::paint_at(ui, rect));
+        });
+        let vertices: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Circle(circle) => Some(circle.center),
+                _ => None,
+            })
+            .collect();
+        let segments: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::LineSegment { points, .. } => Some(*points),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vertices.len(), 5);
+        assert_eq!(
+            segments,
+            vertices
+                .windows(2)
+                .map(|p| [p[0], p[1]])
+                .collect::<Vec<_>>()
+        );
+    }
+}

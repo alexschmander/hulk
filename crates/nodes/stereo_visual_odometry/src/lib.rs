@@ -53,6 +53,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
 
     let stereo_image_pair_sub = node
         .subscriber::<StereoImagePair>("inputs/stereo_image_pair")
+        .queue_overflow_reporting(QueueOverflowReporting::Debug)
         .qos(QosProfile {
             history: QosHistory::from_depth(1),
             ..Default::default()
@@ -107,11 +108,14 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         // Depth one keeps the latest pair while the detector shares the GPU.
         tokio::time::sleep_until(next_start).await;
         let stereo_image_pair = stereo_image_pair_sub.recv().await?;
-        next_start = tokio::time::Instant::now() + FRAME_INTERVAL;
         let current_image_time = stereo_image_pair.left.header.stamp.into();
         let parameters = node_parameters.snapshot();
         let parameters = parameters.typed();
 
+        if !parameters.enable {
+            continue;
+        }
+        next_start = tokio::time::Instant::now() + FRAME_INTERVAL;
         let had_previous_image = previous_image_time.is_some();
         let pose_estimation_parameters = parameters.pose_estimation_parameters.clone();
         let (odometry_result, duration) = tokio::task::block_in_place(|| {
