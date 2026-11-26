@@ -166,6 +166,7 @@ pub struct ProxyFrameReader {
 
 pub struct Recording {
     _cache_lock: File,
+    recording_path: PathBuf,
     cache_directory: PathBuf,
     recording_cache_directory: PathBuf,
     index: Arc<RecordingCacheIndex>,
@@ -194,34 +195,10 @@ impl Recording {
 
         let index_path = recording_cache_directory.join(RECORDING_INDEX_FILE);
         let proxy_path = recording_cache_directory.join(PROXY_FILE);
-        let original_frames_path = recording_cache_directory.join(ORIGINAL_FRAMES_FILE);
-        let baseline_path = recorded_baseline_path(&cache_directory, &fingerprint)?;
         let legacy_baseline_path = recording_cache_directory.join("recorded-baseline.bin");
-        let cache_lock_path = recording_cache_directory.join(RECORDING_LOCK_FILE);
-        let cache_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&cache_lock_path)
-            .wrap_err_with(|| format!("failed to open {}", cache_lock_path.display()))?;
-        let load_current = || -> Result<RecordingCacheIndex> {
-            if !index_path.exists() || !proxy_path.exists() || !baseline_path.exists() {
-                bail!("recording cache is incomplete");
-            }
-            let index: RecordingCacheIndex = read_bincode(&index_path)?;
-            validate_cached_index(&index, &fingerprint, &proxy_path, &original_frames_path)?;
-            let baseline: RecordedBaseline = read_bincode(&baseline_path)?;
-            validate_cached_baseline(
-                baseline_path
-                    .parent()
-                    .wrap_err("baseline path has no parent")?,
-                &baseline,
-                &fingerprint,
-                &index.frames,
-            )?;
-            Ok(index)
-        };
+        let cache_lock = open_recording_cache_lock(&recording_cache_directory)?;
+        let load_current =
+            || load_recording_cache(&cache_directory, &recording_cache_directory, &fingerprint);
         cache_lock
             .lock_shared()
             .wrap_err("failed to lock recording cache for reading")?;
@@ -231,6 +208,13 @@ impl Recording {
                 cache_lock
                     .unlock()
                     .wrap_err("failed to release recording cache read lock")?;
+                if let Some(relocated) = Self::open_relocated(
+                    &cache_directory,
+                    &recording_cache_directory,
+                    &fingerprint,
+                )? {
+                    return Ok(relocated);
+                }
                 cache_lock
                     .lock()
                     .wrap_err("failed to lock recording cache for rebuilding")?;
@@ -257,6 +241,10 @@ impl Recording {
                             ?error,
                             "rebuilding invalid detection replay recording cache"
                         );
+                        eprintln!(
+                            "Indexing {} and generating the replay proxy...",
+                            fingerprint.canonical_path.display()
+                        );
                         build_cache(&fingerprint, &cache_directory, &recording_cache_directory)?
                     }
                 };
@@ -272,12 +260,66 @@ impl Recording {
 
         Ok(Self {
             _cache_lock: cache_lock,
+            recording_path: fingerprint.canonical_path,
             cache_directory,
             recording_cache_directory,
             index: Arc::new(index),
         })
     }
 
+    fn open_relocated(
+        cache_directory: &Path,
+        local_directory: &Path,
+        fingerprint: &RecordingFingerprint,
+    ) -> Result<Option<Self>> {
+        let parent = local_directory
+            .parent()
+            .wrap_err("recording cache directory has no parent")?;
+        let entries = fs::read_dir(parent)
+            .wrap_err_with(|| format!("failed to read {}", parent.display()))?;
+        let mut relocated = None;
+        for entry in entries {
+            let directory = entry?.path();
+            if directory == local_directory || !directory.is_dir() {
+                continue;
+            }
+            let Ok(candidate) =
+                read_bincode::<RecordingCacheIndex>(&directory.join(RECORDING_INDEX_FILE))
+            else {
+                continue;
+            };
+            if !candidate.fingerprint.matches_relocated(fingerprint)
+                || recording_cache_directory(cache_directory, &candidate.fingerprint)? != directory
+            {
+                continue;
+            }
+            let Ok(lock) = open_recording_cache_lock(&directory) else {
+                continue;
+            };
+            if lock.try_lock_shared().is_err() {
+                continue;
+            }
+            let Ok(index) =
+                load_recording_cache(cache_directory, &directory, &candidate.fingerprint)
+            else {
+                continue;
+            };
+            if relocated.is_some() {
+                // Multiple matching paths are ambiguous when only size and mtime match.
+                return Ok(None);
+            }
+            relocated = Some(Self {
+                _cache_lock: lock,
+                recording_path: fingerprint.canonical_path.clone(),
+                cache_directory: cache_directory.to_path_buf(),
+                recording_cache_directory: directory,
+                index: Arc::new(index),
+            });
+        }
+        Ok(relocated)
+    }
+
+    /// The fingerprint that owns the cached proxy, baseline and viewer state.
     pub fn fingerprint(&self) -> &RecordingFingerprint {
         &self.index.fingerprint
     }
@@ -325,7 +367,7 @@ impl Recording {
             bail!("requested {take} frames after skip, but only {available} remain");
         }
 
-        let path = self.index.fingerprint.canonical_path.clone();
+        let path = self.recording_path.clone();
         let original_frames_path = self.recording_cache_directory.join(ORIGINAL_FRAMES_FILE);
         let image_topic = self.index.image_topic;
         let original_image_source = self.index.original_image_source;
@@ -1469,6 +1511,42 @@ fn is_recoverable_tail_error(
     }
 }
 
+fn open_recording_cache_lock(directory: &Path) -> Result<File> {
+    let path = directory.join(RECORDING_LOCK_FILE);
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .wrap_err_with(|| format!("failed to open {}", path.display()))
+}
+
+fn load_recording_cache(
+    cache_directory: &Path,
+    directory: &Path,
+    fingerprint: &RecordingFingerprint,
+) -> Result<RecordingCacheIndex> {
+    let index: RecordingCacheIndex = read_bincode(&directory.join(RECORDING_INDEX_FILE))?;
+    validate_cached_index(
+        &index,
+        fingerprint,
+        &directory.join(PROXY_FILE),
+        &directory.join(ORIGINAL_FRAMES_FILE),
+    )?;
+    let baseline_path = recorded_baseline_path(cache_directory, fingerprint)?;
+    let baseline: RecordedBaseline = read_bincode(&baseline_path)?;
+    validate_cached_baseline(
+        baseline_path
+            .parent()
+            .wrap_err("baseline path has no parent")?,
+        &baseline,
+        fingerprint,
+        &index.frames,
+    )?;
+    Ok(index)
+}
+
 fn validate_cached_index(
     index: &RecordingCacheIndex,
     fingerprint: &RecordingFingerprint,
@@ -1567,12 +1645,8 @@ mod tests {
         assert!(image_timestamp_nanos(&image).is_err());
     }
 
-    #[test]
-    fn indexes_and_loads_a_proxy_frame() {
-        let temporary = tempfile::tempdir().unwrap();
-        let recording_path = temporary.path().join("recording.mcap");
-        let cache_path = temporary.path().join("cache");
-        let file = File::create(&recording_path).unwrap();
+    fn write_test_recording(recording_path: &Path) -> Image {
+        let file = File::create(recording_path).unwrap();
         let mut writer = WriteOptions::new().create(file).unwrap();
         let schema = serde_json::to_vec(&Image::schema()).unwrap();
         let schema_id = writer
@@ -1609,8 +1683,15 @@ mod tests {
             )
             .unwrap();
         writer.finish().unwrap();
-        drop(writer);
+        image
+    }
 
+    #[test]
+    fn indexes_and_loads_a_proxy_frame() {
+        let temporary = tempfile::tempdir().unwrap();
+        let recording_path = temporary.path().join("recording.mcap");
+        let cache_path = temporary.path().join("cache");
+        let image = write_test_recording(&recording_path);
         let recording = Recording::open(&recording_path, &cache_path).unwrap();
         assert_eq!(recording.frame_count(), 1);
         assert_eq!(recording.frames()[0].timestamp_nanos, 12_000_000_345);
@@ -1630,6 +1711,63 @@ mod tests {
             assert_eq!(original.timestamp_nanos, 12_000_000_345);
             assert_eq!(original.image.data, image.data);
         });
+    }
+
+    #[test]
+    fn relocated_recording_reuses_the_proxy_and_reads_originals_from_the_new_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let original_path = temporary.path().join("source.mcap");
+        let relocated_path = temporary.path().join("recording.mcap");
+        let cache_path = temporary.path().join("cache");
+        let image = write_test_recording(&original_path);
+        let original = Recording::open(&original_path, &cache_path).unwrap();
+        let cached_directory = original.recording_cache_directory.clone();
+        drop(original);
+        fs::rename(original_path, &relocated_path).unwrap();
+
+        let relocated = Recording::open(&relocated_path, &cache_path).unwrap();
+        assert_eq!(relocated.recording_cache_directory, cached_directory);
+        let local_fingerprint = RecordingFingerprint::for_path(&relocated_path).unwrap();
+        let local_index = recording_cache_directory(&cache_path, &local_fingerprint)
+            .unwrap()
+            .join(RECORDING_INDEX_FILE);
+        assert!(!local_index.exists());
+        assert_eq!(
+            relocated.load_proxy_frame(0).unwrap().dimensions(),
+            (32, 32)
+        );
+        assert_eq!(relocated.load_runs().unwrap()[0].key, "recorded");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut originals = relocated.original_images(0, Some(1)).unwrap();
+            let original = originals.next().await.unwrap().unwrap();
+            assert_eq!(original.image.data, image.data);
+        });
+    }
+
+    #[test]
+    fn relocated_recording_with_a_changed_mtime_gets_its_own_index() {
+        let temporary = tempfile::tempdir().unwrap();
+        let original_path = temporary.path().join("source.mcap");
+        let relocated_path = temporary.path().join("recording.mcap");
+        let cache_path = temporary.path().join("cache");
+        write_test_recording(&original_path);
+        let original = Recording::open(&original_path, &cache_path).unwrap();
+        let cached_directory = original.recording_cache_directory.clone();
+        drop(original);
+        fs::rename(original_path, &relocated_path).unwrap();
+        File::open(&relocated_path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let relocated = Recording::open(&relocated_path, &cache_path).unwrap();
+        assert_ne!(relocated.recording_cache_directory, cached_directory);
+        assert!(cached_directory.join(RECORDING_INDEX_FILE).is_file());
     }
 
     #[test]

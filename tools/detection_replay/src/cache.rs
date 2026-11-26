@@ -92,7 +92,7 @@ impl RecordingFingerprint {
         Ok(blake3::hash(&bytes).to_hex().to_string())
     }
 
-    fn matches_relocated(&self, other: &Self) -> bool {
+    pub(crate) fn matches_relocated(&self, other: &Self) -> bool {
         self.size == other.size
             && self.modified_unix_nanos == other.modified_unix_nanos
             && self.format_version == other.format_version

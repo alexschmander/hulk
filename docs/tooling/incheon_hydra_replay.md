@@ -55,7 +55,11 @@ After extracting the private bundle, verify and open it from this branch with:
 ```
 
 The viewer builds without ONNX Runtime or CUDA and plays the saved cache without
-inference. The evidence directory contains first, quarter, middle, three-quarter,
+inference. Keep the extracted MCAP and cache together. Tar extraction preserves
+the MCAP timestamp so the viewer can reuse the bundled index and JPEG proxy at
+the new path.
+
+The evidence directory contains first, quarter, middle, three-quarter,
 and last-frame combined overlays plus separated object and FieldLine detail views for frame
 10,746. Supplemental frame-10,746 evidence records a below-threshold object
 row and a below-threshold FieldLine row by original tensor index. FieldLine
