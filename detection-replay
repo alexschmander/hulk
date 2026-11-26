@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ort-sys otherwise prefers a system CPU-only ONNX Runtime over its CUDA build.
 THIS_DIRECTORY="$(dirname "$(readlink -f "$0")")"
+CARGO_ARGUMENTS=(run --release --manifest-path="${THIS_DIRECTORY}/tools/detection_replay/Cargo.toml")
+
+if [[ ${1:-} != prerender && "${1:-} ${2:-}" != "help prerender" ]]; then
+  exec cargo "${CARGO_ARGUMENTS[@]}" -- "$@"
+fi
 
 # The ML environment already supplies the CUDA 12 user-space libraries needed by
 # ONNX Runtime. Keep this desktop-only discovery out of the robotics runtime.
@@ -15,5 +19,5 @@ if (( ${#CUDA_LIBRARY_DIRECTORIES[@]} )); then
   export LD_LIBRARY_PATH="${CUDA_LIBRARY_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
-exec env LIBONNXRUNTIME_NO_PKG_CONFIG=1 cargo run --release \
-  --manifest-path="${THIS_DIRECTORY}/tools/detection_replay/Cargo.toml" -- "$@"
+# ort-sys otherwise prefers a system CPU-only ONNX Runtime over its CUDA build.
+exec env LIBONNXRUNTIME_NO_PKG_CONFIG=1 cargo "${CARGO_ARGUMENTS[@]}" --features prerender -- "$@"

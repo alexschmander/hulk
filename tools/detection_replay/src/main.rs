@@ -1,12 +1,16 @@
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::path::PathBuf;
+#[cfg(feature = "prerender")]
+use std::{str::FromStr, time::Duration};
 
 use clap::{Parser, Subcommand};
-use color_eyre::{
-    Result,
-    eyre::{Context, ContextCompat},
-};
+#[cfg(feature = "prerender")]
+use color_eyre::eyre::Context;
+use color_eyre::{Result, eyre::ContextCompat};
+#[cfg(feature = "prerender")]
 use detection::ExecutionProvider;
-use detection_replay::{DetectionThresholds, ModelRunConfig, ModelRunState, Recording, run_model};
+#[cfg(feature = "prerender")]
+use detection_replay::{DetectionThresholds, ModelRunConfig, run_model};
+use detection_replay::{ModelRunState, Recording};
 use tracing_subscriber::EnvFilter;
 
 mod app;
@@ -15,6 +19,12 @@ mod timeline;
 
 #[derive(Debug, Parser)]
 #[command(about = "Prerender and compare detection models on a ROS-Z MCAP recording")]
+#[cfg_attr(
+    not(feature = "prerender"),
+    command(
+        after_help = "To run inference, use ./detection-replay prerender --help or enable the Cargo feature `prerender`."
+    )
+)]
 struct Arguments {
     #[command(subcommand)]
     command: Command,
@@ -31,6 +41,7 @@ enum Command {
         frames: FrameRangeArguments,
     },
     /// Run one or more models through the actual ROS-Z detection node.
+    #[cfg(feature = "prerender")]
     Prerender {
         recording: PathBuf,
         #[arg(long, value_name = "LABEL=MODEL", required = true)]
@@ -96,6 +107,7 @@ enum Command {
     },
 }
 
+#[cfg(feature = "prerender")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum ProviderArgument {
     Automatic,
@@ -105,6 +117,7 @@ enum ProviderArgument {
     Cpu,
 }
 
+#[cfg(feature = "prerender")]
 impl ProviderArgument {
     fn execution_provider(self) -> ExecutionProvider {
         match self {
@@ -148,12 +161,14 @@ impl FrameRangeArguments {
     }
 }
 
+#[cfg(feature = "prerender")]
 #[derive(Clone, Debug)]
 struct ModelArgument {
     label: String,
     path: PathBuf,
 }
 
+#[cfg(feature = "prerender")]
 impl FromStr for ModelArgument {
     type Err = String;
 
@@ -173,6 +188,7 @@ impl FromStr for ModelArgument {
 
 fn main() -> Result<()> {
     let arguments = Arguments::parse();
+    #[cfg(feature = "prerender")]
     configure_gpu_visibility(&arguments.command);
     color_eyre::install()?;
     tracing_subscriber::fmt()
@@ -207,6 +223,7 @@ fn main() -> Result<()> {
                 cache_dir.display()
             );
         }
+        #[cfg(feature = "prerender")]
         Command::Prerender {
             recording,
             model,
@@ -334,6 +351,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "prerender")]
 fn configure_gpu_visibility(command: &Command) {
     let Command::Prerender { provider, gpu, .. } = command else {
         return;

@@ -54,9 +54,9 @@ After extracting the private bundle, verify and open it from this branch with:
   --cache-dir /path/to/incheon-hydra26s-replay-delivery-2026-11-23/recording.detection-replay-cache
 ```
 
-The viewer command does not load the ONNX or repeat inference. The evidence
-directory contains first, quarter, middle, three-quarter, and last-frame
-combined overlays plus separated object and FieldLine detail views for frame
+The viewer builds without ONNX Runtime or CUDA and plays the saved cache without
+inference. The evidence directory contains first, quarter, middle, three-quarter,
+and last-frame combined overlays plus separated object and FieldLine detail views for frame
 10,746. Supplemental frame-10,746 evidence records a below-threshold object
 row and a below-threshold FieldLine row by original tensor index. FieldLine
 evidence intentionally contains no detection boxes.

@@ -1,6 +1,6 @@
 # Detection Replay
 
-`detection-replay` prerenders object detections from ROS-Z MCAP recordings and compares models on a synchronized image feed. Inference uses the production detection implementation through `run_boxed_with_model_info`; viewing only reads cached predictions. The repository wrapper builds and runs the tool in release mode.
+`detection-replay` prerenders detections from ROS-Z MCAP recordings and compares models on a synchronized image feed. Inference uses the production detection implementation through `run_boxed_with_model_info`. The repository wrapper builds and runs the tool in release mode. `view`, `verify`, `index`, and `snapshot` build without ONNX Runtime and work with saved detections on machines without CUDA.
 
 ## Recording index
 
@@ -48,7 +48,7 @@ The native supplement also retains all 300 unfiltered rows from each head in mod
 
 `field_feature_output` is also optional and must be `float32 [1, 300, 4]`. Each row is `[x, y, confidence, class_index]` in full-image pixel coordinates. Class indices are GoalPost, LSpot, TSpot, PenaltySpot, and XSpot. Replay stores the timestamp-matched field-feature points separately from the object and pose chunks so caches created before field-feature capture remain readable.
 
-The desktop replay build uses the x86-64 ONNX Runtime 1.22 CUDA distribution. The wrapper prevents a CPU-only system runtime discovered through `pkg-config` from overriding it and adds CUDA 12 user-space libraries from the multi-task YOLO virtual environment to the loader path when they are available. Operators unsupported by the selected NVIDIA provider may still use ORT's CPU fallback. Robot builds dynamically load their runtime image and retain the default provider order compiled into that deployment. Only the generic provider choice crosses into the detection node; replay-specific CLI parsing, physical-device remapping, CUDA library discovery, and defaults remain confined to this tool.
+The `prerender` subcommand uses the x86-64 ONNX Runtime 1.22 CUDA distribution. The wrapper enables the Cargo feature `prerender` automatically for this command. If you invoke Cargo directly, use `cargo run --release -p detection-replay --features prerender -- prerender …`. The wrapper prevents a CPU-only system runtime discovered through `pkg-config` from overriding the CUDA runtime and adds CUDA 12 user-space libraries from the multi-task YOLO virtual environment to the loader path when they are available. Operators unsupported by the selected NVIDIA provider may still use ORT's CPU fallback. Robot builds dynamically load their runtime image and retain the default provider order compiled into that deployment. Only the generic provider choice crosses into the detection node; replay-specific CLI parsing, physical-device remapping, CUDA library discovery, and defaults remain confined to this tool.
 
 ## Viewing
 

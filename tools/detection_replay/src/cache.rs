@@ -577,6 +577,7 @@ struct SupplementalChunk<T> {
     values: Vec<Vec<T>>,
 }
 
+#[cfg(any(feature = "prerender", test))]
 #[derive(Serialize)]
 struct SupplementalChunkRef<'a, T> {
     cache_version: u32,
@@ -600,6 +601,7 @@ struct LegacyModelRunManifest {
     provider_note: Option<String>,
 }
 
+#[cfg(any(feature = "prerender", test))]
 pub struct PredictionStore {
     _lock_file: File,
     run_directory: PathBuf,
@@ -611,6 +613,7 @@ pub struct PredictionStore {
     pending_hydra_supplements: Option<Vec<Vec<HydraDetectionSupplement>>>,
 }
 
+#[cfg(any(feature = "prerender", test))]
 impl PredictionStore {
     pub fn open(cache_directory: impl AsRef<Path>, proposed: ModelRunManifest) -> Result<Self> {
         let frame_count = proposed.target_frame_count()?;
@@ -864,6 +867,7 @@ impl PredictionStore {
         self.persist_manifest()
     }
 
+    #[cfg(feature = "prerender")]
     pub fn fail(&mut self, error: impl Into<String>) -> Result<()> {
         self.persist_pending()?;
         self.manifest.state = ModelRunState::Failed;
@@ -946,15 +950,18 @@ impl PredictionStore {
 
 struct LoadedContiguousPredictions {
     completed_count: usize,
+    #[cfg(any(feature = "prerender", test))]
     pending: Vec<Prediction>,
 }
 
+#[cfg(any(feature = "prerender", test))]
 #[derive(Serialize)]
 struct PredictionChunkRef<'a> {
     start_frame: usize,
     predictions: &'a [Prediction],
 }
 
+#[cfg(feature = "prerender")]
 pub fn hash_model(path: impl AsRef<Path>) -> Result<(PathBuf, [u8; 32])> {
     let canonical = path
         .as_ref()
@@ -2202,6 +2209,7 @@ fn inspect_optional_supplemental_chunks(
     Ok(true)
 }
 
+#[cfg(any(feature = "prerender", test))]
 fn load_contiguous_supplemental_outputs<T: DeserializeOwned>(
     directory: &Path,
     manifest: &ModelRunManifest,
@@ -2320,6 +2328,7 @@ fn load_contiguous_predictions(
     }
 
     let mut completed_count = 0_usize;
+    #[cfg(any(feature = "prerender", test))]
     let mut pending = Vec::new();
     let chunk_count = chunk_paths.len();
     for (position, (chunk_index, path)) in chunk_paths.into_iter().enumerate() {
@@ -2350,12 +2359,14 @@ fn load_contiguous_predictions(
         if completed_count > manifest.target_frame_count()? {
             bail!("prediction cache contains more frames than its manifest range");
         }
+        #[cfg(any(feature = "prerender", test))]
         if position + 1 == chunk_count && chunk.predictions.len() < PREDICTION_CHUNK_SIZE {
             pending = chunk.predictions;
         }
     }
     Ok(LoadedContiguousPredictions {
         completed_count,
+        #[cfg(any(feature = "prerender", test))]
         pending,
     })
 }

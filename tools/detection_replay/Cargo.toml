@@ -9,18 +9,21 @@ homepage.workspace = true
 name = "detection_replay"
 path = "src/lib.rs"
 
+[features]
+prerender = ["dep:detection", "dep:ort"]
+
 [dependencies]
 base64 = "0.22"
 bincode = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 color-eyre = { workspace = true }
-detection = { workspace = true, default-features = false, features = ["nvidia"] }
+detection = { workspace = true, optional = true, features = ["nvidia"] }
 eframe = { workspace = true }
 egui_dock = { workspace = true }
 image = { workspace = true }
 mcap = { workspace = true }
-ort = { workspace = true }
+ort = { workspace = true, optional = true }
 ros-z = { workspace = true }
 ros2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
