@@ -6,7 +6,10 @@ use std::{
     time::Duration,
 };
 
-use color_eyre::{Report, Result, eyre::bail};
+use color_eyre::{
+    Report, Result,
+    eyre::{bail, eyre},
+};
 use ros_z::Message;
 use serde::{Deserialize, Serialize};
 
@@ -74,11 +77,13 @@ impl TryFrom<RoboCupGameControlData> for GameControllerStateMessage {
             match (message.teams[0].teamNumber, message.teams[1].teamNumber) {
                 (HULKS_TEAM_NUMBER, _) => (0, 1),
                 (_, HULKS_TEAM_NUMBER) => (1, 0),
-                _ => bail!(
-                    "failed to find HULKs team, teams were {:?} and {:?}",
-                    message.teams[0],
-                    message.teams[1]
-                ),
+                _ => {
+                    bail!(
+                        "failed to find HULKs team, teams were {:?} and {:?}",
+                        message.teams[0],
+                        message.teams[1]
+                    );
+                }
             };
         const MAXIMUM_NUMBER_OF_PENALTY_SHOOTS: u8 = 16;
         if message.teams[hulks_team_index].penaltyShot >= MAXIMUM_NUMBER_OF_PENALTY_SHOOTS {
@@ -133,7 +138,9 @@ impl TryFrom<RoboCupGameControlData> for GameControllerStateMessage {
             stopped: match message.stopped {
                 0 => false,
                 1 => true,
-                _ => bail!("unexpected stopped value: {}", message.stopped),
+                _ => {
+                    bail!("unexpected stopped value: {}", message.stopped);
+                }
             },
             game_phase: GamePhase::try_from(message.gamePhase, message.kickingTeam)?,
             game_state: GameState::try_from(message.state)?,
@@ -218,7 +225,7 @@ impl CompetitionType {
             COMPETITION_TYPE_SMALL => Ok(CompetitionType::Small),
             COMPETITION_TYPE_MIDDLE => Ok(CompetitionType::Middle),
             COMPETITION_TYPE_LARGE => Ok(CompetitionType::Large),
-            _ => bail!("unexpected competition type"),
+            _ => Err(eyre!("unexpected competition type")),
         }
     }
 }
@@ -246,7 +253,7 @@ impl GamePhase {
             GAME_PHASE_PENALTY_SHOOT_OUT => Ok(GamePhase::PenaltyShootout { kicking_team: team }),
             GAME_PHASE_EXTRA_TIME => Ok(GamePhase::Extratime),
             GAME_PHASE_TIMEOUT => Ok(GamePhase::Timeout),
-            _ => bail!("unexpected game phase"),
+            _ => Err(eyre!("unexpected game phase")),
         }
     }
 }
@@ -268,7 +275,7 @@ impl GameState {
             STATE_SET => Ok(GameState::Set),
             STATE_PLAYING => Ok(GameState::Playing),
             STATE_FINISHED => Ok(GameState::Finished),
-            _ => bail!("unexpected game state"),
+            _ => Err(eyre!("unexpected game state")),
         }
     }
 }
@@ -315,7 +322,7 @@ impl SubState {
             SET_PLAY_THROW_IN => Ok(Some(SubState::ThrowIn)),
             SET_PLAY_GOAL_KICK => Ok(Some(SubState::GoalKick)),
             SET_PLAY_CORNER_KICK => Ok(Some(SubState::CornerKick)),
-            _ => bail!("unexpected sub state"),
+            _ => Err(eyre!("unexpected sub state")),
         }
     }
 }
@@ -333,7 +340,7 @@ impl TryFrom<u8> for Half {
         match half {
             1 => Ok(Half::First),
             0 => Ok(Half::Second),
-            _ => bail!("unexpected half"),
+            _ => Err(eyre!("unexpected half")),
         }
     }
 }
@@ -380,7 +387,7 @@ impl TryFrom<u8> for TeamColor {
             TEAM_PURPLE => Ok(TeamColor::Purple),
             TEAM_BROWN => Ok(TeamColor::Brown),
             TEAM_GRAY => Ok(TeamColor::Gray),
-            _ => bail!("unexpected team color"),
+            _ => Err(eyre!("unexpected team color")),
         }
     }
 }
@@ -445,7 +452,7 @@ impl Penalty {
             PENALTY_CAUTIONED => Ok(Some(Penalty::Cautioned { remaining })),
             PENALTY_SENT_OFF => Ok(Some(Penalty::SentOff { remaining })),
             PENALTY_SUBSTITUTE => Ok(Some(Penalty::Substitute { remaining })),
-            _ => bail!("unexpected penalty type"),
+            _ => Err(eyre!("unexpected penalty type")),
         }
     }
 }

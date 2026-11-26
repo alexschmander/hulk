@@ -10,7 +10,7 @@ aliveness = { workspace = true }
 argument_parsers = { workspace = true }
 ball_filter = { workspace = true }
 bevy = { workspace = true, features = ["3d_bevy_render"] }
-bevy_mujoco = { workspace = true }
+bevy_mujoco = { path = "../../crates/bevy_mujoco" }
 bincode = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -25,7 +25,7 @@ egui_dock = { workspace = true }
 egui_extras = { workspace = true }
 egui_plot = { workspace = true }
 geometry = { workspace = true }
-gilrs = { workspace = true }
+gilrs = "0.11.0"
 hsl_network_messages = { workspace = true }
 hula_types = { workspace = true }
 hulk_widgets = { workspace = true }
@@ -34,7 +34,7 @@ itertools = { workspace = true }
 kinematics = { workspace = true }
 linear_algebra = { workspace = true }
 log = { workspace = true }
-mlua = { workspace = true }
+mlua = { version = "0.10.3", features = ["luajit", "serialize", "vendored"] }
 nalgebra = { workspace = true }
 ndarray = { workspace = true }
 parameters = { workspace = true }
