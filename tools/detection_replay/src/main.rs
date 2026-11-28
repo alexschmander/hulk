@@ -96,6 +96,7 @@ enum Command {
         output: PathBuf,
         #[arg(long)]
         raw: bool,
+        /// Label the object anchor coordinates and presence scores.
         #[arg(long)]
         details: bool,
         #[arg(long, default_value_t = 0.25)]

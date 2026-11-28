@@ -3,7 +3,7 @@ use std::{fmt::Write, path::Path};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use color_eyre::{Result, eyre::ContextCompat};
 use image::{ImageEncoder, codecs::png::PngEncoder};
-use types::object_detection::RobocupObjectLabel;
+use types::{object_detection::RobocupObjectLabel, pose_detection::FieldLineDetection};
 
 use detection_replay::Recording;
 
@@ -110,7 +110,7 @@ pub fn export(
         .iter()
         .filter(|line| line.bounding_box.confidence >= line_confidence)
     {
-        draw_line(&mut svg, line, 0.5, "#46e6ff", false, None, details)?;
+        draw_line(&mut svg, line, false)?;
     }
 
     if raw {
@@ -176,21 +176,12 @@ pub fn export(
                 )?;
             }
         }
-        for (row_index, line) in supplement
+        for line in supplement
             .raw_lines
             .iter()
-            .enumerate()
-            .filter(|(_, line)| line.bounding_box.confidence >= line_confidence)
+            .filter(|line| line.bounding_box.confidence >= line_confidence)
         {
-            draw_line(
-                &mut svg,
-                line,
-                0.0,
-                "#ffaa37",
-                true,
-                Some(row_index),
-                details,
-            )?;
+            draw_line(&mut svg, line, true)?;
         }
     }
     writeln!(svg, "</svg>")?;
@@ -198,15 +189,12 @@ pub fn export(
     Ok(())
 }
 
-fn draw_line(
-    svg: &mut String,
-    line: &types::pose_detection::FieldLineDetection,
-    shift: f32,
-    color: &str,
-    raw: bool,
-    row_index: Option<usize>,
-    details: bool,
-) -> Result<()> {
+fn draw_line(svg: &mut String, line: &FieldLineDetection, raw: bool) -> Result<()> {
+    let (shift, color, width, stroke_class) = if raw {
+        (0.0, "#ffaa37", 1, r#"class="raw""#)
+    } else {
+        (0.5, "#46e6ff", 3, "")
+    };
     let points = line
         .keypoints
         .iter()
@@ -221,42 +209,16 @@ fn draw_line(
         .join(" ");
     writeln!(
         svg,
-        r#"<polyline {} points="{points}" fill="none" stroke="{color}" stroke-width="{}"/>"#,
-        if raw { r#"class="raw""# } else { "" },
-        if raw { 1 } else { 3 },
+        r#"<polyline {stroke_class} points="{points}" fill="none" stroke="{color}" stroke-width="{width}"/>"#,
     )?;
-    for (index, point) in line.keypoints.iter().enumerate() {
+    for point in &line.keypoints {
         let x = point.point.x() + shift;
         let y = point.point.y() + shift;
         writeln!(
             svg,
             r#"<circle cx="{x:.2}" cy="{y:.2}" r="3" fill="{color}"/>"#
         )?;
-        if details {
-            writeln!(
-                svg,
-                r#"<text x="{:.2}" y="{:.2}">v{index} x={:.2} y={:.2} p={:.3}</text>"#,
-                x + 4.0,
-                y + 10.0,
-                point.point.x(),
-                point.point.y(),
-                point.confidence,
-            )?;
-        }
     }
-    let first = line.keypoints[0].point;
-    writeln!(
-        svg,
-        r#"<text x="{:.2}" y="{:.2}">{}FieldLine class=0 score={:.3}</text>"#,
-        first.x() + shift + 4.0,
-        first.y() + shift - 6.0,
-        match row_index {
-            Some(row_index) => format!("raw[{row_index}] "),
-            None if raw => "raw ".to_string(),
-            None => String::new(),
-        },
-        line.bounding_box.confidence,
-    )?;
     Ok(())
 }
 

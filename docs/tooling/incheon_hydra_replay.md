@@ -10,10 +10,10 @@ The delivered model run must satisfy all of the following:
 - Every indexed frame has a primary prediction and a present Hydra supplemental message, including valid empty results.
 - Every supplemental message contains 300 raw object rows and 300 raw line rows in model order.
 - Post-NMS anchors remain aligned one-for-one with surviving objects. Robot has no postprocessed anchor, while its raw network anchor remains inspectable and is labelled unsupervised.
-- FieldLine rows retain all five ordered vertices and all predicted presence scores. The viewer draws four connected segments and ordered points, never a FieldLine bounding box.
+- FieldLine rows retain all five ordered vertices and all predicted presence scores. The overlay draws only the five points and four connecting segments.
 - Normal playback can show object boxes/labels/scores, supervised anchors, and FieldLines together or as separate layers. Raw diagnostic mode exposes pre-threshold and pre-NMS rows with independent per-head filters and is off by default.
-- Detailed mode makes anchor coordinates/presence and every line vertex's index, coordinates, and predicted presence inspectable. Presence is reported as a network score, not occlusion ground truth.
-- Raw labels retain the original top-300 row index, so a filtered diagnostic row can be traced back to either model tensor.
+- Object anchor details are available on the image. FieldLine details under each run in the Models tab report class, score, and each line vertex's index, coordinates, and predicted presence.
+- Raw object labels and FieldLine details retain the original top-300 row index.
 - `detection-replay verify` successfully decodes every primary and sidecar chunk after relocating the download to a different absolute path with the ONNX unavailable. `detection-replay view` opens the same cache without inference.
 - Combined and detailed screenshots from representative actual Incheon frames demonstrate native-coordinate alignment. Fixture evidence alone is not sufficient.
 

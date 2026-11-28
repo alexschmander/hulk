@@ -21,8 +21,8 @@ use egui_dock::{DockArea, DockState, Node, Split, TabViewer};
 use types::{
     object_detection::{Object, RobocupObjectLabel, YOLOObjectLabel},
     pose_detection::{
-        FieldFeatureDetection, FieldFeatureLabel, HydraDetectionSupplement, Keypoint,
-        POSE_SKELETON_EDGES, Pose, ROBOT_POSE_SKELETON_EDGES, RobotPoseDetection,
+        FieldFeatureDetection, FieldFeatureLabel, FieldLineDetection, HydraDetectionSupplement,
+        Keypoint, POSE_SKELETON_EDGES, Pose, ROBOT_POSE_SKELETON_EDGES, RobotPoseDetection,
     },
 };
 
@@ -168,7 +168,7 @@ struct ReplayApp {
     show_object_anchors: bool,
     show_field_lines: bool,
     show_raw_hydra_rows: bool,
-    show_hydra_details: bool,
+    show_anchor_details: bool,
     keypoint_confidence_filter: f32,
     camera_zoom: f32,
     camera_pan: Vec2,
@@ -302,7 +302,7 @@ impl ReplayApp {
             show_object_anchors: true,
             show_field_lines: true,
             show_raw_hydra_rows: false,
-            show_hydra_details: false,
+            show_anchor_details: false,
             keypoint_confidence_filter: 0.5,
             camera_zoom: 1.0,
             camera_pan: Vec2::ZERO,
@@ -653,7 +653,7 @@ impl ReplayApp {
             self.show_field_lines,
             egui::Slider::new(&mut self.line_confidence_filter, 0.0..=1.0).text("line confidence"),
         );
-        ui.checkbox(&mut self.show_hydra_details, "Show Hydra row details");
+        ui.checkbox(&mut self.show_anchor_details, "Show object anchor details");
         ui.checkbox(&mut self.show_raw_hydra_rows, "Show raw Hydra head rows");
         ui.add_enabled(
             self.show_raw_hydra_rows,
@@ -745,6 +745,51 @@ impl ReplayApp {
                 ui.collapsing("Failure details", |ui| {
                     ui.add(egui::Label::new(error).selectable(true));
                 });
+            }
+            if !is_recorded {
+                egui::CollapsingHeader::new("FieldLine details")
+                    .id_salt(&key)
+                    .show(ui, |ui| {
+                        let frame = self.selected_frame;
+                        let Some(chunk_start) = run.prediction_chunk_start(frame) else {
+                            ui.label("Prediction unavailable for this frame");
+                            return;
+                        };
+                        let chunk_key = (key.clone(), chunk_start);
+                        if let Some(error) = self.prediction_errors.get(&chunk_key) {
+                            ui.colored_label(Color32::LIGHT_RED, error);
+                            return;
+                        }
+                        let Some(predictions) = self.loaded_prediction_chunks.get(&chunk_key)
+                        else {
+                            self.prediction_loader.request(run.clone(), frame);
+                            ui.spinner();
+                            return;
+                        };
+                        let Some(supplement) = predictions
+                            .get(frame - chunk_start)
+                            .and_then(Option::as_ref)
+                            .and_then(|prediction| prediction.hydra_supplement.as_deref())
+                        else {
+                            ui.label("FieldLine output unavailable for this frame");
+                            return;
+                        };
+                        ui.label(format!("Frame {frame}, FieldLine class 0"));
+                        show_field_line_rows(
+                            ui,
+                            &supplement.lines,
+                            self.line_confidence_filter,
+                            "retained",
+                        );
+                        if self.show_raw_hydra_rows {
+                            show_field_line_rows(
+                                ui,
+                                &supplement.raw_lines,
+                                self.raw_line_confidence_filter,
+                                "raw",
+                            );
+                        }
+                    });
             }
             ui.add_space(6.0);
         }
@@ -1056,7 +1101,7 @@ impl ReplayApp {
                         self.confidence_filter,
                         self.keypoint_confidence_filter,
                         self.line_confidence_filter,
-                        self.show_hydra_details,
+                        self.show_anchor_details,
                     );
                     if self.show_raw_hydra_rows {
                         draw_raw_hydra_rows(
@@ -1067,7 +1112,7 @@ impl ReplayApp {
                             supplement,
                             self.raw_object_confidence_filter,
                             self.raw_line_confidence_filter,
-                            self.show_hydra_details,
+                            self.show_anchor_details,
                         );
                     }
                 }
@@ -1734,23 +1779,12 @@ fn draw_hydra_supplement(
     }
 
     if show_field_lines {
-        let color = Color32::from_rgb(70, 230, 255);
         for line in supplement
             .lines
             .iter()
             .filter(|line| line.bounding_box.confidence >= line_confidence_filter)
         {
-            draw_field_line(
-                &painter,
-                image_rect,
-                scale,
-                line,
-                0.5,
-                color,
-                false,
-                None,
-                show_details,
-            );
+            draw_field_line(&painter, image_rect, scale, line, false);
         }
     }
 }
@@ -1845,85 +1879,68 @@ fn draw_raw_hydra_rows(
         }
     }
 
-    let color = Color32::from_rgb(255, 170, 55);
-    for (row_index, line) in supplement
+    for line in supplement
         .raw_lines
         .iter()
-        .enumerate()
-        .filter(|(_, line)| line.bounding_box.confidence >= line_confidence_filter)
+        .filter(|line| line.bounding_box.confidence >= line_confidence_filter)
     {
-        draw_field_line(
-            &painter,
-            image_rect,
-            scale,
-            line,
-            0.0,
-            color,
-            true,
-            Some(row_index),
-            show_details,
-        );
+        draw_field_line(&painter, image_rect, scale, line, true);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn show_field_line_rows(ui: &mut Ui, lines: &[FieldLineDetection], threshold: f32, kind: &str) {
+    let rows = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.bounding_box.confidence >= threshold);
+    let mut rows = rows.peekable();
+    if rows.peek().is_none() {
+        ui.label(format!("No {kind} rows at this confidence"));
+    }
+    for (index, line) in rows {
+        egui::CollapsingHeader::new(format!(
+            "{kind}[{index}]  score {:.3}",
+            line.bounding_box.confidence
+        ))
+        .id_salt((kind, index))
+        .show(ui, |ui| {
+            for (vertex, keypoint) in line.keypoints.iter().enumerate() {
+                ui.monospace(format!(
+                    "v{vertex}  x={:.2}  y={:.2}  presence={:.3}",
+                    keypoint.point.x(),
+                    keypoint.point.y(),
+                    keypoint.confidence
+                ));
+            }
+        });
+    }
+}
+
 fn draw_field_line(
     painter: &egui::Painter,
     image_rect: Rect,
     scale: Vec2,
-    line: &types::pose_detection::FieldLineDetection,
-    coordinate_shift: f32,
-    color: Color32,
+    line: &FieldLineDetection,
     raw: bool,
-    row_index: Option<usize>,
-    show_details: bool,
 ) {
-    let point_position = |keypoint: Keypoint| {
+    let (coordinate_shift, color, width, radius) = if raw {
+        (0.0, Color32::from_rgb(255, 170, 55), 1.0_f32, 2.0)
+    } else {
+        (0.5, Color32::from_rgb(70, 230, 255), 2.5_f32, 3.0)
+    };
+    let points = line.keypoints.map(|keypoint| {
         image_rect.min
             + vec2(
                 (keypoint.point.x() + coordinate_shift) * scale.x,
                 (keypoint.point.y() + coordinate_shift) * scale.y,
             )
-    };
-    for points in line.keypoints.windows(2) {
-        painter.line_segment(
-            [point_position(points[0]), point_position(points[1])],
-            Stroke::new(if raw { 1.0_f32 } else { 2.5_f32 }, color),
-        );
+    });
+    for segment in points.windows(2) {
+        painter.line_segment([segment[0], segment[1]], Stroke::new(width, color));
     }
-    for (index, keypoint) in line.keypoints.iter().copied().enumerate() {
-        let point = point_position(keypoint);
-        painter.circle_filled(point, if raw { 2.0 } else { 3.0 }, color);
-        if show_details {
-            paint_overlay_text(
-                painter,
-                point + vec2(5.0, 5.0),
-                format!(
-                    "v{index} x={:.2} y={:.2} p={:.3}",
-                    keypoint.point.x(),
-                    keypoint.point.y(),
-                    keypoint.confidence
-                ),
-                color,
-            );
-        }
+    for point in points {
+        painter.circle_filled(point, radius, color);
     }
-    paint_overlay_text(
-        painter,
-        point_position(line.keypoints[0]) + vec2(4.0, -14.0),
-        match row_index {
-            Some(row_index) => format!(
-                "raw[{row_index}] FieldLine class=0 score={:.3}",
-                line.bounding_box.confidence
-            ),
-            None => format!(
-                "{}FieldLine class=0 score={:.3}",
-                if raw { "raw " } else { "" },
-                line.bounding_box.confidence
-            ),
-        },
-        color,
-    );
 }
 
 fn paint_overlay_text(painter: &egui::Painter, position: Pos2, text: String, color: Color32) {

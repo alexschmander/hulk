@@ -64,7 +64,11 @@ The Models tab manages cached runs. Model runs can be renamed, hidden, or perman
 
 The recording and its cache may be synced between machines. Preserve the recording's file size and modification time so the viewer can reuse the bundled index, JPEG proxy, and model runs at the new path. If no matching valid recording cache is available, the tool prints an indexing message and builds the proxy before opening the viewer.
 
-`Show field features` overlays cached field-feature points and is enabled by default. `Show object boxes`, `Show object anchors`, and `Show field lines` control the native Hydra layers independently. Object boxes and anchors share the object display-confidence filter; anchor presence uses the keypoint-confidence filter only for display. Lines have an independent display-confidence filter and their point presences never hide segments. FieldLine bounding boxes are intentionally never drawn; only the five ordered vertices and their connected polyline appear. `Show Hydra row details` labels anchor coordinates/presence, line class/score, and each ordered vertex's coordinates/predicted presence. Presence is a network score, not occlusion ground truth. `Show raw Hydra head rows` exposes pre-threshold and pre-NMS rows with separate object and line score filters; it is disabled by default. `Show robot poses` is also enabled by default; `Show person poses` controls the human-pose overlay. Pose bounding boxes use the display-confidence threshold, while skeleton lines and keypoints use the separate keypoint-confidence threshold. The viewport distinguishes an unavailable Hydra supplement from a present but empty result. Older runs remain usable and report uncaptured outputs as unavailable; prerender them again to populate the new overlays.
+`Show field features` overlays cached field-feature points and is enabled by default. `Show object boxes`, `Show object anchors`, and `Show field lines` control the native Hydra layers independently. Object boxes and anchors share the object display-confidence filter. Anchor presence uses the keypoint-confidence filter for display, and `Show object anchor details` labels its coordinates and presence.
+
+FieldLines use their own score filter and display only the five ordered keypoints and four connecting segments. Under a run in the Models tab, expand `FieldLine details` to inspect class, score, and the ordered coordinates and predicted presence for each row. `Show raw Hydra head rows` exposes pre-threshold and pre-NMS rows with separate object and line score filters. It also adds the original tensor rows to the FieldLine details. Presence is a network score.
+
+`Show robot poses` is enabled by default. `Show person poses` controls the human-pose overlay. Pose bounding boxes use the display-confidence threshold, while skeleton lines and keypoints use the separate keypoint-confidence threshold. The viewport distinguishes an unavailable Hydra supplement from a present but empty result. Older runs remain usable and report uncaptured outputs as unavailable. Prerender them again to populate the Hydra overlays.
 
 Hydra anchors and lines are stored in a versioned sidecar beside each primary prediction chunk. The sidecar has one timestamp-matched supplement per frame and one optional anchor slot per surviving object. The primary object cache layout is unchanged, so existing replay caches remain readable.
 
@@ -101,7 +105,7 @@ Export deterministic visual evidence from the same cached viewer data as SVG:
   --raw --details --object-confidence 0.05 --line-confidence 0.20
 ```
 
-The snapshot overlay follows the viewer's native-coordinate and half-pixel conventions and never draws FieldLine boxes. Raw mode is intended for evidence and diagnostics; normal interactive playback keeps it disabled.
+Snapshots follow the viewer's native-coordinate and half-pixel conventions and draw FieldLines as points and connected segments. `--details` labels object anchors. Raw mode is intended for evidence and diagnostics.
 
 Use a short range before prerendering an entire recording:
 
